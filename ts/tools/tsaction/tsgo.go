@@ -28,6 +28,14 @@ func runTsgo(args []string) error {
 	verifyCopies := flags.Bool("verify-copies", false, "fail if the tool changes a copied input")
 	discoverConfig := flags.String("discover-tsconfig", "", "generated program config exposed to tools that discover tsconfig.json beside sources")
 	var sources, copies, importers, inherited, overlays, manifests, toolEnv, runtimeScopes stringList
+	var editor actionConfig
+	flags.StringVar(&editor.out, "editor-config", "", "compiler project to project for the editor")
+	flags.StringVar(&editor.baseline, "editor-baseline", "", "compiler baseline options")
+	flags.StringVar(&editor.binDir, "editor-bin-dir", "", "compiler output tree")
+	flags.Var(&editor.generatedDirectories, "editor-generated-directory", "workspace-relative generated directory (repeatable)")
+	flags.Var(&editor.generatedFiles, "editor-generated-file", "workspace-relative generated file (repeatable)")
+	editorOut := flags.String("editor-out", "", "compiler-resolved editor project output")
+	flags.StringVar(&editor.editorPath, "editor-path", "", "editor project workspace destination")
 	flags.Var(&sources, "source",
 		"a declared compiler input linked at its logical source path (repeatable)")
 	flags.Var(&toolEnv, "tool-env", "NAME=executable input path, made absolute before entering the program root (repeatable)")
@@ -76,7 +84,7 @@ func runTsgo(args []string) error {
 			}
 		}
 	}
-	err := layOutProgramRoot(*root, sources, importers, inherited, overlays, manifests)
+	err := editor.layOutProgramRoot(*root, sources, importers, inherited, overlays, manifests)
 	if err != nil {
 		return err
 	}
@@ -146,7 +154,10 @@ func runTsgo(args []string) error {
 		}
 		env = append(env, name+"="+absolute)
 	}
-	if own == nil {
+	if editor.out != "" {
+		editor.project = *project
+		err = editorRun(*root, cmdline, editor, *editorOut, env...)
+	} else if own == nil {
 		err = runToolIn(*root, os.Stdout, cmdline, env...)
 	} else {
 		err = checkedRun(*root, cmdline, own, chain, *project, env...)
@@ -365,6 +376,12 @@ func throughRoot(rootAbs, execroot, canonicalExecroot, listed string) string {
 	if !filepath.IsAbs(at) {
 		at = filepath.Join(rootAbs, at)
 	}
+	// Type-package resolution can realpath a source link before listing it.
+	if _, staged := belowLinkedRoot(rootAbs, at); !staged {
+		if rel, ok := belowLinkedRoot(execroot, at); ok {
+			listed = rel
+		}
+	}
 	if root := npmPackageRoot(filepath.ToSlash(at)); root != "" {
 		parent, err := filepath.EvalSymlinks(filepath.Dir(root))
 		if err != nil {
@@ -389,10 +406,22 @@ func throughRoot(rootAbs, execroot, canonicalExecroot, listed string) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(at), target)
 	}
-	if rel, ok := below(execroot, target); ok {
+	if rel, ok := belowLinkedRoot(execroot, target); ok {
 		return rel
 	}
 	return listed
+}
+
+// Compiler paths can bypass a symlinked checkout while source links retain it.
+func belowLinkedRoot(root, target string) (string, bool) {
+	if relative, ok := below(root, target); ok {
+		return relative, true
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false
+	}
+	return below(canonical, target)
 }
 
 func npmPackageRoot(p string) string {
@@ -448,9 +477,38 @@ func compilerPath(file string) string {
 func layOutProgramRoot(
 	root string, sources, importers, inherited, overlays, manifests []string,
 ) error {
+	return (&actionConfig{}).layOutProgramRoot(root, sources, importers, inherited, overlays, manifests)
+}
+
+func (a *actionConfig) layOutProgramRoot(
+	root string, sources, importers, inherited, overlays, manifests []string,
+) error {
 	execroot, err := os.Getwd()
 	if err != nil {
 		return err
+	}
+	a.srcs = sources
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	var editor *editorProjection
+	if a.out != "" {
+		editor = &editorProjection{actionConfig: a, root: rootAbs, workspace: execroot}
+		raw, err := os.ReadFile(a.out)
+		if err != nil {
+			return err
+		}
+		var config tsconfigFile
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return err
+		}
+		editor.compilerOptions = config.CompilerOptions
+		for _, key := range []string{"outDir", "declarationDir"} {
+			if value, ok := config.CompilerOptions[key].(string); ok && value != "" {
+				editor.outputContext = true
+			}
+		}
 	}
 	if err := os.RemoveAll(root); err != nil {
 		return err
@@ -471,11 +529,29 @@ func layOutProgramRoot(
 			continue
 		}
 		sourceFiles[logical] = file
+		if editor != nil && filepath.Base(file) == "package.json" {
+			if err := editor.checkPackageContext(file, file, file); err != nil {
+				return err
+			}
+		}
 		at := filepath.Join(root, filepath.FromSlash(logical))
 		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
 			return err
 		}
 		if err := os.Symlink(filepath.Join(execroot, filepath.FromSlash(file)), at); err != nil {
+			return err
+		}
+	}
+	// Empty parents let the compiler probe scalar identities without staging
+	// their bytes or guessing which extensions its resolver will try.
+	for _, file := range a.generatedFiles {
+		if editor != nil && filepath.Base(file) == "package.json" {
+			source := filepath.Join(a.binDir, file)
+			if err := editor.checkPackageContext(source, source, source); err != nil {
+				return err
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(filepath.FromSlash(file))), 0o755); err != nil {
 			return err
 		}
 	}
@@ -522,9 +598,12 @@ func layOutProgramRoot(
 			return err
 		}
 	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return err
+	if editor != nil {
+		for _, directory := range a.generatedDirectories {
+			if err := editor.checkGeneratedPackageContexts(directory); err != nil {
+				return err
+			}
+		}
 	}
 	for _, encoded := range overlays {
 		var pair []string
@@ -541,7 +620,7 @@ func layOutProgramRoot(
 		if err != nil {
 			return err
 		}
-		if err := overlayPath(root, rootAbs, from, rel, st, sourceFiles, false); err != nil {
+		if err := overlayPath(root, rootAbs, from, rel, st, sourceFiles, false, editor); err != nil {
 			return err
 		}
 	}
@@ -552,7 +631,7 @@ func layOutProgramRoot(
 			return err
 		}
 		rel := filepath.Join(filepath.FromSlash(binRelative(path.Dir(file))), "package.json")
-		if err := overlayPath(root, rootAbs, from, rel, st, sourceFiles, true); err != nil {
+		if err := overlayPath(root, rootAbs, from, rel, st, sourceFiles, true, editor); err != nil {
 			return err
 		}
 	}
@@ -637,10 +716,18 @@ func importerDir(binDir string) string {
 }
 
 // An explicit compiler root must keep the File named by its ownership record.
-func overlayPath(root, rootAbs, from, rel string, st os.FileInfo, sourceFiles map[string]string, replaceManifest bool) error {
+func overlayPath(root, rootAbs, from, rel string, st os.FileInfo, sourceFiles map[string]string, replaceManifest bool, editor *editorProjection) error {
+	if editor != nil && editor.authored(rel) {
+		return nil
+	}
 	if !st.IsDir() {
 		if isJavaScript(filepath.Base(from)) || sourceFiles[filepath.ToSlash(rel)] != "" {
 			return nil
+		}
+		if editor != nil && filepath.Base(rel) == "package.json" {
+			if err := editor.checkPackageNamespace(from, rel); err != nil {
+				return err
+			}
 		}
 		at := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
@@ -690,7 +777,7 @@ func overlayPath(root, rootAbs, from, rel string, st os.FileInfo, sourceFiles ma
 			return err
 		}
 		if err := overlayPath(root, rootAbs, source,
-			filepath.Join(rel, entry.Name()), st, sourceFiles, replaceManifest); err != nil {
+			filepath.Join(rel, entry.Name()), st, sourceFiles, replaceManifest, editor); err != nil {
 			return err
 		}
 	}

@@ -45,6 +45,7 @@ bzl_library(
     name = "tsgo",
     srcs = ["tsgo.bzl"],
     deps = [
+        "//ts/private:editor_path",
         "//ts/private:providers",
         "//ts/private:toolchain",
     ],

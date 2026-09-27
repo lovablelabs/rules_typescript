@@ -88,6 +88,7 @@ load("//ts/private/actions:lint.bzl", "LintConfigInfo", "lint_action")
 load("//ts/private/actions:manifest.bzl", "manifest_action", "runtime_scope_inputs")
 load(
     "//ts/private/actions:tsconfig.bzl",
+    "generated_compiler_inputs",
     "tsconfig_action",
     "write_baseline_tsconfig",
 )
@@ -96,6 +97,7 @@ load(
     "npm_hub_label",
     "ownership_manifest",
     "tsgo_check",
+    "tsgo_editor",
 )
 
 _TS_EXTENSIONS = ["ts", "tsx"]
@@ -1050,12 +1052,18 @@ def compile_program(
 
     # Consumers read the as-built manifest in place of the scope it replaces.
     replaced_scope = manifest_source if manifest and (emit or layout.moved) else None
+    editor_inputs = check_srcs + dts_outputs + published_dts + declaration_links + [
+        src if src.is_source else data_sources.get(src, src)
+        for src in data_srcs
+    ] + as_built + type_inputs + package_scopes
     owners = depset(
         [struct(
             label = label_text(ctx.label),
             files = depset(
                 check_srcs + dts_outputs + published_dts + declaration_links + data_staged + as_built + type_inputs + package_scopes,
             ),
+            source_files = depset([file for file in editor_inputs if file.is_source], order = "postorder"),
+            generated_inputs = depset([file for file in editor_inputs if not file.is_source], order = "postorder"),
             declarations = direct_dts,
             # Borrowed declarations stay at source paths, so consumers without the as-built manifest need the original scope.
             type_inputs = depset(type_inputs + package_scopes, transitive = [direct_dts if emit else depset(check_srcs)], order = "postorder"),
@@ -1111,7 +1119,14 @@ def compile_program(
 
     tsconfig = None
     options_file = None
+    editor_config = None
+    program_inputs = check_srcs + joined + json_srcs + dep_json + dep_manifests
     if needs_config:
+        # Dependency data provenance comes from its owner, not its staged copy.
+        editor_generated = generated_compiler_inputs(
+            check_srcs + joined + json_srcs + dep_manifests,
+            dep_dts_depset,
+        )
         tsgo = tsgo_toolchain_info.tsgo_info
 
         written = tsconfig_action(
@@ -1140,12 +1155,43 @@ def compile_program(
     format_stamp = format_action(ctx, ctx.attr._format[FormatConfigInfo], ctx.files.srcs)
     if format_stamp:
         validation_outputs.append(format_stamp)
-    program_inputs = check_srcs + joined + json_srcs + dep_json + dep_manifests
     generated_srcs = [
         file
         for file in check_srcs + joined + json_srcs + [file for file in compiler_type_files if is_javascript(file)]
         if not file.is_source
     ]
+    if tsconfig and all([
+        getattr(record, "source_files", None) != None and getattr(record, "generated_inputs", None) != None
+        for record in dependency_owners
+    ]):
+        editor_package_scopes = [file for file in data_staged if file.basename == "package.json"]
+        editor_sources = depset(
+            transitive = [record.source_files for record in dependency_owners],
+            order = "postorder",
+        )
+        editor_config = tsgo_editor(
+            ctx,
+            tsgo = tsgo,
+            tsconfig = tsconfig,
+            baseline = baseline_file,
+            generated_inputs = depset(
+                transitive = [editor_generated] + [record.generated_inputs for record in dependency_owners],
+                order = "postorder",
+            ),
+            importers = importers,
+            inherited_importers = inherited_importers,
+            overlays = compiler_overlays,
+            generated_srcs = generated_srcs,
+            manifests = dep_manifests,
+            srcs = program_inputs + editor_package_scopes,
+            chain = tsconfig_chain,
+            dep_dts = depset(
+                transitive = [dep_dts_depset, editor_sources],
+                order = "postorder",
+            ),
+            npm_files = npm_files,
+            checkers = checkers,
+        )
     if program_srcs:
         if emit and compile_srcs:
             emit_action(
@@ -1358,6 +1404,14 @@ def compile_program(
     # resolution with the editor's; a target with no program generates none.
     if tsconfig:
         output_groups["tsconfig"] = depset([tsconfig])
+    if editor_config:
+        output_groups["ide_tsconfig"] = depset([editor_config])
+        output_groups["ide_generated_sources"] = depset(
+            # Passthrough JSON still materializes without becoming a generated identity.
+            [file for file in tsconfig_chain if not file.is_source] + dep_json + editor_package_scopes,
+            transitive = [editor_generated, npm_files],
+            order = "postorder",
+        )
     if validation_outputs:
         output_groups["_validation"] = depset(validation_outputs)
 

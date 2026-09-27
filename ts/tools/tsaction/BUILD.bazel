@@ -7,6 +7,7 @@ go_library(
     name = "tsaction_lib",
     srcs = [
         "check.go",
+        "editor.go",
         "emit.go",
         "exclude.go",
         "main.go",
@@ -38,6 +39,7 @@ go_test(
     srcs = [
         "check_test.go",
         "config_compiler_test.go",
+        "editor_test.go",
         "emit_test.go",
         "exclude_test.go",
         "main_test.go",
@@ -46,9 +48,16 @@ go_test(
         "showconfig_test.go",
         "tsgo_test.go",
     ],
-    data = glob(["testdata/**"]) + ["//ts/toolchain:tsgo_resolved"],
+    data = glob(["testdata/**"]) + [
+        "//tools/copy_to_workspace",
+        "//ts/toolchain:tsgo_resolved",
+    ],
     embed = [":tsaction_lib"],
-    env = {"TSGO_RLOCATION": "$(rlocationpath //ts/toolchain:tsgo_resolved)"},
+    env = {
+        "COPY_TO_WORKSPACE_RLOCATION": "$(rlocationpath //tools/copy_to_workspace)",
+        "TSGO_RLOCATION": "$(rlocationpath //ts/toolchain:tsgo_resolved)",
+    },
+    shard_count = 6,
     deps = [
         "//ts/tools/explainfiles",
         "//ts/tools/tsconfig",

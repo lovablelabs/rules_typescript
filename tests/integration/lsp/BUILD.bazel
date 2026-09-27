@@ -22,5 +22,8 @@ ts_add_package(
 # nothing is nested. `deps` is what the aspect walks.
 ts_refresh_tsconfig(
     name = "refresh_tsconfig",
-    deps = ["//src"],
+    deps = [
+        "//authored/nested",
+        "//src",
+    ],
 )

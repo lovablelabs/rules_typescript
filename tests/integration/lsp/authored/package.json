@@ -1,0 +1,17 @@
+{
+  "name": "authored-fixture",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#authored": {
+      "types": "./value.ts",
+      "default": "./value.ts"
+    }
+  },
+  "exports": {
+    "./value": {
+      "types": "./value.ts",
+      "default": "./value.ts"
+    }
+  }
+}

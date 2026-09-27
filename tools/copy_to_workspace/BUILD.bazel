@@ -1,11 +1,14 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "copy_to_workspace_lib",
     srcs = ["main.go"],
     importpath = "github.com/mikn/rules_typescript/tools/copy_to_workspace",
     visibility = ["//visibility:private"],
-    deps = ["@io_bazel_rules_go//go/runfiles"],
+    deps = [
+        "//ts/tools/tsconfig",
+        "@io_bazel_rules_go//go/runfiles",
+    ],
 )
 
 go_binary(
@@ -13,4 +16,10 @@ go_binary(
     embed = [":copy_to_workspace_lib"],
     pure = "on",
     visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "copy_to_workspace_test",
+    srcs = ["main_test.go"],
+    embed = [":copy_to_workspace_lib"],
 )

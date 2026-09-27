@@ -477,7 +477,7 @@ func (s *programStore) reportUnowned() {
 	listedBy := map[string][]string{}
 	for _, dir := range s.packageDirs() {
 		for f := range s.packages[dir] {
-			listedBy[f] = append(listedBy[f], tsconfigIn(dir))
+			listedBy[f] = append(listedBy[f], s.configPath(dir))
 		}
 	}
 	for _, f := range slices.Sorted(maps.Keys(listedBy)) {
@@ -508,7 +508,7 @@ func (s *programStore) whyUnowned(f string) string {
 	}
 	for ; ; dir = parentDir(dir) {
 		if _, ok := s.packages[dir]; ok {
-			return "no package owns it: " + tsconfigIn(dir) +
+			return "no package owns it: " + s.configPath(dir) +
 				", the nearest, does not list it"
 		}
 		if dir == "" {

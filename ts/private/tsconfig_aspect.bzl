@@ -15,7 +15,8 @@ look.
 """
 
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
-load("//ts/private:providers.bzl", "TsConfigInfo")
+load("//ts/private:editor_path.bzl", "editor_project_path")
+load("//ts/private:providers.bzl", "NpmLinkInfo", "NpmPackageInfo", "TsConfigInfo", "TsInfo", "label_text")
 load(
     "//ts/private:toolchain.bzl",
     "TOOLS_TOOLCHAIN_TYPE",
@@ -24,8 +25,10 @@ load(
 TsconfigSourcesInfo = provider(
     doc = "What a workspace-root tsconfig.json needs from the ts_compile targets under it.",
     fields = {
-        "packages": "depset of struct(path, has_index): package of every ts_compile target reached, and whether it has an index file to name as the package entry point.",
+        "packages": "depset of struct(path, index_origin): package of every ts_compile target reached and its entrypoint origin (authored, generated, or empty).",
         "option_groups": "depset of struct(package, label, options_json, extends, include): the program one target checks under, which the root block cannot carry -- the tsconfig it names, and allowJs for its JavaScript srcs. A target whose tsconfig turns `strict` off or names a `lib` is checked correctly by the build and wrongly by the editor unless the editor gets its own program for those files.",
+        "generated_sources": "depset of File: original generated compiler inputs in the dependency closure, excluding compiler-emitted declarations and manifests.",
+        "unsupported_editor": "depset of string: workspace-member boundaries whose original generated inputs cannot retain checkout identity in an installed editor project.",
     },
 )
 
@@ -47,20 +50,23 @@ WorkspaceCopyInfo = provider(
     },
 )
 
-def _has_index(target, ctx):
+def _index_origin(target, ctx):
     package = target.label.package
+    origin = ""
     for src in getattr(ctx.rule.files, "srcs", []):
         for ext in [".ts", ".tsx", ".mts", ".js", ".mjs"]:
             if src.short_path == package + "/index" + ext:
-                return True
-    return False
+                if src.is_source:
+                    return "authored"
+                origin = "generated"
+    return origin
 
 FRAGMENT_SUFFIX = ".tsconfig-fragment.json"
 
 _FRAGMENT_FORMAT = "tsconfig-fragment-v1"
 
 def _fragment_package(package):
-    return json.encode({"package": package.path, "index": package.has_index})
+    return json.encode({"package": package.path, "index": bool(package.index_origin)})
 
 def _fragment(target, ctx, sources):
     """One JSON object per line, carrying `sources`, for the tsserver hook to merge.
@@ -175,13 +181,46 @@ def _tsconfig_aspect_impl(target, ctx):
         if target.label.package:
             packages = [struct(
                 path = target.label.package,
-                has_index = _has_index(target, ctx),
+                index_origin = _index_origin(target, ctx),
             )]
         option_groups = _option_group(target, ctx)
+
+    original_inputs = []
+    if TsInfo in target:
+        info = target[TsInfo]
+
+        # A generator's declarations are original inputs, not a compiler's emitted outputs.
+        if ctx.rule.kind == "ts_codegen":
+            inputs = info.declarations.to_list()
+        else:
+            inputs = info.sources.to_list() + [
+                file
+                for file in getattr(ctx.rule.files, "srcs", [])
+                if file.extension == "json"
+            ]
+        original_inputs = [file for file in inputs if not file.is_source]
+    generated_sources = depset(
+        original_inputs,
+        transitive = [s.generated_sources for s in inherited],
+        order = "postorder",
+    )
+    unsupported_editor = []
+    if NpmLinkInfo in target:
+        witnesses = generated_sources.to_list()
+        if witnesses:
+            witness = witnesses[0]
+            unsupported_editor = ["'{}' ({}) reaches {} (producer {})".format(
+                target[NpmPackageInfo].package_name,
+                label_text(target.label),
+                witness.short_path,
+                label_text(witness.owner),
+            )]
 
     sources = TsconfigSourcesInfo(
         packages = depset(packages, transitive = [s.packages for s in inherited], order = "postorder"),
         option_groups = depset(option_groups, transitive = [s.option_groups for s in inherited], order = "postorder"),
+        generated_sources = generated_sources,
+        unsupported_editor = depset(unsupported_editor, transitive = [s.unsupported_editor for s in inherited], order = "postorder"),
     )
 
     fragments = [dep[TsconfigFragmentInfo].fragments for dep in reached if TsconfigFragmentInfo in dep]
@@ -224,10 +263,10 @@ def _collect(sources, field):
     return depset(transitive = [getattr(s, field) for s in sources]).to_list()
 
 def _packages(sources):
-    """Every package the aspect reached, and whether any target in it has an index file."""
     indexed = {}
     for package in _collect(sources, "packages"):
-        indexed[package.path] = indexed.get(package.path, False) or package.has_index
+        if package.index_origin == "authored" or not indexed.get(package.path):
+            indexed[package.path] = package.index_origin
     return indexed
 
 _ONE_ANSWER_PER_DIRECTORY = (
@@ -379,11 +418,13 @@ def _ide_tsconfig_impl(ctx):
         # Only a package that has one can name an entry point; the rest are
         # reachable through the wildcard alone.
         if packages[package]:
-            paths[key] = ["./{}/index".format(package)]
+            root = "." if packages[package] == "authored" else bin_dir
+            paths[key] = ["{}/{}/index".format(root, package)]
         paths[key + "/*"] = ["./{}/*".format(package), "{}/{}/*".format(bin_dir, package)]
 
     config = {
         "_comment": _HEADER,
+        "_rules_typescript": "source-aware-paths",
         "compilerOptions": {
             "strict": True,
             "target": _ROOT_TARGET,
@@ -560,8 +601,11 @@ def _rlocation(ctx, file):
     return ctx.workspace_name + "/" + file.short_path
 
 def _refresh_workspace_files_impl(ctx):
+    if not ctx.attr.files and not ctx.attr.editor_projects:
+        fail("refresh_workspace_files needs files or editor_projects. Did you mean to supply files or enable generated_sources?")
     entries = []
     inputs = []
+    generated_inputs = []
     for src, dest in ctx.attr.files.items():
         files = src[DefaultInfo].files.to_list()
         if len(files) != 1:
@@ -574,6 +618,33 @@ def _refresh_workspace_files_impl(ctx):
         for copy in src[WorkspaceCopyInfo].entries.to_list():
             inputs.append(copy.file)
             entries.append({"rlocation": _rlocation(ctx, copy.file), "dest": copy.dest})
+
+    for dep in ctx.attr.editor_projects:
+        unsupported = _collect([dep[TsconfigSourcesInfo]], "unsupported_editor")
+        if unsupported:
+            fail(("{}: generated workspace member cannot retain checkout identity in an editor project:\n  {}\n" +
+                  "Did you mean to use an authored editor project without generated_sources? " +
+                  "Ordinary builds and authored workspace members remain supported.").format(dep.label, "\n  ".join(unsupported)))
+        if OutputGroupInfo not in dep or not hasattr(dep[OutputGroupInfo], "ide_tsconfig"):
+            if OutputGroupInfo in dep and hasattr(dep[OutputGroupInfo], "tsconfig"):
+                fail(("{}: custom TsInfo dependency owners lack editor input provenance. " +
+                      "Did you mean to use an authored editor project without generated_sources? " +
+                      "Ordinary builds and type checking remain supported.").format(dep.label))
+            fail("{} has no compiler program to project. Did you mean to name its owning ts_compile or ts_test target?".format(dep.label))
+        generated_inputs.append(dep[OutputGroupInfo].ide_generated_sources)
+
+        # copy_to_workspace requires one runfile/destination pair per project in its JSON manifest.
+        for file in dep[OutputGroupInfo].ide_tsconfig.to_list():
+            if file.owner.repo_name:
+                fail(("{}: editor project {} has external producing owner {}. " +
+                      "Did you mean to use an authored editor project without generated_sources? " +
+                      "Ordinary builds and type checking remain supported.").format(ctx.label, file.path, file.owner))
+            inputs.append(file)
+            entries.append({
+                "rlocation": _rlocation(ctx, file),
+                "dest": editor_project_path(file.owner.package, file.basename[:-len(".ide.tsconfig.json")]),
+                "output_root": file.root.path,
+            })
 
     manifest = ctx.actions.declare_file(ctx.label.name + ".manifest.json")
     ctx.actions.write(manifest, json.encode(entries))
@@ -589,7 +660,10 @@ def _refresh_workspace_files_impl(ctx):
     return [
         DefaultInfo(
             executable = launcher,
-            runfiles = ctx.runfiles(files = inputs + [manifest]).merge(
+            runfiles = ctx.runfiles(
+                files = inputs + [manifest],
+                transitive_files = depset(transitive = generated_inputs, order = "postorder"),
+            ).merge(
                 tools.default.default_runfiles,
             ),
         ),
@@ -600,12 +674,13 @@ refresh_workspace_files = rule(
     implementation = _refresh_workspace_files_impl,
     executable = True,
     attrs = {
+        "editor_projects": attr.label_list(aspects = [tsconfig_aspect]),
         "files": attr.label_keyed_string_dict(
             doc = """Maps each single-file target to its destination, relative to the workspace root.
 
 A target that also returns WorkspaceCopyInfo contributes the files named there,
 each to the destination that provider carries.""",
-            allow_empty = False,
+            allow_empty = True,
             allow_files = True,
         ),
     },
@@ -648,7 +723,8 @@ def ts_refresh_tsconfig(
         tsconfig = "tsconfig.json",
         extra_exclude = [],
         nested_tsconfigs = [],
-        test = False):
+        test = False,
+        generated_sources = False):
     """Declares the IDE tsconfig, the run target that installs it, and its staleness test.
 
     Args:
@@ -657,7 +733,13 @@ def ts_refresh_tsconfig(
                   `<name>_test`.
         deps:     ts_compile and ts_test targets the IDE should see. The
                   aspect follows `deps` from each one.
-        tsconfig: Where in the workspace the file is written.
+        tsconfig: Where in the workspace the file is written; None preserves authored configs.
+        generated_sources: Materialize generated inputs and compiler-owned editor projects.
+                  Requires tsconfig = None and an authored solution wrapper.
+                  Requires dependency owner provenance only for this opt-in refresh.
+                  Rejects nonempty compilerOptions.moduleSuffixes strings only when
+                  an alias needs exact file projection. Aliases already targeting
+                  canonical output retain native suffix selection.
         extra_exclude:
                   Globs added to the generated `exclude`, for TypeScript trees
                   that are not in this module's build graph. Anchor each with
@@ -676,40 +758,52 @@ def ts_refresh_tsconfig(
         test:     Add a diff_test that fails when `tsconfig` is stale. Turn it
                   on once `tsconfig` is checked in.
     """
-    ide_tsconfig(
-        name = name + ".generated",
-        testonly = True,
-        deps = deps,
-        extra_exclude = extra_exclude,
-        nested_tsconfigs = nested_tsconfigs,
-        tsconfig_path = tsconfig,
-    )
-    for nested in nested_tsconfigs:
-        _nested_tsconfig_file(
-            name = "{}.nested.{}".format(name, nested.replace("/", "_").replace(".", "_")),
+    if generated_sources and tsconfig != None:
+        fail("generated_sources = True requires tsconfig = None. Did you mean to keep an authored tsconfig.json solution wrapper referencing ./.bazel/tsconfig/<target>.json and select tsconfig.build.json with ts_config? See docs/getting-started/ide-setup.md.")
+    if tsconfig == None and (test or nested_tsconfigs):
+        fail("tsconfig = None preserves authored configs. Did you mean to omit test and nested_tsconfigs?")
+    if tsconfig != None:
+        ide_tsconfig(
+            name = name + ".generated",
             testonly = True,
-            generator = ":" + name + ".generated",
-            dest = nested,
+            deps = deps,
+            extra_exclude = extra_exclude,
+            nested_tsconfigs = nested_tsconfigs,
+            tsconfig_path = tsconfig,
         )
-    ide_hook_data(
-        name = name + ".hook_data",
-        testonly = True,
-        deps = deps,
-    )
-    refresh_workspace_files(
-        name = name,
-        testonly = True,
-        files = {
-            ":" + name + ".generated": tsconfig,
+        for nested in nested_tsconfigs:
+            _nested_tsconfig_file(
+                name = "{}.nested.{}".format(name, nested.replace("/", "_").replace(".", "_")),
+                testonly = True,
+                generator = ":" + name + ".generated",
+                dest = nested,
+            )
+    config_files = {}
+    if tsconfig != None:
+        ide_hook_data(
+            name = name + ".hook_data",
+            testonly = True,
+            deps = deps,
+        )
+        config_files[":" + name + ".generated"] = tsconfig
+        config_files |= {
             ":" + name + ".hook_data": ".bazel/tsserver-hook-data.json",
             "@rules_typescript//tools:tsserver-hook.js": ".bazel/tsserver-hook.js",
             "@rules_typescript//tools:tsserver-hook-resolver.js": ".bazel/tsserver-hook-resolver.js",
             "@rules_typescript//tools:tsserver-hook-worker.js": ".bazel/tsserver-hook-worker.js",
+        }
+    if tsconfig != None or generated_sources:
+        config_files |= {
             "@rules_typescript//tools:tsserver-plugin.js": _PLUGIN_DIR + "/index.js",
             "@rules_typescript//tools:tsserver-plugin-package.json": _PLUGIN_DIR + "/package.json",
             "@rules_typescript//tools:tsserver-plugin-resolver": _PLUGIN_DIR + "/tsserver-hook-resolver.js",
             "@rules_typescript//tools:tsserver-plugin-worker": _PLUGIN_DIR + "/tsserver-hook-worker.js",
-        },
+        }
+    refresh_workspace_files(
+        name = name,
+        testonly = True,
+        editor_projects = deps if generated_sources else [],
+        files = config_files,
         visibility = ["//visibility:public"],
     )
     if test:

@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"errors"
+	"github.com/bazelbuild/bazel-gazelle/language"
 	"io/fs"
 	"log"
 	"maps"
@@ -12,8 +13,10 @@ import (
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
+	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
+	bzl "github.com/bazelbuild/buildtools/build"
 
 	"github.com/mikn/rules_typescript/ts/tools/jsonc"
 	"github.com/mikn/rules_typescript/ts/tools/tsconfig"
@@ -275,11 +278,18 @@ func handWrittenTsConfigIn(dir, repoRoot string) string {
 	return filepath.ToSlash(rel)
 }
 
+func isEditorProjectDir(rel string) bool {
+	return strings.Contains("/"+rel+"/", "/.bazel/tsconfig/")
+}
+
 // ---- Configurer implementation ---------------------------------------------
 
 // configureTsConfig is tsLang.Configure for one directory: the parent's config
 // cloned, the codegens declared here, the program listed.
 func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(string) (walk.DirInfo, error)) {
+	if isEditorProjectDir(rel) {
+		return
+	}
 	tc := getConfig(c).clone()
 	tc.programs.recordBuild(c, rel, f)
 
@@ -309,7 +319,6 @@ func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(
 
 	tc.programs.recordEmissionConsumers(c, rel)
 	tc.programs.emission.lock = tc.lock
-	currentDir := filepath.Join(c.RepoRoot, rel)
 	// pnpm installs nothing for a package.json the lockfile has no importer
 	// for, so the project under it is foreign; an importer below ends that.
 	manifest := tc.programs.metadataIdentity(c, path.Join(rel, "package.json"))
@@ -334,16 +343,19 @@ func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(
 		c.Exts[languageName] = tc
 		return
 	}
-	switch tc.programs.metadataIdentity(c, tsconfigIn(rel)) {
+	tc.programs.selectConfig(c, rel, f)
+	switch tc.programs.metadataIdentity(c, tc.programs.configPath(rel)) {
 	case generatedInput, unknownInput:
 		c.Exts[languageName] = tc
 		return
 	}
-	if handWrittenTsConfigIn(currentDir, c.RepoRoot) != "" {
-		err := listTsConfigProgram(c, rel, tc, dirInfo)
-		input := tc.programs.inputs[rel]
-		input.discoveryErr = err
-		tc.programs.inputs[rel] = input
+	if tc.programs.hasAuthoredConfig(c.RepoRoot, rel) {
+		if owner, ok := tc.programs.configOwner(c, tc.programs.configPath(rel)); ok && owner == rel {
+			err := listTsConfigProgram(c, rel, tc, dirInfo)
+			input := tc.programs.inputs[rel]
+			input.discoveryErr = err
+			tc.programs.inputs[rel] = input
+		}
 	} else if manifest == authoredInput {
 		listManifestProgram(c, rel, tc)
 	}
@@ -368,4 +380,59 @@ func typesEntryFiles(resolved *tsconfig.Resolved, rel string) []string {
 		}
 	}
 	return files
+}
+
+func (s *programStore) hasAuthoredConfig(root, rel string) bool {
+	file := filepath.Join(root, filepath.FromSlash(s.configPath(rel)))
+	info, err := os.Stat(file)
+	return err == nil && !info.IsDir() && !isGeneratedTsConfig(file)
+}
+
+func (s *programStore) selectConfig(c *config.Config, rel string, f *rule.File) {
+	if f != nil {
+		for _, r := range f.Rules {
+			if canonicalRule(c, r).Kind() != "ts_config" || r.Name() != tsConfigTargetName || (!r.ShouldKeep() && !attrKept(r, "src")) {
+				continue
+			}
+			literal, ok := r.Attr("src").(*bzl.StringExpr)
+			if !ok {
+				continue
+			}
+			src, err := label.Parse(literal.Value)
+			if err != nil || literal.Value == "" {
+				continue
+			}
+			src = sourceLabelIdentity(src.Abs(c.RepoName, rel), language.GenerateArgs{Config: c, Rel: rel})
+			if src.Repo == "" {
+				src.Repo = c.RepoName
+			}
+			if src.Canonical || src.Repo != c.RepoName || src.Pkg != rel || slices.ContainsFunc(f.Rules, func(other *rule.Rule) bool { return other.Name() == src.Name }) {
+				continue
+			}
+			s.configs[rel] = path.Join(src.Pkg, src.Name)
+		}
+	}
+}
+
+func (s *programStore) readSelectedConfig(c *config.Config, rel string) bool {
+	if _, known := s.configs[rel]; known {
+		return true
+	}
+	root := c.RepoRoot
+	if c.ReadBuildFilesDir != "" {
+		root = c.ReadBuildFilesDir
+	}
+	for _, name := range c.ValidBuildFileNames {
+		filename := filepath.Join(root, filepath.FromSlash(rel), name)
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			continue
+		}
+		file, err := rule.LoadFile(filename, rel)
+		if err != nil {
+			log.Fatalf("typescript: reading selected config owner %s: %v", filename, err)
+		}
+		s.selectConfig(c, rel, file)
+		return true
+	}
+	return false
 }

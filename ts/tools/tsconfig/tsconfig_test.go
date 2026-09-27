@@ -2,6 +2,7 @@ package tsconfig
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -52,11 +53,36 @@ func TestResolve_ExtendsBase(t *testing.T) {
 	write(t, leaf, `{"extends": "../../packages/tsconfig-base/tsconfig.json"}`)
 
 	got := mustResolve(t, leaf)
-	if want := map[string][]string{"@/*": {"src/*"}}; !reflect.DeepEqual(got.Paths, want) {
+	if want := (&Paths{{"@/*", []string{"src/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
 	if want := filepath.Dir(base); got.PathsDir != want {
 		t.Errorf("PathsDir = %q, want the base's directory %q", got.PathsDir, want)
+	}
+}
+
+func TestResolve_AliasOrderSurvivesWholeOptionInheritance(t *testing.T) {
+	for _, test := range []struct {
+		name, leaf, paths, directory string
+	}{
+		{"inherited", ``, `{"#x/*z":["authored/*"],"#x/*":["other/*"]}`, "base"},
+		{"replaced", `,"compilerOptions":{"paths":{"#q/*z":["first/*"],"#q/*":["second/*"]}}`, `{"#q/*z":["first/*"],"#q/*":["second/*"]}`, "app"},
+		{"empty", `,"compilerOptions":{"paths":{}}`, `{}`, "app"},
+		{"null", `,"compilerOptions":{"paths":null}`, `{"#x/*z":["authored/*"],"#x/*":["other/*"]}`, "base"},
+		{"duplicate_keeps_first_position", `,"compilerOptions":{"paths":{"#q/*z":["old/*"],"#q/*":["second/*"],"#q/*z":["new/*"]}}`, `{"#q/*z":["new/*"],"#q/*":["second/*"]}`, "app"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := t.TempDir()
+			write(t, filepath.Join(repo, "older/config.json"), `{"compilerOptions":{"paths":{"#old/*":["old/*"]}}}`)
+			write(t, filepath.Join(repo, "base/config.json"), `{"compilerOptions":{"paths":{"#x/*z":["authored/*"],"#x/*":["other/*"],},}}`)
+			leaf := filepath.Join(repo, "app/tsconfig.json")
+			write(t, leaf, `{"extends":["../older/config.json","../base/config.json"]`+test.leaf+`}`)
+			resolved := mustResolve(t, leaf)
+			encoded, err := json.Marshal(resolved.Paths)
+			if err != nil || string(encoded) != test.paths || resolved.PathsDir != filepath.Join(repo, test.directory) {
+				t.Fatalf("paths lost order or writer identity: %s in %s, %v", encoded, resolved.PathsDir, err)
+			}
+		})
 	}
 }
 
@@ -73,7 +99,7 @@ func TestResolve_LeafReplacesTheWholeKey(t *testing.T) {
 }`)
 
 	got := mustResolve(t, leaf)
-	if want := map[string][]string{"@/*": {"app/*"}}; !reflect.DeepEqual(got.Paths, want) {
+	if want := (&Paths{{"@/*", []string{"app/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
 	if want := filepath.Dir(leaf); got.PathsDir != want {
@@ -104,7 +130,7 @@ func TestResolve_ExtendsArrayLastWins(t *testing.T) {
 	if want := (Extends{"./a", "./b.json"}); !reflect.DeepEqual(got.Extends, want) {
 		t.Errorf("leaf extends = %v, want %v", got.Extends, want)
 	}
-	if want := map[string][]string{"@/*": {"b/*"}}; !reflect.DeepEqual(got.Paths, want) {
+	if want := (&Paths{{"@/*", []string{"b/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
 }
@@ -142,7 +168,7 @@ func TestResolve_PackageFormExtendsIsSkippedAndSaidOnce(t *testing.T) {
 
 	var got *Resolved
 	first := captureLog(t, func() { got = mustResolve(t, leaf) })
-	if want := map[string][]string{"@/*": {"src/*"}}; !reflect.DeepEqual(got.Paths, want) {
+	if want := (&Paths{{"@/*", []string{"src/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
 	if !strings.Contains(first, `"@tsconfig/said-once/tsconfig.json"`) {
@@ -168,7 +194,7 @@ func TestResolve_CycleTerminates(t *testing.T) {
 	}()
 	select {
 	case got := <-done:
-		if want := map[string][]string{"@/*": {"src/*"}}; !reflect.DeepEqual(got.Paths, want) {
+		if want := (&Paths{{"@/*", []string{"src/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 			t.Errorf("Paths = %v, want %v", got.Paths, want)
 		}
 	case <-time.After(10 * time.Second):
@@ -188,7 +214,7 @@ func TestResolve_DiamondReReadsTheSharedBase(t *testing.T) {
 	write(t, leaf, `{"extends": ["./a.json", "./middle.json", "./b.json"]}`)
 
 	got := mustResolve(t, leaf)
-	if want := map[string][]string{"@/*": {"shared/*"}}; !reflect.DeepEqual(got.Paths, want) {
+	if want := (&Paths{{"@/*", []string{"shared/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
 }
@@ -210,7 +236,7 @@ func TestResolve_JSONC(t *testing.T) {
 `)
 
 	got := mustResolve(t, leaf)
-	want := map[string][]string{"@/*": {"./*"}, "@components/*": {"components/*"}}
+	want := &Paths{{"@/*", []string{"./*"}}, {"@components/*", []string{"components/*"}}}
 	if got.BaseURL != "src" || !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("BaseURL = %q, Paths = %v; want \"src\", %v", got.BaseURL, got.Paths, want)
 	}
@@ -330,7 +356,7 @@ func TestResolve_LeafFailsBaseIsSkipped(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if want := map[string][]string{"@/*": {"src/*"}}; !reflect.DeepEqual(got.Paths, want) {
+	if want := (&Paths{{"@/*", []string{"src/*"}}}); !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
 	for _, spec := range []string{`"./broken.json"`, `"./gone.json"`} {

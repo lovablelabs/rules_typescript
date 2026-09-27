@@ -1838,7 +1838,7 @@ func compilerConfigSource(c *config.Config, selected, owner string,
 		}
 		if r == nil {
 			if configLabel.Name == tsConfigTargetName && s.programs[configLabel.Pkg] != nil {
-				return tsconfigIn(configLabel.Pkg)
+				return s.configPath(configLabel.Pkg)
 			}
 			return path.Join(configLabel.Pkg, configLabel.Name)
 		}
@@ -1846,9 +1846,8 @@ func compilerConfigSource(c *config.Config, selected, owner string,
 		switch r.Kind() {
 		case "ts_config":
 			selected = r.AttrString("src")
-			if input := s.inputs[owner]; input.program != nil && !input.program.manifest &&
-				r.Name() == tsConfigTargetName && !r.ShouldKeep() && !attrKept(r, "src") {
-				selected = "tsconfig.json"
+			if input := s.inputs[owner]; input.program != nil && !input.program.manifest && r.Name() == tsConfigTargetName {
+				selected = strings.TrimPrefix(s.configPath(owner), owner+"/")
 			}
 		case "alias":
 			selected = r.AttrString("actual")

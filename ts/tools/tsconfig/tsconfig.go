@@ -3,9 +3,11 @@
 package tsconfig
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,14 +29,111 @@ type File struct {
 
 // CompilerOptions is the part of compilerOptions this ruleset reads.
 type CompilerOptions struct {
-	BaseURL string              `json:"baseUrl"`
-	Paths   map[string][]string `json:"paths"`
+	BaseURL string `json:"baseUrl"`
+	Paths   *Paths `json:"paths"`
 	// A pointer because "types": [] and no "types" key at all mean opposite
 	// things to tsc: none, versus every @types package in scope.
 	Types           *[]string `json:"types"`
 	Jsx             string    `json:"jsx"`
 	JsxImportSource string    `json:"jsxImportSource"`
 	Module          string    `json:"module"`
+}
+
+// Paths keeps authored order because TypeScript chooses the first equal-prefix pattern.
+type Paths []Path
+
+type Path struct {
+	Key    string
+	Values []string
+}
+
+func (p *Paths) Entries() iter.Seq2[string, []string] {
+	return func(yield func(string, []string) bool) {
+		if p != nil {
+			for _, entry := range *p {
+				if !yield(entry.Key, entry.Values) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (p *Paths) Index(key string) int {
+	if p != nil {
+		for i, entry := range *p {
+			if entry.Key == key {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func (p *Paths) Get(key string) []string {
+	if i := p.Index(key); i >= 0 {
+		return (*p)[i].Values
+	}
+	return nil
+}
+
+func (p *Paths) Set(key string, values []string) {
+	if i := p.Index(key); i >= 0 {
+		(*p)[i].Values = values
+	} else {
+		*p = append(*p, Path{Key: key, Values: values})
+	}
+}
+
+func (p *Paths) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != json.Delim('{') {
+		return errors.New("paths must be an object")
+	}
+	decoded := Paths{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		var values []string
+		if err := decoder.Decode(&values); err != nil {
+			return err
+		}
+		decoded.Set(key.(string), values)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	*p = decoded
+	return nil
+}
+
+func (p Paths) MarshalJSON() ([]byte, error) {
+	var out bytes.Buffer
+	out.WriteByte('{')
+	for i, entry := range p {
+		if i != 0 {
+			out.WriteByte(',')
+		}
+		key, err := json.Marshal(entry.Key)
+		if err != nil {
+			return nil, err
+		}
+		values, err := json.Marshal(entry.Values)
+		if err != nil {
+			return nil, err
+		}
+		out.Write(key)
+		out.WriteByte(':')
+		out.Write(values)
+	}
+	out.WriteByte('}')
+	return out.Bytes(), nil
 }
 
 // Extends is the list of configs a tsconfig inherits from, written as one
@@ -72,10 +171,12 @@ func Read(path string) (*File, error) {
 // writer's directory because a relative value resolves against that file, not the leaf.
 type Resolved struct {
 	// Extends belongs to the leaf and is not inherited.
-	Extends         Extends
+	Extends Extends
+	// Configs names the files read in extends order, including overridden bases and the leaf.
+	Configs         []string
 	BaseURL         string
 	BaseURLDir      string
-	Paths           map[string][]string
+	Paths           *Paths
 	PathsDir        string
 	Types           *[]string
 	Jsx             string
@@ -143,6 +244,7 @@ func resolve(path string, ancestors map[string]bool, admit func(string) error) (
 		resolved.override(base)
 	}
 	resolved.override(&Resolved{
+		Configs:         []string{path},
 		BaseURL:         f.CompilerOptions.BaseURL,
 		BaseURLDir:      dir,
 		Paths:           f.CompilerOptions.Paths,
@@ -162,6 +264,7 @@ func resolve(path string, ancestors map[string]bool, admit func(string) error) (
 }
 
 func (r *Resolved) override(other *Resolved) {
+	r.Configs = append(r.Configs, other.Configs...)
 	if other.BaseURL != "" {
 		r.BaseURL, r.BaseURLDir = other.BaseURL, other.BaseURLDir
 	}

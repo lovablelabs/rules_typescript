@@ -25,7 +25,8 @@ func runMainProcess(t *testing.T, args ...string) (string, int) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(binary, append([]string{"-test.run=^TestMainProcess$", "--"}, args...)...)
-	cmd.Env = append(os.Environ(), "TSACTION_TEST_PROCESS=1")
+	// rules_go filters shards before applying -test.run.
+	cmd.Env = append(os.Environ(), "TSACTION_TEST_PROCESS=1", "TEST_TOTAL_SHARDS=1")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return string(out), 0

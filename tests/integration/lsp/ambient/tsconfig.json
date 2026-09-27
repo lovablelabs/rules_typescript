@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "Preserve",
+    "moduleResolution": "Bundler"
+  },
+  "files": ["src/generated/authored.d.ts"],
+  "include": ["src/**/*.ts"]
+}

@@ -1,0 +1,16 @@
+import { generatedValue } from "#generated/value";
+import type { first } from "#types/first";
+import type { z } from "zod";
+export const value: typeof first = generatedValue;
+export const npmValue: z.infer<z.ZodString> = value;
+import { generatedValue as orderedValue } from "#ordered/value";
+import { generatedValue as specificValue } from "#specific/value";
+export const ordered: "authored" = orderedValue;
+export const specific: "override" = specificValue;
+import { authoredValue } from "../authored/value";
+import settings from "../authored/settings.json";
+import schema from "#schema";
+export const authored: string = authoredValue;
+export const setting: string = settings.value;
+export const current: string = schema.current;
+export const globalFirst: GeneratedGlobals["first"] = "first";

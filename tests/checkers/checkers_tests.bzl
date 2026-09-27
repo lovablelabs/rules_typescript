@@ -1,11 +1,12 @@
-"""--//ts:checkers=N puts --checkers N on TsgoCheck's tsgo command line and
--checkers=N on TsgoDeclare's tsaction emit, which hands tsgo --checkers N; at
-0, the default, tsgo's thread count is its own. The cpu:N requirement the same
-actions carry is aquery's to show: Starlark's Action has no execution_info."""
+"""--//ts:checkers=N puts --checkers N on TsgoCheck's and TsIdeProject's tsgo
+command lines and -checkers=N on TsgoDeclare's tsaction emit, which hands tsgo
+--checkers N; at 0, the default, tsgo's thread count is its own. The cpu:N
+requirement the same actions carry is aquery's to show: Starlark's Action has
+no execution_info."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 
-_TSGO = ["TsgoCheck", "TsgoDeclare"]
+_TSGO = ["TsgoCheck", "TsgoDeclare", "TsIdeProject"]
 
 def _tsgo_actions(env):
     return {

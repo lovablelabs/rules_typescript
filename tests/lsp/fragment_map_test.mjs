@@ -163,31 +163,39 @@ function runWorker(root) {
     });
     let log = '';
     let map = null;
+    let stopping = false;
+    const startupLogged = () =>
+      map && log.includes(`initial resolution map: ${Object.keys(map).length} entries\n`);
+    const stopWhenReady = () => {
+      if (stopping || !startupLogged()) return;
+      stopping = true;
+      worker.terminate();
+    };
     worker.stderr.on('data', (chunk) => {
       log += chunk;
+      stopWhenReady();
     });
     const timeout = setTimeout(() => {
       worker.terminate();
       reject(new Error(`worker sent no resolution map within 60s for ${root}`));
     }, 60000);
     worker.on('error', (err) => {
-      clearTimeout(timeout);
       reject(err);
     });
     worker.once('message', (msg) => {
-      clearTimeout(timeout);
       if (msg.type !== 'resolution-map') {
         reject(new Error(`unexpected message type ${msg.type}`));
+        worker.terminate();
         return;
       }
       map = msg.data;
+      stopWhenReady();
     });
-    // The log is only whole once the worker's stderr stream has ended, and
-    // terminate() drops whatever is still buffered. Its watches are
-    // `persistent: false`, so it exits on its own once the map is posted.
+    // The final startup record follows the fragment count; termination can truncate later stderr.
     worker.on('exit', () => {
-      if (map) resolve({ map, log });
-      else reject(new Error(`worker exited without posting a map for ${root}`));
+      clearTimeout(timeout);
+      if (startupLogged()) resolve({ map, log });
+      else reject(new Error(`worker exited without its initial map and startup log for ${root}`));
     });
   });
 }

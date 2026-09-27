@@ -109,6 +109,7 @@ var checkGroups = map[string]func(it *harness.IT, foreignExports string){
 	"roots_helpers":         rootsHelpersChecks,
 	"roots_identity":        rootsIdentityChecks,
 	"incremental":           incrementalChecks,
+	"generated_member":      generatedMemberChecks,
 	"warmup":                warmupChecks,
 }
 
@@ -391,6 +392,10 @@ func warmupChecks(it *harness.IT, _ string) {
 		it.MustBazel(append([]string{"build", runfiles}, targets...)...)
 		it.Pass("every test target builds with %s", runfiles)
 	}
+}
+
+func generatedMemberChecks(it *harness.IT, _ string) {
+	it.Check("generatedWorkspaceMemberCannotPublishCheckoutProjection", func() { generatedWorkspaceMemberCannotPublishCheckoutProjection(it) })
 }
 
 func incrementalChecks(it *harness.IT, _ string) {
@@ -4534,6 +4539,164 @@ func memberByNameIsTheHubView(it *harness.IT) {
 		"the member's consumer did not compile against the view")
 	it.Pass("the test compiled and ran under `bazel test //...` above, " +
 		"through the importer's link")
+}
+
+func generatedWorkspaceMemberCannotPublishCheckoutProjection(it *harness.IT) {
+	originals := map[string]string{}
+	for _, rel := range []string{"packages/shared/BUILD.bazel", "packages/shared/package.json", "packages/shared/tsconfig.json", "packages/shared/src/index.ts", "member/BUILD.bazel"} {
+		originals[rel] = it.Read(it.Path(rel))
+	}
+	defer func() {
+		for rel, contents := range originals {
+			it.Write(it.Path(rel), contents)
+		}
+		for _, rel := range []string{"packages/shared/generated", "packages/shared/src/settings.json", "packages/shared/names.txt", "member/projection.ts", "member/indirect.ts"} {
+			if err := os.RemoveAll(it.Path(rel)); err != nil {
+				it.Fail("cannot restore workspace member fixture %s: %v", rel, err)
+			}
+		}
+	}()
+	const sharedProgram = `ts_compile(
+    name = "shared",
+    emit = True,
+    srcs = ["%s", "src/settings.json", "package.json"],
+    tsconfig = ":tsconfig",
+    deps = %s,
+)
+
+ts_config(name = "tsconfig", src = "tsconfig.json", deps = ["//:tsconfig"])
+`
+	const sharedLoads = `load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_typescript//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_config")
+
+package(default_visibility = ["//visibility:public"])
+
+`
+	it.Write(it.Path("member/BUILD.bazel"), `load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_typescript//ts:defs.bzl", "ts_compile", "ts_refresh_tsconfig")
+
+ts_compile(
+    name = "projection",
+    srcs = ["projection.ts"],
+    deps = ["//:node_modules/shared"],
+    node_modules = "//:node_modules",
+    tsconfig = "//:tsconfig",
+)
+
+ts_compile(
+    name = "indirect",
+    srcs = ["indirect.ts"],
+    deps = [":projection"],
+    node_modules = "//:node_modules",
+    tsconfig = "//:tsconfig",
+)
+
+write_file(name = "direct_input", out = "generated/direct.ts", content = ["export const value: string = 'direct';"])
+ts_compile(name = "direct_generated", srcs = [":direct_input"], tsconfig = "//:tsconfig")
+ts_refresh_tsconfig(name = "refresh_direct", deps = [":direct_generated"], generated_sources = True, tsconfig = None)
+ts_refresh_tsconfig(name = "refresh_member", deps = [":projection"], generated_sources = True, tsconfig = None)
+ts_refresh_tsconfig(name = "refresh_indirect", deps = [":indirect"], generated_sources = True, tsconfig = None)
+`)
+	const projection = "import {name} from 'shared';\nexport const value: 'generated' = name;\n"
+	it.Write(it.Path("member/projection.ts"), projection)
+	it.Write(it.Path("member/indirect.ts"), "import {value} from './projection.js';\nexport const indirect: 'generated' = value;\n")
+	it.Write(it.Path("packages/shared/package.json"), `{"name":"shared","version":"0.0.0","private":true,"exports":{".":"./generated/index.js"}}`+"\n")
+	it.Write(it.Path("packages/shared/src/settings.json"), "{\"name\":\"generated\"}\n")
+	it.Write(it.Path("packages/shared/generated/index.ts"), "import settings from '../src/settings.json';\nexport const name = settings.name as 'generated';\n")
+	it.Write(it.Path("packages/shared/BUILD.bazel"), sharedLoads+fmt.Sprintf(sharedProgram, "generated/index.ts", "[]"))
+	it.MustBazel("build", "//member:indirect", "//member:direct_generated", "--output_groups=+_validation")
+	it.MustBazel("run", "//member:refresh_direct")
+	it.RequireContains(it.Path("member/.bazel/tsconfig/direct_generated.json"), "generated/direct.ts", "direct generated source was omitted from its editor project")
+	it.Pass("direct generated sources remain supported outside workspace member links")
+	for _, target := range []string{"refresh_member", "refresh_indirect"} {
+		it.MustBazel("run", "//member:"+target)
+	}
+	it.Pass("authored workspace member refresh installs direct and transitive consumer projects despite emitted declarations and staged JSON")
+	installed := map[string]string{}
+	for _, rel := range []string{"member/.bazel/tsconfig/projection.json", "member/.bazel/tsconfig/indirect.json"} {
+		installed[rel] = it.Read(it.Path(rel))
+	}
+	for _, tc := range []struct {
+		name, entry, deps, rules, config, source, consumer, witness, stalePath, stale string
+	}{
+		{
+			name: "scalar", entry: "generated/index.ts", deps: "[]",
+			rules:   `write_file(name = "generated_entry", out = "generated/index.ts", content = ["export const name: 'generated' = 'generated';"])` + "\n",
+			config:  originals["packages/shared/tsconfig.json"],
+			witness: "packages/shared/generated/index.ts", stalePath: "generated/index.ts",
+			stale: "export const name: 'stale' = 'stale';\n",
+		},
+		{
+			name: "json", entry: "generated/schema.json", deps: "[]",
+			rules:    `write_file(name = "generated_schema", out = "generated/schema.json", content = ["{\"name\":\"generated\"}"])` + "\n",
+			config:   originals["packages/shared/tsconfig.json"],
+			consumer: "import schema from 'shared';\nexport const value = schema.name.toUpperCase() as 'generated';\n",
+			witness:  "packages/shared/generated/schema.json", stalePath: "generated/schema.json",
+			stale: "{\"stale\":true}\n",
+		},
+		{
+			name: "tree_dependency", entry: "src/index.ts", deps: `[":tree"]`,
+			rules: `ts_codegen(
+    name = "tree",
+    srcs = ["names.txt"],
+    args = ["--names", "{srcs}", "--outdir", "{out}"],
+    generator = "//:tree_gen",
+    out_dir = "generated",
+)
+`,
+			config:  `{"extends":"../../tsconfig.json","compilerOptions":{"paths":{"@generated":["./generated/index.d.ts"]}}}` + "\n",
+			source:  "import {name as generated} from '@generated';\nexport const name: 'generated' = generated(1) as 'generated';\n",
+			witness: "packages/shared/generated", stalePath: "generated/index.d.ts",
+			stale: "export declare const name: number;\n",
+		},
+	} {
+		it.Write(it.Path("packages/shared/BUILD.bazel"), sharedLoads+fmt.Sprintf(sharedProgram, tc.entry, tc.deps)+tc.rules)
+		it.Write(it.Path("packages/shared/tsconfig.json"), tc.config)
+		it.Write(it.Path("packages/shared/package.json"), fmt.Sprintf("{\"name\":\"shared\",\"version\":\"0.0.0\",\"private\":true,\"exports\":{\".\":\"./%s\"}}\n", strings.Replace(tc.entry, ".ts", ".js", 1)))
+		it.Write(it.Path("packages/shared/names.txt"), "name\n")
+		consumer := tc.consumer
+		if consumer == "" {
+			consumer = projection
+		}
+		it.Write(it.Path("member/projection.ts"), consumer)
+		if tc.source != "" {
+			it.Write(it.Path("packages/shared/src/index.ts"), tc.source)
+		}
+		for _, checkout := range []string{"absent", "stale"} {
+			if err := os.RemoveAll(it.Path("packages/shared/generated")); err != nil {
+				it.Fail("cannot remove checkout twin: %v", err)
+			}
+			if checkout == "stale" {
+				it.Write(it.Path("packages/shared", tc.stalePath), tc.stale)
+			}
+			it.MustBazel("build", "//packages/shared:shared", "//member:indirect", "--output_groups=+_validation,+declarations")
+			it.Pass("%s %s workspace member compiles through its declared store", tc.name, checkout)
+			authored := map[string]string{}
+			for _, rel := range []string{"tsconfig.json", "member/tsconfig.json", "packages/shared/tsconfig.json", "packages/shared/package.json"} {
+				authored[rel] = it.Read(it.Path(rel))
+			}
+			for _, target := range []string{"refresh_member", "refresh_indirect"} {
+				log, err := it.BazelLog("generated_member_"+tc.name+"_"+checkout+"_"+target, "run", "//member:"+target)
+				if err == nil {
+					it.Fail("%s %s %s published a checkout projection for a generated workspace member", tc.name, checkout, target)
+				}
+				for _, want := range []string{"generated workspace member", "shared", "//:node_modules/shared", tc.witness, "authored editor project without generated_sources"} {
+					if !log.Contains(want) {
+						log.Dump()
+						it.Fail("%s %s %s failed without the member provenance refusal %q", tc.name, checkout, target, want)
+					}
+				}
+				for _, snapshot := range []map[string]string{installed, authored} {
+					for rel, before := range snapshot {
+						if it.Read(it.Path(rel)) != before {
+							it.Fail("refused generated member refresh changed %s", rel)
+						}
+					}
+				}
+				it.Pass("%s %s %s refuses generated workspace member without changing installed or authored projects", tc.name, checkout, target)
+			}
+		}
+	}
 }
 
 // dotdot/inner imports "..", the package above: the listing resolves the

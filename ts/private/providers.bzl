@@ -70,7 +70,13 @@ store; a workspace member's hub view forwards the member's.
                   "record per first-party target in the closure, this one " +
                   "first -- the label a deps list writes, the sources, " +
                   "declarations, data and manifest as built it stages, and " +
-                  "its declarations, consumer type inputs and npm importer directories. The tsgo action names the owner " +
+                  "its declarations, consumer type inputs and npm importer directories. " +
+                  "Optional source_files and generated_inputs depsets enable generated editor projects; " +
+                  "absent or None provenance leaves ordinary compilation supported. " +
+                  "source_files holds authored inputs, including originals behind " +
+                  "data passthroughs; generated_inputs holds " +
+                  "generated checkout-exclusion identities, including original " +
+                  "sources behind emitted declarations, without requesting their outputs. The tsgo action names the owner " +
                   "of a listed file from `files`; a consumer's program " +
                   "reads every record's `type_inputs`; when it holds a dep " +
                   "as sources, only that dep's declarations are replaced. " +
@@ -125,7 +131,9 @@ def ts_info(
         transitive_es_twins = _EMPTY,
         npm_packages = _EMPTY,
         npm_files = _EMPTY,
-        label = None):
+        label = None,
+        source_files = None,
+        generated_inputs = None):
     """A TsInfo for a target without first-party deps: each closure it
     leaves unsaid is the direct set, and `label` makes it the one owner."""
     owners = _EMPTY
@@ -142,6 +150,8 @@ def ts_info(
             type_inputs = declarations,
             runtime_files = tuple([(file, file) for file in runtime_files]),
             importers = (),
+            source_files = source_files,
+            generated_inputs = generated_inputs,
         )])
     return TsInfo(
         js = js,

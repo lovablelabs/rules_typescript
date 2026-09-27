@@ -30,6 +30,7 @@ The last three get node from the JS runtime toolchain and typescript from the
 lockfile via :node_modules, so they need nothing from the host.
 """
 
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//npm:defs.bzl", "node_modules")
 load("//ts:defs.bzl", "ts_compile")
@@ -52,6 +53,18 @@ node_modules(
     testonly = True,
     hoist = "//tests/npm:node_modules/.pnpm/node_modules",
     deps = ["@npm//:typescript"],
+)
+
+filegroup(
+    name = "generated_editor_runtime",
+    testonly = True,
+    srcs = [
+        "generated_editor_test.mjs",
+        "tsserver_client.mjs",
+        ":node_modules",
+        "//ts/toolchain:node_resolved",
+    ],
+    visibility = ["//tests/integration:__pkg__"],
 )
 
 sh_test(
@@ -130,12 +143,34 @@ sh_test(
     size = "small",
     srcs = ["test_tsserver_plugin.sh"],
     data = [
+        "tsserver_client.mjs",
         "tsserver_plugin_test.mjs",
+        ":generated_entrypoint_config",
         ":node_modules",
         "//:refresh_tsconfig",
         "//ts/toolchain:node_resolved",
     ],
     deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+write_file(
+    name = "generated_entrypoint_source",
+    testonly = True,
+    out = "index.ts",
+    content = ["export const generated: number = 1;"],
+)
+
+ts_compile(
+    name = "generated_entrypoint",
+    testonly = True,
+    srcs = [":generated_entrypoint_source"],
+    emit = False,
+)
+
+ide_tsconfig(
+    name = "generated_entrypoint_config",
+    testonly = True,
+    deps = [":generated_entrypoint"],
 )
 
 # ── What the generated tsconfig says about npm ────────────────────────────────

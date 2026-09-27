@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "ESNext",
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "paths": {
+      "authored": ["./generated/types/removed.d.ts"],
+      "authored/*": ["./generated/types/*"],
+      "#schema": ["./generated/schema.json"],
+      "#generated/*": ["./generated/*"],
+      "#types/*": ["./generated/types/*"],
+      "#ordered/*": ["./authored/*", "./generated/*"],
+      "#specific/*": ["./generated/*"],
+      "#specific/value": ["./override.ts"]
+    }
+  },
+  "include": [
+    "consumer.ts",
+    "standalone.test.ts",
+    "generated/**/*.ts",
+    "override.ts",
+    "authored/**/*.ts"
+  ]
+}

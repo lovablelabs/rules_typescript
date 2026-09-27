@@ -39,7 +39,7 @@ func TestResolutionTraceKeepsCandidatesOutOfListedFilesAndEdges(t *testing.T) {
 				if state == "present" {
 					writeFile(t, filepath.Join(root, "generated/missing", test.chosen), "export type Value = string;\n")
 				}
-				p, err := listProgram(root, "app", tsgo)
+				p, err := listProgram(root, "app/tsconfig.json", tsgo)
 				if err != nil {
 					t.Fatal(err)
 				}

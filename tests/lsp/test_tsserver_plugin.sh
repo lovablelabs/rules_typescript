@@ -28,6 +28,7 @@ NODE="$(runfile ts/toolchain/node_resolved/node)"
 PLUGIN_TEST_MJS="$(runfile tests/lsp/tsserver_plugin_test.mjs)"
 NODE_MODULES="$(runfile tests/lsp/node_modules)"
 REFRESH="$(runfile refresh_tsconfig)"
+GENERATED_ENTRYPOINT_CONFIG="$(runfile tests/lsp/generated_entrypoint_config.json)"
 [[ -d "${NODE_MODULES}" ]] || fail "not a node_modules tree: ${NODE_MODULES}"
 
 echo "INFO: node $("${NODE}" --version)"
@@ -53,4 +54,4 @@ echo "INFO: staged $(wc -l < "${TEST_TMPDIR}/copied.txt") files into ${WORKSPACE
 # The marker the plugin walks up to find, and which the manifest does not carry.
 touch "${WORKSPACE_ROOT}/MODULE.bazel"
 
-exec "${NODE}" "${PLUGIN_TEST_MJS}" "${TSSERVER_JS}" "${WORKSPACE_ROOT}"
+exec "${NODE}" "${PLUGIN_TEST_MJS}" "${TSSERVER_JS}" "${WORKSPACE_ROOT}" "${REFRESH}" "${GENERATED_ENTRYPOINT_CONFIG}"
