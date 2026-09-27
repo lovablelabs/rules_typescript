@@ -874,8 +874,6 @@ func TestGeneratedDeclarationSharedWithTestSelectsExporter(t *testing.T) {
 	}
 }
 
-// ts_test.deps: the ts_compile, every owned file's edges, the vitest config's
-// and the manifest union in D7 spelling, with no label said twice.
 func TestResolveEdges_TestDepsCarryTheRuntime(t *testing.T) {
 	c, tc := edgeRepo(t, edgeListings)
 	ix := buildIndex(t, c, edgeRules...)
@@ -905,6 +903,7 @@ func TestResolveEdges_TestDepsCarryTheRuntime(t *testing.T) {
 	if got := r.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
 		t.Errorf("deps = %q, want %q", got, want)
 	}
+	wantStrings(t, "config importer runfiles", r.AttrStrings("config_node_modules"), []string{"//:node_modules"})
 	if n := strings.Count(logged, "\n"); n != 2 {
 		t.Errorf("%d log lines, want the two unowned reports:\n%s", n, logged)
 	}
@@ -941,12 +940,7 @@ func TestResolveEdges_ConfigSrcsAreTheConfigsModules(t *testing.T) {
 	r, logged := resolveEdgesOf(t, c, ix, "ts_test", "web", "web_test", imps)
 	want := []string{"package.json", "plugins/define.ts", "plugins/meta.json"}
 	wantLabels(t, "config_srcs", r.AttrStrings("config_srcs"), want)
-	for _, dep := range []string{"@npm//:zod", "@npm//:vite"} {
-		if !hasLabel(r.AttrStrings("deps"), dep) {
-			t.Errorf("deps %q lack %s, the closure's npm edge",
-				r.AttrStrings("deps"), dep)
-		}
-	}
+	wantStrings(t, "config closure importer runfiles", r.AttrStrings("config_node_modules"), []string{"//:node_modules"})
 	if !strings.Contains(logged, outside) ||
 		!strings.Contains(logged, "config_srcs") {
 		t.Errorf("log, want %s said as outside the config's package:\n%s",
@@ -958,6 +952,8 @@ func TestResolveEdges_ConfigSrcsAreTheConfigsModules(t *testing.T) {
 		&ruleImports{config: cfg})
 	want = []string{"//web:package.json", "//web:plugins/define.ts", "//web:plugins/meta.json"}
 	wantLabels(t, "config_srcs from web/test", r.AttrStrings("config_srcs"), want)
+	wantStrings(t, "config-only npm packages are not test deps", r.AttrStrings("deps"), nil)
+	wantStrings(t, "ancestor config importer runfiles", r.AttrStrings("config_node_modules"), []string{"//:node_modules"})
 }
 
 func TestConfigDependenciesRetainTheirImporterWithoutTestProgram(t *testing.T) {
@@ -1001,26 +997,21 @@ func TestConfigDependenciesRetainTheirImporterWithoutTestProgram(t *testing.T) {
 				helper: {configEdge},
 			})
 			imps := &ruleImports{config: cfg}
-			wantDeps := []string{"@npm//settings:dependency"}
+			var wantDeps []string
 			if test.program {
 				importer := tc.lock.importerAbove(test.consumer)
 				imps.edges = []explainfiles.Edge{importEdge(entry, "dependency", importer+"/node_modules/dependency/index.d.ts")}
 				imps.program = &program{Listing: explainfiles.Listing{Roots: []string{entry}, Edges: imps.edges}}
-				if importer != "settings" {
-					wantDeps = append(wantDeps, "@npm//consumer:dependency")
-				}
+				wantDeps = []string{"@npm//" + importer + ":dependency"}
 			}
 			r := rule.NewRule("ts_test", "test")
 			r.SetAttr("srcs", []string{"index.test.ts"})
 			from := label.New("", test.consumer, r.Name())
 			deps := resolveEdges(c, ix, r, imps, from)
 			retainSourceImporters(c, r, from, imps.program, deps)
-			var wantContexts []string
-			if test.consumer == "consumer" && !test.kept {
-				wantContexts = []string{"//settings:node_modules"}
-			}
-			wantLabels(t, "config dependency lost its supplying importer", r.AttrStrings("source_node_modules"), wantContexts)
-			wantLabels(t, "distinct npm resolutions remain declared", r.AttrStrings("deps"), wantDeps)
+			wantLabels(t, "config dependency lost its supplying importer", r.AttrStrings("config_node_modules"), []string{"//settings:node_modules"})
+			wantStrings(t, "config-only importers are not compiler contexts", r.AttrStrings("source_node_modules"), nil)
+			wantLabels(t, "only test npm resolutions are compiler dependencies", r.AttrStrings("deps"), wantDeps)
 			wantStrings(t, "config helpers do not become test sources", r.AttrStrings("srcs"), []string{"index.test.ts"})
 			if !hasLabel(r.AttrStrings("config_srcs"), "//settings:helper.mjs") {
 				t.Fatalf("config helper lost its source identity: %v", r.AttrStrings("config_srcs"))
@@ -1029,7 +1020,306 @@ func TestConfigDependenciesRetainTheirImporterWithoutTestProgram(t *testing.T) {
 	}
 }
 
-func TestKeptConfigImporterCannotOmitItsSupplyingContext(t *testing.T) {
+const configImporterLock = `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    devDependencies:
+      '@types/node':
+        specifier: 22.20.1
+        version: 22.20.1
+
+  app:
+    devDependencies:
+      '@acme/lib':
+        specifier: 1.0.0
+        version: 1.0.0
+      minimatch:
+        specifier: 9.0.9
+        version: 9.0.9
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11
+
+  settings:
+    dependencies:
+      zod:
+        specifier: 3.24.2
+        version: 3.24.2
+
+  settings/unit:
+    devDependencies:
+      '@acme/lib':
+        specifier: 2.0.0
+        version: 2.0.0
+      minimatch:
+        specifier: 10.2.4
+        version: 10.2.4
+      vite:
+        specifier: 8.2.2
+        version: 8.2.2
+
+  packages/lib: {}
+
+packages:
+
+  '@acme/lib@1.0.0': {}
+  '@acme/lib@2.0.0': {}
+  '@types/node@22.20.1': {}
+  minimatch@9.0.9: {}
+  minimatch@10.2.4: {}
+  vite@8.2.2: {}
+  vitest@4.1.11: {}
+  zod@3.24.2: {}
+
+snapshots:
+
+  '@acme/lib@1.0.0': {}
+  '@acme/lib@2.0.0': {}
+  '@types/node@22.20.1': {}
+  minimatch@9.0.9: {}
+  minimatch@10.2.4: {}
+  vite@8.2.2: {}
+  vitest@4.1.11: {}
+  zod@3.24.2: {}
+`
+
+func TestResolveEdges_AuthoredConfigImporterRunfiles(t *testing.T) {
+	for _, test := range []struct {
+		name, pkg, configDir, version, npm string
+	}{
+		{"sibling importers", "app/test", "settings/unit", "9.0.9", "@npm//app:minimatch"},
+		{"config below importer", "app/test", "settings/unit/nested", "9.0.9", "@npm//app:minimatch"},
+		{"shared importer", "settings/unit/test", "settings/unit", "10.2.4", "@npm//settings/unit:minimatch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			cfg := path.Join(test.configDir, "vitest.config.mts")
+			helper := path.Join(test.configDir, "helper.mjs")
+			source := path.Join(test.pkg, "index.test.ts")
+			writeWorkspace(t, root, map[string]string{
+				pnpmLockfileName:             configImporterLock,
+				"node_modules/.modules.yaml": "layoutVersion: 5\n",
+				"app/package.json":           `{"devDependencies":{"vitest":"4.1.11"}}`,
+				cfg:                          "import './helper.mjs'; import 'vite'; export default {};\n",
+				helper:                       "import 'minimatch'; import 'zod';\n",
+				source:                       "import 'minimatch';\n",
+			})
+			c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
+			(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+			configureTsConfig(c, "", nil, nil)
+			tc := getConfig(c)
+			s := tc.programs
+			s.visit("app", []string{"package.json"})
+			s.visit(test.configDir, []string{path.Base(cfg), path.Base(helper)})
+			s.visit(test.pkg, []string{path.Base(source)})
+			s.programs[test.pkg] = &program{}
+			ix := buildIndex(t, c, indexedRule{
+				kind: "filegroup", name: "vitest_config", pkg: test.configDir, srcs: []string{path.Base(cfg)},
+			})
+			s.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{
+				cfg: {
+					importEdge(cfg, "./helper.mjs", helper),
+					importEdge(cfg, "vite", storeVite),
+				},
+				helper: {
+					importEdge(helper, "minimatch", "settings/unit/node_modules/minimatch/index.d.ts"),
+					importEdge(helper, "zod", storeZod),
+				},
+				storeVite: {{From: storeVite, To: storeTypesNode, Specifier: "node", Kind: explainfiles.TypeReference}},
+			})
+			imps := s.testImports(tc.lock, test.pkg, "", cfg)
+			imps.edges = []explainfiles.Edge{importEdge(source, "minimatch", path.Join(tc.lock.importerAbove(test.pkg), "node_modules/minimatch/index.d.ts"))}
+			r := rule.NewRule("ts_test", "test")
+			r.SetAttr("srcs", []string{"index.test.ts"})
+			r.SetAttr("config", "//"+test.configDir+":vitest_config")
+			nodeModules := tc.lock.nodeModulesLabel(test.pkg)
+			r.SetAttr("node_modules", nodeModules)
+			logged := captureLog(t, func() { resolveEdges(c, ix, r, imps, label.New("", test.pkg, "test")) })
+			wantDeps := []string{test.npm}
+			var wantScopes []string
+			if strings.HasPrefix(test.pkg, "app/") {
+				wantDeps = append(wantDeps, "@npm//app:vitest")
+				wantScopes = []string{"//:app/package.json"}
+			}
+			wantStrings(t, "test program deps", r.AttrStrings("deps"), wantDeps)
+			wantLabels(t, "test program retains its authored scope", r.AttrStrings("package_scopes"), wantScopes)
+			wantLabels(t, "config declaring importers", r.AttrStrings("config_node_modules"), []string{"//settings:node_modules", "//settings/unit:node_modules"})
+			wantStrings(t, "config modules", r.AttrStrings("config_srcs"), []string{"//" + test.configDir + ":helper.mjs"})
+			wantStrings(t, "test sources", r.AttrStrings("srcs"), []string{"index.test.ts"})
+			if got := r.AttrString("node_modules"); got != nodeModules {
+				t.Errorf("test importer = %q, want %q", got, nodeModules)
+			}
+			if got := r.AttrString("config"); got != "//"+test.configDir+":vitest_config" {
+				t.Errorf("config changed to %q", got)
+			}
+			if got := tc.lock.importers[tc.lock.importerAbove(test.pkg)].deps["minimatch"]; got != test.version {
+				t.Errorf("test minimatch resolution = %q, want %q", got, test.version)
+			}
+			if got := tc.lock.importers["settings/unit"].deps["minimatch"]; got != "10.2.4" {
+				t.Errorf("config minimatch resolution = %q, want 10.2.4", got)
+			}
+			if logged != "" {
+				t.Fatal(logged)
+			}
+		})
+	}
+}
+
+func TestResolveEdges_ConfigMemberNameKeepsItsImporter(t *testing.T) {
+	for _, input := range []string{"registry", "workspace link", "workspace source", "authored declaration", "generated declaration"} {
+		t.Run(input, func(t *testing.T) {
+			const cfg = "settings/unit/vitest.config.mts"
+			const declaration = "settings/unit/types.d.ts"
+			const helper = "settings/unit/helper.ts"
+			lock := configImporterLock
+			wantImporter := "//settings/unit:node_modules"
+			if strings.HasPrefix(input, "workspace ") {
+				lock = strings.Replace(lock, "version: 2.0.0", "version: link:../../packages/lib", 1)
+				wantImporter += "/@acme/lib"
+			}
+			root := writeTree(t, map[string]string{
+				pnpmLockfileName:             lock,
+				"node_modules/.modules.yaml": "layoutVersion: 5\n",
+				"packages/lib/package.json":  `{"name":"@acme/lib"}`,
+				"packages/lib/index.ts":      "export const value = 1;\n",
+				cfg:                          "import '@acme/lib'; export default {};\n",
+				declaration:                  "import './helper'; export {};\n",
+				helper:                       "import 'zod';\n",
+			})
+			c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
+			(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+			configureTsConfig(c, "", nil, nil)
+			s := getConfig(c).programs
+			s.visit("settings/unit", []string{"vitest.config.mts", "types.d.ts", "helper.ts"})
+			s.visit("packages/lib", []string{"index.ts"})
+			s.programs["app/test"] = &program{}
+			target := "settings/unit/node_modules/@acme/lib/index.d.ts"
+			var rules []indexedRule
+			wantDeps := []string{"@npm//app:acme_lib"}
+			if input == "authored declaration" || input == "generated declaration" {
+				target = declaration
+			} else if input == "workspace source" {
+				target = "packages/lib/index.ts"
+			}
+			if input == "generated declaration" {
+				rules = []indexedRule{{kind: "ts_codegen", name: "types", pkg: "settings/unit", outs: []string{"types.d.ts"}}}
+				wantDeps = append(wantDeps, "//settings/unit:types")
+			}
+			ix := buildIndex(t, c, rules...)
+			edges := map[string][]explainfiles.Edge{
+				cfg: {importEdge(cfg, "@acme/lib", target)},
+			}
+			if target == declaration {
+				edges[target] = []explainfiles.Edge{importEdge(target, "./helper", helper)}
+				edges[helper] = []explainfiles.Edge{importEdge(helper, "zod", storeZod)}
+			}
+			s.vitestPrograms = configPrograms(edges)
+			r, logged := resolveEdgesOf(t, c, ix, "ts_test", "app/test", "test", &ruleImports{
+				config: cfg,
+				edges:  []explainfiles.Edge{importEdge("app/test/index.test.ts", "@acme/lib", "app/node_modules/@acme/lib/index.d.ts")},
+			})
+			wantLabels(t, "test v1 and declared runtime owner", r.AttrStrings("deps"), wantDeps)
+			wantStrings(t, "config package runtime link owner", r.AttrStrings("config_node_modules"), []string{wantImporter})
+			wantStrings(t, "package runtime links need no copied declaration closure", r.AttrStrings("config_srcs"), nil)
+			if logged != "" {
+				t.Fatal(logged)
+			}
+		})
+	}
+}
+
+func TestGazelle_AuthoredConfigImporterRunfiles(t *testing.T) {
+	authoredData := []string{"//fixtures:payload.json", "//settings/unit:node_modules", "//settings:node_modules"}
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":               "module(name = \"config_importer\")\n",
+		"BUILD.bazel":                "",
+		pnpmLockfileName:             configImporterLock,
+		"node_modules/.modules.yaml": "layoutVersion: 5\n",
+		"app/package.json":           `{"devDependencies":{"@acme/lib":"1.0.0","minimatch":"9.0.9","vitest":"4.1.11"}}`,
+		"packages/lib/package.json":  `{"name":"@acme/lib"}`,
+		"app/test/tsconfig.json":     `{"compilerOptions":{"types":[]},"files":["index.test.ts"]}`,
+		"app/test/index.test.ts":     "import '@acme/lib'; import { minimatch } from 'minimatch'; export const matches = minimatch('a.ts', '*.ts');\n",
+		"app/test/BUILD.bazel": loadDefs + `"ts_test")
+ts_test(
+    name = "test_test",
+    srcs = ["index.test.ts"],
+    config = "//settings/unit:selected", # keep
+    data = [
+        "//fixtures:payload.json",
+        "//settings/unit:node_modules",
+        "//settings:node_modules",
+    ],
+)
+`,
+		"fixtures/BUILD.bazel":          "exports_files([\"payload.json\"])\n",
+		"fixtures/payload.json":         "{}\n",
+		"settings/BUILD.bazel":          "filegroup(name = \"alternate\", srcs = [\"alternate.config.mts\"])\n",
+		"settings/alternate.config.mts": "import 'zod'; export default {};\n",
+		"settings/unit/BUILD.bazel": `filegroup(name = "selected", srcs = ["vitest.config.mts"])
+`,
+		"settings/unit/vitest.config.mts":                   "import './helper.mjs'; export default {};\n",
+		"settings/unit/helper.mjs":                          "import '@acme/lib'; import 'zod';\n",
+		"app/node_modules/@acme/lib/package.json":           `{"name":"@acme/lib","version":"1.0.0","types":"index.d.ts"}`,
+		"app/node_modules/@acme/lib/index.d.ts":             "export {};\n",
+		"settings/unit/node_modules/@acme/lib/package.json": `{"name":"@acme/lib","version":"2.0.0","types":"index.d.ts"}`,
+		"settings/unit/node_modules/@acme/lib/index.d.ts":   "export {};\n",
+		"app/node_modules/minimatch/package.json":           `{"name":"minimatch","version":"9.0.9","types":"index.d.ts"}`,
+		"app/node_modules/minimatch/index.d.ts":             "export declare function minimatch(value: string, pattern: string): boolean;\n",
+		"settings/node_modules/zod/package.json":            `{"name":"zod","version":"3.24.2","types":"index.d.ts"}`,
+		"settings/node_modules/zod/index.d.ts":              "export {};\n",
+	})
+	selected := "//settings/unit:selected"
+	for _, phase := range []string{"initial", "remove ancestor import", "select another config", "remove all config imports"} {
+		t.Run(phase, func(t *testing.T) {
+			wantImporters := []string{"//settings:node_modules", "//settings/unit:node_modules"}
+			wantSources := []string{"//settings/unit:helper.mjs"}
+			updates := [][]string{{"app/test"}, nil, {"app/test"}}
+			switch phase {
+			case "initial":
+				updates[0] = nil
+			case "remove ancestor import":
+				writeFile(t, filepath.Join(root, "settings/unit/helper.mjs"), "import '@acme/lib';\n")
+				wantImporters = []string{"//settings/unit:node_modules"}
+			case "select another config":
+				next := "//settings:alternate"
+				writeFile(t, filepath.Join(root, "app/test/BUILD.bazel"), strings.Replace(buildFileText(t, root, "app/test"), selected, next, 1))
+				selected = next
+				wantImporters = []string{"//settings:node_modules"}
+				wantSources = nil
+			case "remove all config imports":
+				writeFile(t, filepath.Join(root, "settings/alternate.config.mts"), "export default {};\n")
+				wantImporters, wantSources = nil, nil
+			}
+			var first map[string]string
+			for _, args := range updates {
+				output, err := protoGazelle(t, root, args...)
+				if err != nil {
+					t.Fatalf("generate %v: %v\n%s", args, err, output)
+				}
+				r := onDiskRule(t, root, "app/test", "ts_test", "test_test")
+				wantStrings(t, "test importer deps", r.AttrStrings("deps"), []string{"@npm//app:acme_lib", "@npm//app:minimatch", "@npm//app:vitest"})
+				wantLabels(t, "config importers", r.AttrStrings("config_node_modules"), wantImporters)
+				wantLabels(t, "unmarked authored data", r.AttrStrings("data"), authoredData)
+				wantStrings(t, "config helper", r.AttrStrings("config_srcs"), wantSources)
+				if got := r.AttrString("node_modules"); got != "//app:node_modules" {
+					t.Errorf("node_modules = %q, want //app:node_modules", got)
+				}
+				if got := r.AttrString("config"); got != selected {
+					t.Errorf("config = %q, want %q", got, selected)
+				}
+				if first == nil {
+					first = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("config importer generation changed on repeat/partial update: %s", diff)
+				}
+			}
+		})
+	}
+}
+
+func TestKeptConfigImportersRemainAuthored(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"MODULE.bazel":               "module(name = \"config_importer\")\n",
 		"node_modules/.modules.yaml": "layoutVersion: 5\n",
@@ -1051,11 +1341,12 @@ snapshots:
 `,
 		"app/tsconfig.json":          `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"files":["index.test.ts"]}`,
 		"app/index.test.ts":          "import { value } from 'dependency'; export { value };\n",
+		"app/vitest.config.mts":      "import { value } from 'dependency'; export default { value };\n",
 		"app/package.json":           `{"dependencies":{"dependency":"1.0.0"}}`,
 		"settings/package.json":      `{"dependencies":{"dependency":"2.0.0"}}`,
 		"settings/vitest.config.mts": "import { value } from './helper.mjs'; export default { value };\n",
 		"settings/helper.mjs":        "export { value } from 'dependency';\n",
-		"settings/BUILD.bazel":       "exports_files([\"vitest.config.mts\", \"helper.mjs\", \"package.json\"], visibility = [\"//visibility:public\"])\n",
+		"settings/BUILD.bazel":       "exports_files([\"vitest.config.mts\", \"helper.mjs\", \"package.json\"], visibility = [\"//visibility:public\"])\nfilegroup(name = \"config_runfiles\", srcs = [\":node_modules\"], visibility = [\"//visibility:public\"])\n",
 	})
 	for _, pkg := range []string{"app", "settings"} {
 		writeFile(t, filepath.Join(root, pkg, "node_modules/dependency/package.json"), `{"name":"dependency","types":"index.d.ts"}`)
@@ -1075,23 +1366,56 @@ ts_test(
 			t.Fatalf("sibling config importers %v: %v\n%s", args, err, output)
 		}
 		r := onDiskRule(t, root, "app", "ts_test", "app_test")
-		wantLabels(t, "config dependency lost its supplying importer", r.AttrStrings("source_node_modules"), []string{"//settings:node_modules"})
-		wantLabels(t, "test and config retain distinct dependencies", r.AttrStrings("deps"), []string{"@npm//app:dependency", "@npm//settings:dependency"})
+		wantLabels(t, "config dependency lost its supplying importer", r.AttrStrings("config_node_modules"), []string{"//settings:node_modules"})
+		wantStrings(t, "config-only importers are not compiler contexts", r.AttrStrings("source_node_modules"), nil)
+		wantLabels(t, "test retains its own dependency version", r.AttrStrings("deps"), []string{"@npm//app:dependency"})
 	}
-	for _, context := range []string{"[]", `["//settings:node_modules"]`} {
-		writeFile(t, filepath.Join(root, "app/BUILD.bazel"), strings.Replace(build, "    config =", "    source_node_modules = "+context+", # keep\n    config =", 1))
-		before := buildFileBytes(t, root)
-		output, err := protoGazelle(t, root, "-index=false", "app")
-		if context == "[]" {
-			if err == nil || !strings.Contains(output, "kept source_node_modules") || !strings.Contains(output, "//settings:node_modules") {
-				t.Fatalf("kept config importer omission was not rejected: %v\n%s", err, output)
+	for _, test := range []struct {
+		name               string
+		context, data      []string
+		ownScope, keepRule bool
+	}{
+		{name: "authored empty list is preserved"},
+		{name: "authored alternate importer is preserved", context: []string{"//app:node_modules"}},
+		{name: "declared importer", context: []string{"//settings:node_modules"}},
+		{name: "authored data importer", data: []string{"//settings:node_modules"}},
+		{name: "authored data filegroup", data: []string{"//settings:config_runfiles"}},
+		{name: "config uses the test importer", ownScope: true},
+		{name: "whole rule remains authored", keepRule: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			attrs := fmt.Sprintf("    config_node_modules = %q, # keep\n", test.context)
+			if len(test.data) > 0 {
+				attrs += fmt.Sprintf("    data = %q,\n", test.data)
 			}
-			if diff := snapshotDiff(before, buildFileBytes(t, root)); diff != "" {
-				t.Fatalf("rejected config importer changed BUILD files: %s", diff)
+			if test.ownScope {
+				attrs += "    node_modules = \":node_modules\", # keep\n"
 			}
-		} else if err != nil {
-			t.Fatalf("declared config importer was rejected: %v\n%s", err, output)
-		}
+			current := strings.Replace(build, "    config =", attrs+"    config =", 1)
+			if test.ownScope {
+				current = strings.Replace(current, "//settings:vitest.config.mts", ":vitest.config.mts", 1)
+			}
+			if test.keepRule {
+				current = strings.Replace(current, "ts_test(\n", "# keep\nts_test(\n", 1)
+			}
+			writeFile(t, filepath.Join(root, "app/BUILD.bazel"), current)
+			output, err := protoGazelle(t, root, "-index=false", "app")
+			if err != nil {
+				t.Fatalf("authored config importers were rejected: %v\n%s", err, output)
+			}
+			r := onDiskRule(t, root, "app", "ts_test", "app_test")
+			wantLabels(t, "kept config importers remain authored", r.AttrStrings("config_node_modules"), test.context)
+			wantLabels(t, "authored importer data remains intact", r.AttrStrings("data"), test.data)
+			if test.ownScope {
+				if got := r.AttrString("node_modules"); got != ":node_modules" {
+					t.Errorf("test importer = %q, want :node_modules", got)
+				}
+				wantLabels(t, "test dependency remains on its own importer", r.AttrStrings("deps"), []string{"@npm//app:dependency"})
+			}
+			if test.keepRule && !r.ShouldKeep() {
+				t.Fatal("whole-rule keep was lost")
+			}
+		})
 	}
 }
 
@@ -1235,6 +1559,7 @@ func TestResolveEdges_GeneratedConfigStagesScalarFiles(t *testing.T) {
 						}
 						r, logged = resolveEdgesOf(t, c, ix, "ts_test", "web/test", "test_test", &ruleImports{config: file})
 						wantStrings(t, "generated config root retains the same runtime owner", r.AttrStrings("deps"), wantDeps)
+						wantStrings(t, "generated config root has no inferred npm importer", r.AttrStrings("config_node_modules"), nil)
 						var wantRootScope []string
 						if programCandidate(file) {
 							wantRootScope = []string{"//web:package.json"}
@@ -1248,6 +1573,30 @@ func TestResolveEdges_GeneratedConfigStagesScalarFiles(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestResolveEdges_ConfigImportThroughGeneratedDeclarationRetainsRuntimeOutputs(t *testing.T) {
+	c, tc := edgeRepo(t, edgeListings)
+	const cfg = "web/vitest.config.mts"
+	const declaration = "web/generated/value.d.mts"
+	const stale = "web/generated/stale-secret.ts"
+	tc.programs.visit("web/generated", nil)
+	ix := buildIndex(t, c, indexedRule{
+		kind: "ts_codegen", name: "make_config", pkg: "web",
+		outs: []string{"generated/value.d.mts", "generated/value.mjs", "generated/helper.mjs", "generated/value.json"},
+	})
+	tc.programs.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{
+		cfg:         {importEdge(cfg, "./generated/value.mjs", declaration)},
+		declaration: {importEdge(declaration, "./stale-secret", stale)},
+		stale:       {importEdge(stale, "zod", storeZod)},
+	})
+	r, logged := resolveEdgesOf(t, c, ix, "ts_test", "web/test", "test_test", &ruleImports{config: cfg})
+	wantStrings(t, "runtime import retains the producer's JavaScript and JSON", r.AttrStrings("deps"), []string{"//web:make_config"})
+	wantStrings(t, "declaration closure supplies only the config root scope", r.AttrStrings("config_srcs"), []string{"//web:package.json"})
+	wantStrings(t, "stale declaration imports supply no config importer", r.AttrStrings("config_node_modules"), nil)
+	if logged != "" {
+		t.Fatal(logged)
 	}
 }
 
@@ -1445,6 +1794,33 @@ func TestResolveEdges_NoLockfileNoNpmLabel(t *testing.T) {
 	if n := strings.Count(logged, pnpmLockfileName); n != 1 {
 		t.Errorf("the missing lockfile was said %d times, want once:\n%s", n, logged)
 	}
+	t.Run("overridden pool owners without a lock have unknown resolution", func(t *testing.T) {
+		const cfg = "app/vitest.config.mts"
+		writeFile(t, filepath.Join(root, cfg), poolConfig("./wrangler.jsonc"))
+		writeFile(t, filepath.Join(root, "app/wrangler.jsonc"), `{"main":"a.ts"}`)
+		s.visit("app", []string{"a.ts", "b.ts", "vitest.config.mts", "wrangler.jsonc"})
+		f, err := rule.LoadData("BUILD.bazel", "", []byte(
+			"# gazelle:resolve typescript app/first.mjs @npm//first:pool\n"+
+				"# gazelle:resolve typescript app/second.mjs @npm//second:pool\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		(&resolve.Configurer{}).Configure(c, "", f)
+		ix := buildIndex(t, c, indexedRule{kind: "genrule", name: "pools", pkg: "app", outs: []string{"first.mjs", "second.mjs"}})
+		for _, name := range []string{"first", "second"} {
+			s.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{
+				cfg: {importEdge(cfg, workersPoolPackage, "app/"+name+".mjs")},
+			})
+			r, _ := resolveEdgesOf(t, c, ix, "ts_test", "app/test", "test", &ruleImports{config: cfg})
+			owner := r.AttrString("workers_pool")
+			if owner != "//"+name+":node_modules" {
+				t.Fatalf("override pool owner = %q, want //%s:node_modules", owner, name)
+			}
+			if got := workersPoolResolution(tc.lock, owner, label.New("", "app/test", "test")); got != "" {
+				t.Errorf("pool resolution without a lock = %q, want unknown", got)
+			}
+		}
+	})
 }
 
 // The exact repository path of every src is what an edge target is looked up
@@ -1616,11 +1992,507 @@ func TestResolveEdges_WorkersPoolWritesTheTestsAttributes(t *testing.T) {
 	}
 }
 
+func TestResolveEdges_SiblingConfigKeepsWorkersAttributes(t *testing.T) {
+	c, tc := poolRepo(t, poolRepoLock)
+	ix := buildIndex(t, c, poolRules...)
+	tc.programs.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{poolCfg: {poolEdge}})
+	r, logged := resolveEdgesOf(t, c, ix, "ts_test", "app/test", "test", &ruleImports{config: poolCfg})
+	wantStrings(t, "pool config importer", r.AttrStrings("config_node_modules"), []string{"//worker:node_modules"})
+	wantStrings(t, "coverage remains a test dependency", r.AttrStrings("deps"), []string{"@npm//:vitest_coverage-istanbul"})
+	if got := r.AttrString("wrangler_config"); got != "//worker:wrangler_config" {
+		t.Errorf("wrangler_config = %q, want //worker:wrangler_config", got)
+	}
+	if got := r.AttrString("coverage_provider"); got != "istanbul" {
+		t.Errorf("coverage_provider = %q, want istanbul", got)
+	}
+	if logged != "" {
+		t.Fatal(logged)
+	}
+}
+
+func TestResolveEdges_WorkspacePoolRetainsConfigOwnerWithoutTestDependency(t *testing.T) {
+	lock := strings.Replace(poolRepoLock, "version: 0.18.4", "version: link:../packages/pool", 1)
+	c, tc := poolRepo(t, lock)
+	writeWorkspace(t, c.RepoRoot, map[string]string{
+		"packages/pool/package.json": `{"name":"@cloudflare/vitest-pool-workers"}`,
+		"packages/pool/index.d.ts":   "export declare function cloudflareTest(o: unknown): unknown;\n",
+	})
+	tc.programs.visit("packages/pool", []string{"index.d.ts"})
+	ix := buildIndex(t, c, poolRules...)
+	tc.programs.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{poolCfg: {
+		importEdge(poolCfg, workersPoolPackage, "packages/pool/index.d.ts"),
+	}})
+	r, logged := resolveEdgesOf(t, c, ix, "ts_test", "app/test", "test", &ruleImports{config: poolCfg})
+	const member = "//worker:node_modules/@cloudflare/vitest-pool-workers"
+	wantStrings(t, "workspace pool link stages its runtime closure", r.AttrStrings("config_node_modules"), []string{member})
+	wantStrings(t, "workspace pool source is not restaged beside the config", r.AttrStrings("config_srcs"), []string{"//worker:package.json"})
+	wantStrings(t, "config-only workspace pool does not become a test dependency", r.AttrStrings("deps"), []string{"@npm//:vitest_coverage-istanbul"})
+	if got := r.AttrString("workers_pool"); got != member {
+		t.Errorf("workers_pool = %q, want member link %q", got, member)
+	}
+	if got := r.AttrString("wrangler_config"); got != "//worker:wrangler_config" {
+		t.Errorf("wrangler_config = %q, want //worker:wrangler_config", got)
+	}
+	if got := r.AttrString("coverage_provider"); got != "istanbul" {
+		t.Errorf("coverage_provider = %q, want istanbul", got)
+	}
+	if logged != "" {
+		t.Fatal(logged)
+	}
+}
+
+func TestResolveEdges_WorkersPoolOwnerIsTheImportingHelper(t *testing.T) {
+	for _, testPool := range []bool{false, true} {
+		t.Run(fmt.Sprintf("test_pool_%t", testPool), func(t *testing.T) {
+			lock := strings.Replace(poolRepoLock, "  worker:\n", "  worker/pool:\n", 1)
+			if testPool {
+				lock = strings.Replace(lock, "  worker/pool:\n", "  app:\n    devDependencies:\n      '@cloudflare/vitest-pool-workers':\n        specifier: 0.22.0\n        version: 0.22.0\n\n  worker/pool:\n", 1)
+				lock = strings.Replace(lock, "\npackages:\n", "\npackages:\n\n  '@cloudflare/vitest-pool-workers@0.22.0':\n    resolution: {integrity: sha512-ddd}\n", 1)
+				lock = strings.Replace(lock, "\nsnapshots:\n", "\nsnapshots:\n\n  '@cloudflare/vitest-pool-workers@0.22.0': {}\n", 1)
+			}
+			c, tc := poolRepo(t, lock)
+			c.ValidBuildFileNames = config.DefaultValidBuildFileNames
+			const helper = "worker/pool/setup.mjs"
+			writeWorkspace(t, c.RepoRoot, map[string]string{
+				poolCfg:                   "import { cloudflareTest } from './pool/setup.mjs'; export default { plugins: [cloudflareTest({ wrangler: { configPath: './wrangler.jsonc' } })] };\n",
+				helper:                    "export { cloudflareTest } from '@cloudflare/vitest-pool-workers';\n",
+				"worker/pool/BUILD.bazel": "exports_files(['setup.mjs'])\n",
+			})
+			file, err := rule.LoadFile(filepath.Join(c.RepoRoot, "worker/pool/BUILD.bazel"), "worker/pool")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.programs.recordBuild(c, "worker/pool", file)
+			tc.programs.visit("worker/pool", []string{"setup.mjs"})
+			ix := buildIndex(t, c, poolRules...)
+			tc.programs.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{
+				poolCfg: {importEdge(poolCfg, "./pool/setup.mjs", helper)},
+				helper:  {importEdge(helper, workersPoolPackage, poolEdge.To)},
+			})
+			imps := &ruleImports{config: poolCfg}
+			if testPool {
+				imps.edges = []explainfiles.Edge{importEdge("app/test/a.test.ts", workersPoolPackage,
+					"app/node_modules/@cloudflare/vitest-pool-workers/index.d.ts")}
+			}
+			r, logged := resolveEdgesOf(t, c, ix, "ts_test", "app/test", "test", imps)
+			wantLabels(t, "helper source is staged beside the config root scope", r.AttrStrings("config_srcs"), []string{"//worker:package.json", "//worker/pool:setup.mjs"})
+			wantStrings(t, "helper's declaring importer", r.AttrStrings("config_node_modules"), []string{"//worker/pool:node_modules"})
+			if got := r.AttrString("workers_pool"); got != "//worker/pool:node_modules" {
+				t.Errorf("workers_pool = %q, want the helper's importer //worker/pool:node_modules", got)
+			}
+			if got := r.AttrString("wrangler_config"); got != "//worker:wrangler_config" {
+				t.Errorf("wrangler_config = %q, want //worker:wrangler_config", got)
+			}
+			wantDeps := []string{"@npm//:vitest_coverage-istanbul"}
+			if testPool {
+				wantDeps = append(wantDeps, "@npm//app:cloudflare_vitest-pool-workers")
+				if got := tc.lock.importers["app"].deps[workersPoolPackage]; got != "0.22.0" {
+					t.Errorf("test pool version = %q, want 0.22.0", got)
+				}
+			}
+			wantStrings(t, "test dependencies retain their own pool", r.AttrStrings("deps"), wantDeps)
+			if logged != "" {
+				t.Fatal(logged)
+			}
+		})
+	}
+}
+
+func TestResolveEdges_KnownTypePathsDoNotSelectWorkersPool(t *testing.T) {
+	for name, kind := range map[string]explainfiles.EdgeKind{
+		"reference":      explainfiles.Reference,
+		"type reference": explainfiles.TypeReference,
+		"augmentation":   explainfiles.Augmentation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, tc := poolRepo(t, poolRepoLock)
+			const helper = "worker/helper.ts"
+			writeFile(t, filepath.Join(c.RepoRoot, helper), "export { cloudflareTest } from '@cloudflare/vitest-pool-workers';\n")
+			tc.programs.files["worker"] = append(tc.programs.files["worker"], "helper.ts")
+			ix := buildIndex(t, c, poolRules...)
+			edge := explainfiles.Edge{From: poolCfg, To: helper, Specifier: "./helper", Kind: kind}
+			for _, runtime := range []bool{false, true} {
+				edges := []explainfiles.Edge{edge}
+				if runtime {
+					edges = append(edges, importEdge(poolCfg, "./helper", helper))
+				}
+				tc.programs.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{
+					poolCfg: edges,
+					helper:  {importEdge(helper, workersPoolPackage, poolEdge.To)},
+				})
+				r, logged := resolveEdgesOf(t, c, ix, "ts_test", "app/test", "test", &ruleImports{config: poolCfg})
+				for attr, value := range map[string]string{
+					"workers_pool":      "//worker:node_modules",
+					"wrangler_config":   "//worker:wrangler_config",
+					"coverage_provider": "istanbul",
+				} {
+					want := ""
+					if runtime {
+						want = value
+					}
+					if got := r.AttrString(attr); got != want {
+						t.Errorf("runtime=%t: %s = %q, want %q", runtime, attr, got, want)
+					}
+				}
+				sources := []string{"//worker:package.json"}
+				var importers, deps []string
+				if runtime {
+					sources = append(sources, "//worker:helper.ts")
+					importers = []string{"//worker:node_modules"}
+					deps = []string{"@npm//:vitest_coverage-istanbul"}
+				}
+				wantLabels(t, "only runtime paths stage config helpers", r.AttrStrings("config_srcs"), sources)
+				wantStrings(t, "only runtime paths stage config importers", r.AttrStrings("config_node_modules"), importers)
+				wantStrings(t, "only runtime pool use adds coverage", r.AttrStrings("deps"), deps)
+				if logged != "" {
+					t.Fatal(logged)
+				}
+			}
+		})
+	}
+}
+
+func TestGazelle_WorkersPoolOriginAndWithdrawal(t *testing.T) {
+	const helperConfig = "import { cloudflareTest } from './pool/setup.mjs'; export default { plugins: [cloudflareTest({ wrangler: { configPath: './wrangler.jsonc' } })] };\n"
+	lock := strings.Replace(poolRepoLock, "  worker:\n", "  worker/pool:\n", 1)
+	lock = strings.Replace(lock, "  worker/pool:\n", "  worker:\n    devDependencies:\n      '@cloudflare/vitest-pool-workers':\n        specifier: 0.22.0\n        version: 0.22.0\n\n  worker/pool:\n", 1)
+	lock = strings.Replace(lock, "\npackages:\n", "\npackages:\n\n  '@cloudflare/vitest-pool-workers@0.22.0':\n    resolution: {integrity: sha512-ddd}\n", 1)
+	lock = strings.Replace(lock, "\nsnapshots:\n", "\nsnapshots:\n\n  '@cloudflare/vitest-pool-workers@0.22.0': {}\n", 1)
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":               "module(name = \"pool_origin\")\n",
+		"BUILD.bazel":                "",
+		pnpmLockfileName:             lock,
+		"node_modules/.modules.yaml": "layoutVersion: 5\n",
+		"app/tsconfig.json":          `{"compilerOptions":{"types":[]},"files":["index.test.ts"]}`,
+		"app/index.test.ts":          "export {};\n",
+		"app/BUILD.bazel": loadDefs + `"ts_test")
+ts_test(
+    name = "app_test",
+    srcs = ["index.test.ts"],
+    config = "//worker:selected", # keep
+    data = ["//worker/pool:node_modules"],
+)
+`,
+		"worker/BUILD.bazel":       "filegroup(name = 'selected', srcs = ['vitest.config.mts'])\n",
+		"worker/tsconfig.json":     `{"compilerOptions":{"types":[]},"files":["index.ts"]}`,
+		"worker/index.ts":          "export const worker = 1;\n",
+		"worker/vitest.config.mts": helperConfig,
+		"worker/wrangler.jsonc":    "{\"main\":\"index.ts\"}\n",
+		"worker/pool/setup.mjs":    "export { cloudflareTest } from '@cloudflare/vitest-pool-workers';\n",
+		"worker/pool/BUILD.bazel":  "exports_files(['setup.mjs', 'options.d.ts', 'helper.ts'])\n",
+		"worker/pool/options.d.ts": "export type { Options } from './helper.js';\n",
+		"worker/pool/helper.ts":    "import { cloudflareTest } from '@cloudflare/vitest-pool-workers'; export type Options = Parameters<typeof cloudflareTest>[0]; export { cloudflareTest };\n",
+	})
+	for dir, version := range map[string]string{"worker": "0.22.0", "worker/pool": "0.18.4"} {
+		writeWorkspace(t, root, map[string]string{
+			dir + "/node_modules/@cloudflare/vitest-pool-workers/package.json": `{"name":"@cloudflare/vitest-pool-workers","version":"` + version + `","types":"index.d.ts"}`,
+			dir + "/node_modules/@cloudflare/vitest-pool-workers/index.d.ts":   "export declare function cloudflareTest(o: unknown): unknown;\n",
+		})
+	}
+	appBuild := buildFileBytes(t, root)["app/BUILD.bazel"]
+	for _, test := range []struct {
+		name, attrs, owner, config string
+	}{
+		{
+			name:  "kept Wrangler must retain derived pool",
+			attrs: "    wrangler_config = \"//worker:wrangler_config\", # keep\n",
+			owner: "//worker/pool:node_modules",
+		},
+		{
+			name:  "kept pool must remain independent of kept Wrangler",
+			attrs: "    workers_pool = \"//worker:node_modules\", # keep\n    wrangler_config = \"//worker:wrangler_config\", # keep\n",
+			owner: "//worker:node_modules",
+		},
+		{
+			name:  "kept pool and empty config importers remain authored",
+			attrs: "    config_node_modules = [], # keep\n    workers_pool = \"//worker/pool:node_modules\", # keep\n",
+			owner: "//worker/pool:node_modules",
+		},
+		{
+			name:  "generated pool does not fill kept config importers",
+			attrs: "    config_node_modules = [], # keep\n    workers_pool = \"//worker:node_modules\",\n",
+			owner: "//worker/pool:node_modules",
+		},
+		{
+			name:   "kept runtime pool ignores type-only second resolution",
+			attrs:  "    workers_pool = \"//worker:node_modules\", # keep\n",
+			owner:  "//worker:node_modules",
+			config: "import type { Options } from './pool/helper.js';\n" + poolConfig("./wrangler.jsonc"),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			build := strings.Replace(appBuild, "    data = [\"//worker/pool:node_modules\"],\n", test.attrs, 1)
+			writeFile(t, filepath.Join(root, "app/BUILD.bazel"), build)
+			config := test.config
+			if config == "" {
+				config = helperConfig
+			}
+			writeFile(t, filepath.Join(root, poolCfg), config)
+			var first map[string]string
+			for _, args := range [][]string{nil, {"app"}, nil} {
+				output, err := protoGazelle(t, root, args...)
+				if err != nil {
+					t.Fatalf("effective pool selection %v: %v\n%s", args, err, output)
+				}
+				r := onDiskRule(t, root, "app", "ts_test", "app_test")
+				if got := r.AttrString("workers_pool"); got != test.owner {
+					t.Errorf("workers_pool = %q, want %q", got, test.owner)
+				}
+				if got := r.AttrString("wrangler_config"); got != "//worker:wrangler_config" {
+					t.Errorf("wrangler_config = %q, want //worker:wrangler_config", got)
+				}
+				wantStrings(t, "authored data stays absent", r.AttrStrings("data"), nil)
+				if strings.Contains(test.attrs, "config_node_modules") && (r.Attr("config_node_modules") == nil || len(r.AttrStrings("config_node_modules")) != 0) {
+					t.Errorf("kept empty config importers = %v, want an authored empty list", r.AttrStrings("config_node_modules"))
+				}
+				if test.config != "" {
+					wantStrings(t, "compiler-observed helper remains staged", r.AttrStrings("config_srcs"), []string{"//worker/pool:helper.ts"})
+					wantLabels(t, "kept pool does not replace derived config importers", r.AttrStrings("config_node_modules"), []string{"//worker:node_modules", "//worker/pool:node_modules"})
+					if got := r.AttrString("coverage_provider"); got != "istanbul" {
+						t.Errorf("derived coverage_provider = %q, want istanbul", got)
+					}
+					wantStrings(t, "kept pool retains derived coverage dependency", r.AttrStrings("deps"), []string{"@npm//:vitest_coverage-istanbul"})
+				}
+				if first == nil {
+					first = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("effective pool differs after full/partial generation: %s", diff)
+				}
+			}
+			if test.config != "" {
+				writeFile(t, filepath.Join(root, "app/BUILD.bazel"), appBuild)
+				for _, args := range [][]string{nil, {"app"}} {
+					output, err := protoGazelle(t, root, args...)
+					if err == nil || !strings.Contains(output, "config imports Workers pools from both") {
+						t.Fatalf("unselected distinct pools must still reject %v: %v\n%s", args, err, output)
+					}
+				}
+			}
+		})
+	}
+	writeFile(t, filepath.Join(root, "app/BUILD.bazel"), appBuild)
+	writeFile(t, filepath.Join(root, poolCfg), helperConfig)
+	for _, phase := range []string{"helper imports pool", "helper stops importing pool"} {
+		t.Run(phase, func(t *testing.T) {
+			owner := "//worker/pool:node_modules"
+			if phase == "helper stops importing pool" {
+				writeFile(t, filepath.Join(root, "worker/pool/setup.mjs"), "export const cloudflareTest = () => ({});\n")
+				owner = ""
+			}
+			var first map[string]string
+			updates := [][]string{{"app"}, nil, {"app"}}
+			if phase == "helper imports pool" {
+				updates[0] = nil
+			}
+			for _, args := range updates {
+				output, err := protoGazelle(t, root, args...)
+				if err != nil {
+					t.Fatalf("generate %v: %v\n%s", args, err, output)
+				}
+				r := onDiskRule(t, root, "app", "ts_test", "app_test")
+				if got := r.AttrString("workers_pool"); got != owner {
+					t.Errorf("workers_pool = %q, want %q", got, owner)
+				}
+				wantStrings(t, "authored importer data", r.AttrStrings("data"), []string{"//worker/pool:node_modules"})
+				if first == nil {
+					first = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("pool owner differs after repeat/partial generation: %s", diff)
+				}
+			}
+		})
+	}
+	for _, typePath := range []struct {
+		name   string
+		prefix string
+	}{
+		{"declaration import", "import type { Options } from './pool/options.js';\n"},
+		{"reference path", "/// <reference path=\"./pool/helper.ts\" />\n"},
+	} {
+		t.Run(typePath.name+" must not conflict with runtime pool", func(t *testing.T) {
+			configSource := typePath.prefix + poolConfig("./wrangler.jsonc")
+			writeFile(t, filepath.Join(root, poolCfg), configSource)
+			if output, err := protoGazelle(t, root, "app"); err != nil {
+				t.Fatalf("type-only second pool must not conflict with runtime pool: %v\n%s", err, output)
+			}
+			r := onDiskRule(t, root, "app", "ts_test", "app_test")
+			if got := r.AttrString("workers_pool"); got != "//worker:node_modules" {
+				t.Errorf("runtime pool owner = %q, want //worker:node_modules", got)
+			}
+			if got := r.AttrString("wrangler_config"); got != "//worker:wrangler_config" {
+				t.Errorf("wrangler_config = %q, want //worker:wrangler_config", got)
+			}
+			wantStrings(t, "type-only config paths stage no source inputs", r.AttrStrings("config_srcs"), nil)
+			wantLabels(t, "only the runtime path stages its importer", r.AttrStrings("config_node_modules"), []string{"//worker:node_modules"})
+			writeFile(t, filepath.Join(root, "worker/pool/setup.mjs"), "export { cloudflareTest } from './helper.js';\n")
+			writeFile(t, filepath.Join(root, poolCfg), configSource+"import './pool/setup.mjs';\n")
+			output, err := protoGazelle(t, root, "app")
+			if err == nil || !strings.Contains(output, "config imports Workers pools from both") {
+				t.Fatalf("type-only visit must not suppress the helper's conflicting runtime pool: %v\n%s", err, output)
+			}
+		})
+	}
+	writeFile(t, filepath.Join(root, "worker/pool/setup.mjs"), "export { cloudflareTest } from '@cloudflare/vitest-pool-workers';\n")
+	const bothPools = "import './pool/setup.mjs'; import '@cloudflare/vitest-pool-workers'; "
+	writeFile(t, filepath.Join(root, "worker/vitest.config.mts"), bothPools+"export default {};\n")
+	if output, err := protoGazelle(t, root, "app"); err != nil {
+		t.Fatalf("config with no Wrangler preparation needs no pool selection: %v\n%s", err, output)
+	}
+	r := onDiskRule(t, root, "app", "ts_test", "app_test")
+	if got := r.AttrString("workers_pool"); got != "" {
+		t.Errorf("no Wrangler preparation, want no workers_pool, got %q", got)
+	}
+	if got := r.AttrString("coverage_provider"); got != "istanbul" {
+		t.Errorf("config pools still require istanbul, got %q", got)
+	}
+	wantLabels(t, "both runtime pool importers", r.AttrStrings("config_node_modules"), []string{"//worker:node_modules", "//worker/pool:node_modules"})
+	writeFile(t, filepath.Join(root, "worker/vitest.config.mts"), bothPools+"export default { wrangler: { configPath: './wrangler.jsonc' } };\n")
+	output, err := protoGazelle(t, root, "app")
+	if err == nil || !strings.Contains(output, "config imports Workers pools from both") ||
+		!strings.Contains(output, "split these configs into separate ts_test targets") {
+		t.Fatalf("two actual pool owners must be rejected, got %v:\n%s", err, output)
+	}
+	for _, peer := range []string{"4.1.10", "4.1.11"} {
+		t.Run("pool peer resolution "+peer, func(t *testing.T) {
+			resolved := strings.Replace(lock, "version: 0.22.0", "version: 0.18.4(vitest@"+peer+")", 1)
+			resolved = strings.Replace(resolved, "version: 0.18.4\n", "version: 0.18.4(vitest@4.1.11)\n", 1)
+			writeFile(t, filepath.Join(root, pnpmLockfileName), resolved)
+			var first map[string]string
+			for _, imports := range []string{bothPools, "import '@cloudflare/vitest-pool-workers'; import './pool/setup.mjs'; "} {
+				writeFile(t, filepath.Join(root, poolCfg), imports+"export default { wrangler: { configPath: './wrangler.jsonc' } };\n")
+				output, err := protoGazelle(t, root, "app")
+				if peer != "4.1.11" {
+					if err == nil || !strings.Contains(output, "config imports Workers pools from both") {
+						t.Fatalf("different peer resolutions must be rejected, got %v:\n%s", err, output)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("identical full pool resolutions must share Wrangler preparation: %v\n%s", err, output)
+				}
+				r := onDiskRule(t, root, "app", "ts_test", "app_test")
+				wantLabels(t, "both compatible runtime pool importers", r.AttrStrings("config_node_modules"), []string{"//worker:node_modules", "//worker/pool:node_modules"})
+				if got := r.AttrString("workers_pool"); got != "//worker/pool:node_modules" {
+					t.Errorf("deterministic compatible pool owner = %q, want //worker/pool:node_modules", got)
+				}
+				if first == nil {
+					first = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("compatible pool ownership changes with import order: %s", diff)
+				}
+			}
+		})
+	}
+	t.Run("workspace wrapper must retain Workers metadata without copying sources", func(t *testing.T) {
+		memberLock := strings.Replace(lock, "    devDependencies:\n", "    devDependencies:\n      '@acme/config':\n        specifier: workspace:*\n        version: link:worker/pool\n", 1)
+		writeWorkspace(t, root, map[string]string{
+			pnpmLockfileName:            memberLock,
+			"worker/pool/package.json":  `{"name":"@acme/config","exports":"./index.ts"}`,
+			"worker/pool/tsconfig.json": `{"compilerOptions":{"allowJs":true,"types":[]},"files":["index.ts","setup.mjs"]}`,
+			"worker/pool/index.ts":      "export { cloudflareTest } from './setup.mjs';\n",
+			poolCfg:                     strings.Replace(poolConfig("./wrangler.jsonc"), workersPoolPackage, "@acme/config", 1),
+		})
+		if err := os.MkdirAll(filepath.Join(root, "node_modules/@acme"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, "worker/pool"), filepath.Join(root, "node_modules/@acme/config")); err != nil {
+			t.Fatal(err)
+		}
+		var first map[string]string
+		for _, args := range [][]string{nil, {"app"}} {
+			if output, err := protoGazelle(t, root, args...); err != nil {
+				t.Fatalf("workspace wrapper generation %v: %v\n%s", args, err, output)
+			}
+			r := onDiskRule(t, root, "app", "ts_test", "app_test")
+			for attr, want := range map[string]string{
+				"workers_pool":      "//worker/pool:node_modules",
+				"wrangler_config":   "//worker:wrangler_config",
+				"coverage_provider": "istanbul",
+			} {
+				if got := r.AttrString(attr); got != want {
+					t.Errorf("%s = %q, want %q", attr, got, want)
+				}
+			}
+			wantStrings(t, "member store supplies all wrapper sources", r.AttrStrings("config_srcs"), nil)
+			wantStrings(t, "member store supplies wrapper dependencies", r.AttrStrings("config_node_modules"), []string{"//:node_modules/@acme/config"})
+			wantStrings(t, "config wrapper adds only coverage to test dependencies", r.AttrStrings("deps"), []string{"@npm//:vitest_coverage-istanbul"})
+			if first == nil {
+				first = convergeSnapshot(t, root)
+			} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+				t.Fatalf("workspace wrapper metadata changes on partial generation: %s", diff)
+			}
+		}
+		writeFile(t, filepath.Join(root, poolCfg), "import '@acme/config';\n"+
+			strings.Replace(poolConfig("./wrangler.jsonc"), workersPoolPackage, "./pool/index.js", 1))
+		first = nil
+		for _, args := range [][]string{nil, {"app"}} {
+			if output, err := protoGazelle(t, root, args...); err != nil {
+				t.Fatalf("member traversal must not suppress relative config inputs %v: %v\n%s", args, err, output)
+			}
+			r := onDiskRule(t, root, "app", "ts_test", "app_test")
+			wantLabels(t, "relative imports still stage the shared wrapper, its helper and their scope", r.AttrStrings("config_srcs"), []string{"//worker/pool:index.ts", "//worker/pool:package.json", "//worker/pool:setup.mjs"})
+			wantLabels(t, "relative imports still stage their npm importer", r.AttrStrings("config_node_modules"), []string{"//:node_modules/@acme/config", "//worker/pool:node_modules"})
+			if first == nil {
+				first = convergeSnapshot(t, root)
+			} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+				t.Fatalf("relative config inputs change on partial generation: %s", diff)
+			}
+		}
+		t.Run("separate declaration entry must not withdraw kept runtime settings", func(t *testing.T) {
+			writeWorkspace(t, root, map[string]string{
+				"worker/pool/package.json":  `{"name":"@acme/config","exports":{"types":"./index.d.ts","import":"./index.mjs"}}`,
+				"worker/pool/tsconfig.json": `{"compilerOptions":{"allowJs":true,"types":[]},"files":["index.d.ts","index.mjs"]}`,
+				"worker/pool/index.d.ts":    "export { cloudflareTest } from '@cloudflare/vitest-pool-workers';\n",
+				"worker/pool/index.mjs":     "export { cloudflareTest } from '@cloudflare/vitest-pool-workers';\n",
+				poolCfg:                     strings.Replace(poolConfig("./wrangler.jsonc"), workersPoolPackage, "@acme/config", 1),
+				"app/BUILD.bazel": loadDefs + `"ts_test")
+ts_test(
+    name = "app_test",
+    srcs = ["index.test.ts"],
+    config = "//worker:selected", # keep
+    coverage_provider = "istanbul", # keep
+    data = ["//worker/pool:node_modules"],
+    workers_pool = "//worker/pool:node_modules", # keep
+    wrangler_config = "//worker:wrangler_config", # keep
+    deps = [
+        "@npm//:vitest_coverage-istanbul", # keep
+    ],
+)
+`,
+			})
+			var first map[string]string
+			for _, args := range [][]string{nil, {"app"}} {
+				if output, err := protoGazelle(t, root, args...); err != nil {
+					t.Fatalf("separate declaration entry generation %v: %v\n%s", args, err, output)
+				}
+				r := onDiskRule(t, root, "app", "ts_test", "app_test")
+				for attr, want := range map[string]string{
+					"workers_pool":      "//worker/pool:node_modules",
+					"wrangler_config":   "//worker:wrangler_config",
+					"coverage_provider": "istanbul",
+				} {
+					if got := r.AttrString(attr); got != want {
+						t.Errorf("kept %s = %q, want %q", attr, got, want)
+					}
+				}
+				wantStrings(t, "member store supplies both declaration and runtime entries", r.AttrStrings("config_srcs"), nil)
+				wantStrings(t, "member store supplies runtime dependencies", r.AttrStrings("config_node_modules"), []string{"//:node_modules/@acme/config"})
+				wantStrings(t, "kept coverage selection retains its package", r.AttrStrings("deps"), []string{"@npm//:vitest_coverage-istanbul"})
+				if first == nil {
+					first = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("kept runtime settings change on partial generation: %s", diff)
+				}
+			}
+		})
+	})
+}
+
 // No pool edge: none of it, whatever the config names in a literal.
 func TestResolveEdges_NoPoolEdgeWritesNoPoolAttributes(t *testing.T) {
 	c, tc := poolRepo(t, poolRepoLock)
 	r, _ := resolvePooledTest(t, c, tc, nil)
-	for _, attr := range []string{"wrangler_config", "coverage_provider"} {
+	for _, attr := range []string{"wrangler_config", "workers_pool", "coverage_provider"} {
 		if r.Attr(attr) != nil {
 			t.Errorf("%s = %q, want unset: the config runs no pool", attr,
 				r.AttrString(attr))
@@ -2022,7 +2894,7 @@ func TestResolveEdges_ForeignJSONColonDoesNotPoisonLabels(t *testing.T) {
 }
 
 func TestResolveEdges_SourceDependencyKeepsNpmImporterOwnership(t *testing.T) {
-	for _, consumer := range []string{"borrowed", "own supplied identity", "own undeclared", "own other identity", "emitted", "emitted declaration retains private npm ownership", "unknown declaration retains private npm ownership", "config retains supplied npm ownership"} {
+	for _, consumer := range []string{"borrowed", "own supplied identity", "own undeclared", "own other identity", "emitted", "emitted declaration retains private npm ownership", "unknown declaration retains private npm ownership", "config retains separate npm importer"} {
 		t.Run(consumer, func(t *testing.T) {
 			c, tc := edgeRepo(t, nil)
 			consumerDir := "consumer"
@@ -2064,6 +2936,7 @@ func TestResolveEdges_SourceDependencyKeepsNpmImporterOwnership(t *testing.T) {
 				},
 			}
 			want := []string{"//lib"}
+			var wantConfigImporters []string
 			if strings.HasPrefix(consumer, "own ") {
 				resolved := npmFile
 				identity := "@npm//:nested-value"
@@ -2095,12 +2968,12 @@ func TestResolveEdges_SourceDependencyKeepsNpmImporterOwnership(t *testing.T) {
 			from := label.New("", consumerDir, r.Name())
 			logged := captureLog(t, func() {
 				imps := &ruleImports{program: p, edges: sourceEdges(p.edgesBySource(), p.Roots)}
-				if consumer == "config retains supplied npm ownership" {
+				if consumer == "config retains separate npm importer" {
 					imps.config = "lib/" + libraryFile
 					tc.programs.vitestPrograms = configPrograms(map[string][]explainfiles.Edge{
 						imps.config: {importEdge(imps.config, "nested-value", npmFile)},
 					})
-					want = append(want, "@npm//lib:nested-value")
+					wantConfigImporters = []string{"//lib:node_modules"}
 				}
 				deps := resolveEdges(c, ix, r, imps, from, sourceOwner)
 				removeSuppliedProgramInputs(c, r, from, []string{"index.test.ts"}, sourceOwner, map[string]bool{}, deps)
@@ -2109,6 +2982,7 @@ func TestResolveEdges_SourceDependencyKeepsNpmImporterOwnership(t *testing.T) {
 				t.Fatalf("npm ownership reported missing: %s", logged)
 			}
 			wantLabels(t, "consumer retains only its required npm identities", r.AttrStrings("deps"), want)
+			wantLabels(t, "config retains its separate npm importer", r.AttrStrings("config_node_modules"), wantConfigImporters)
 			wantStrings(t, "library sources remain owned", r.AttrStrings("srcs"), []string{"index.test.ts"})
 			wantLabels(t, "consumer scope remains metadata", r.AttrStrings("package_scopes"), []string{"//:package.json"})
 		})

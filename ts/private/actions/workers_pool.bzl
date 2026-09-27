@@ -6,9 +6,20 @@ the struct workers_pool_environment returns, and no other file names wrangler.
 """
 
 load("//tools/launcher:launcher.bzl", "runfiles_link_path")
+load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo")
 load("//ts/private:runtime.bzl", "get_js_tool")
 
+_POOL_PACKAGE = "@cloudflare/vitest-pool-workers"
+
 WORKERS_POOL_ATTRS = {
+    "workers_pool": attr.label(
+        doc = "The node_modules importer or node_modules_member link declaring the pool imported by the " +
+              "config or one of its helpers. When set, its pool supplies " +
+              "Wrangler and is staged for runtime. Otherwise Wrangler uses " +
+              "the first pool on the test's importer chain. Gazelle selects " +
+              "the explicit owner from the resolved config import.",
+        providers = [[NodeModulesInfo], [NpmLinkInfo]],
+    ),
     "wrangler_config": attr.label(
         doc = "The wrangler config a Workers-pool `config` names through " +
               "`wrangler.configPath`. A copy projecting matching `main` and " +
@@ -22,6 +33,24 @@ WORKERS_POOL_ATTRS = {
         allow_single_file = True,
     ),
 }
+
+def _pool_chain(ctx, chain):
+    if not ctx.attr.workers_pool:
+        return chain
+    owner = ctx.attr.workers_pool
+    pool = None
+    if NpmLinkInfo in owner:
+        if owner[NpmLinkInfo].link.path.endswith("/node_modules/" + _POOL_PACKAGE):
+            pool = owner[NpmLinkInfo]
+    else:
+        pool = owner[NodeModulesInfo].links.get(_POOL_PACKAGE)
+    if pool == None:
+        fail(("ts_test {}: workers_pool {} does not link {}. Did you mean " +
+              "the importer or member link declaring the config's pool?").format(ctx.label, owner.label, _POOL_PACKAGE))
+    return struct(
+        dirs = [pool.link.path[:-len("/" + _POOL_PACKAGE)]],
+        npm_files = owner[DefaultInfo].files,
+    )
 
 def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset_files, runtime_sources, runtime_js):
     symlinks = {}
@@ -49,10 +78,11 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset
         if not js_tool:
             fail(("ts_test {}: wrangler_config needs the JS tool toolchain " +
                   "to patch the config.").format(ctx.label))
-        if not chain.dirs:
-            fail(("ts_test {}: wrangler_config needs `node_modules`, the " +
-                  "importer whose links hold the pool; wrangler is the " +
-                  "pool's own edge.").format(ctx.label))
+        pool = _pool_chain(ctx, chain)
+        if not pool.dirs:
+            fail(("ts_test {}: wrangler_config needs a Workers pool importer. " +
+                  "Did you mean to set workers_pool to the importer or member link " +
+                  "declaring the config's pool, or node_modules for the test's chain?").format(ctx.label))
         patched = ctx.actions.declare_file(
             "_{}_wrangler.{}".format(ctx.label.name, src.extension),
         )
@@ -67,11 +97,12 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset
         mapped = {runtime: True for _source, runtime in runtime_files}
         args.add_all([file.short_path for file in runtime_sources.to_list() if file not in mapped and not file.is_directory], before_each = "--runtime-source")
         args.add_all([file.short_path for file in runtime_js.to_list() if file not in mapped and not file.is_directory], before_each = "--runtime-js")
-        args.add_all(chain.dirs, before_each = "--node-modules")
+        args.add_all(pool.dirs, before_each = "--node-modules")
         ctx.actions.run(
             inputs = depset(
                 [src, ctx.file._wrangler_patch],
-                transitive = [chain.npm_files],
+                transitive = [pool.npm_files],
+                order = "postorder",
             ),
             outputs = [patched],
             executable = js_tool.runtime_binary,

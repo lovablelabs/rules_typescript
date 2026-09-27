@@ -58,7 +58,7 @@ over the same attributes.
 """
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
-load("//ts/private:node_modules.bzl", "importer_chain", "importer_linking")
+load("//ts/private:node_modules.bzl", "importer_chain", "importer_linking", "npm_closure", "npm_hoist_links")
 load(
     "//ts/private:providers.bzl",
     "NodeModulesInfo",
@@ -444,17 +444,6 @@ def _bare_view_message(ctx, name):
         name,
     )
 
-def _npm_closure(direct, dep_sets):
-    seen = {}
-    packages = []
-    closure = depset(transitive = dep_sets, order = "postorder").to_list()
-    for info in direct + closure:
-        for reached in [info] + info.transitive_deps.to_list():
-            if reached.store.tree not in seen:
-                seen[reached.store.tree] = True
-                packages.append(reached)
-    return packages
-
 def compile_program(
         ctx,
         es_modules = False,
@@ -532,7 +521,7 @@ def compile_program(
     # A direct package resolves along the chain nearest first, pnpm's walk-up;
     # the @types twin an importer links beside it is the package's to declare.
     direct_npm_infos = [dep.info for dep in direct_npm_deps]
-    packages = _npm_closure(direct_npm_infos, dep_npm_package_sets)
+    packages = npm_closure(direct_npm_infos, dep_npm_package_sets)
     chain = _importer_chain(ctx, packages)
     member_links = {}
     for dep in direct_npm_deps:
@@ -566,15 +555,9 @@ def compile_program(
         for selected in lookup_npm
         if selected.importer.dir not in own_importers
     }
-    for info in packages:
-        hoist = chain[0].hoist
-        if info.package_name in hoist.links:
-            _retain_npm_link(ctx, npm_links, hoist.links[info.package_name])
-        elif info.package_dir == None and info.package_name in hoist.members:
-            _retain_npm_link(ctx, npm_links, NpmLinkInfo(
-                link = hoist.members[info.package_name],
-                store = info.store,
-            ))
+    if packages:
+        for link in npm_hoist_links(packages, chain[0].hoist):
+            _retain_npm_link(ctx, npm_links, link)
     npm_files = depset(
         [entry.link for entry in npm_links.values()],
         transitive = (

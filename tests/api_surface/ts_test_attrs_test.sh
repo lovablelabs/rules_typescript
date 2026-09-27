@@ -15,8 +15,8 @@ fi
 want="${TEST_TMPDIR}/want"
 got="${TEST_TMPDIR}/got"
 
-printf '%s\n' config config_srcs coverage_provider data deps emit env node_modules package_scopes \
-  runner source_node_modules srcs test_srcs tsconfig type_inputs wrangler_config > "${want}"
+printf '%s\n' config config_node_modules config_srcs coverage_provider data deps emit env node_modules package_scopes \
+  runner source_node_modules srcs test_srcs tsconfig type_inputs workers_pool wrangler_config > "${want}"
 
 # A dict runs from `<NAME> = {` to the closing brace at column 0; a public
 # attribute is a 4-space-indented quoted key at that depth.

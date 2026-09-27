@@ -39,8 +39,9 @@ const pool = nodeModules
   .map((dir) => join(resolve(dir), "@cloudflare", "vitest-pool-workers"))
   .find((dir) => existsSync(dir));
 if (!pool) {
-  const dirs = nodeModules.join(", ");
-  fail(`@cloudflare/vitest-pool-workers is linked by none of ${dirs}`);
+  fail(
+    `@cloudflare/vitest-pool-workers is linked by none of ${nodeModules.join(", ")}. Did you mean to set workers_pool to the config's pool owner or add its package to the test's deps?`,
+  );
 }
 const require_ = createRequire(join(realpathSync(pool), "_anchor.cjs"));
 let wrangler;

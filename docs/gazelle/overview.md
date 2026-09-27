@@ -269,7 +269,7 @@ a source, and a BUILD file there is emptied and named the same way.
 | Rule | Name | Attributes Gazelle owns |
 |------|------|-------------------------|
 | `ts_compile` | the directory's basename, `root` at the repository root | `srcs`, `deps`, `tsconfig`, `visibility` |
-| `ts_test` | `<basename>_test` | `srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `wrangler_config`, `coverage_provider` |
+| `ts_test` | `<basename>_test` | `srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
 | `ts_config` | `tsconfig` | `src`, `deps`, `visibility` |
 | `ts_dev_server` | `dev` (`dev_server` when the compile target is `dev`) | `entry_point`, `plugin`, `node_modules`, `visibility` |
 | `filegroup` | `vitest_config` | `srcs`, `visibility` |
@@ -358,12 +358,17 @@ package itself, or the root, for the label to reach it; otherwise the run says
 so and the test gets no `config`. Without the config the tests run in plain
 Node, so a worker's `defineWorkersConfig` pool becomes no pool and a dependency
 that only resolves through Vite (`test.server.deps.inline`) fails at import
-time. Every import of the config, bare or relative, is a dep of the test: the
-config is listed by tsgo from its own directory, as vitest loads it, and the
-listing is followed through first-party source modules, stopping at declared
-generated-output owners. A stale generated file's imports contribute no config
-inputs or dependencies. Source modules remain the test's `config_srcs`, spelled
-from the test's package -- a path under it, or `//<package>:<file>` for a config
+time. The config is listed by tsgo from its own directory, as vitest loads it,
+and the listing is followed through first-party source modules, stopping at
+declared generated-output owners and workspace-member packages. The declaring importers or member links of its npm packages go in
+`config_node_modules`, whose links and store closures use the same runfiles
+staging as `data`. Gazelle leaves authored `data` unchanged, including importer
+targets, and recomputes `config_node_modules` when imports or config selection
+change. Test-program npm deps and the test's importer chain stay their own;
+first-party runtime owners remain in `deps`. A stale generated file's imports
+contribute no config inputs or dependencies. Source modules remain the test's
+`config_srcs`, spelled from the test's package -- a path under it, or
+`//<package>:<file>` for a config
 an ancestor package exports -- and the
 rule writes each at its own path in the runfiles, where the config's relative
 imports resolve ([A config file](../rules/ts-test.md#a-config-file)). A module
@@ -389,6 +394,18 @@ filegroup follows the literal and is written when the package generates; the
 attributes follow the pool's edge and are written with `deps`, from the
 config's listing. A config that names a wrangler config and installs no pool
 gets the filegroup and no test names it.
+
+`workers_pool` is the `node_modules` importer or `node_modules_member` link from the resolved pool import,
+including an import in a relative helper below the entry config. It selects
+the pool whose Wrangler prepares `wrangler_config` and stages that pool for
+the runtime config. The importers in `config_node_modules` remain the config's
+whole npm closure, including workspace-member links. Importers of the same full
+pool resolution share preparation: all runtime links remain staged, and Gazelle
+selects a stable owner. Different versions or peer resolutions require separate
+test targets because one Wrangler action uses one parser. Without Wrangler preparation no selection is emitted. Removing
+the pool import withdraws `workers_pool` on the next run.
+Existing hand-written tests that omit `workers_pool` keep their declared test
+chain's pool selection; the generated explicit owner takes precedence.
 
 ## The tsconfig and Its ts_config
 

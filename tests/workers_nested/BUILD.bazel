@@ -1,9 +1,17 @@
+load("//npm:defs.bzl", "node_modules")
 load("//tests/workers_nested/test:wrangler_config_tests.bzl", "previous_worker_owner")
 load("//ts:defs.bzl", "ts_compile", "ts_config")
 
 # The monorepo shape: package.json, the vitest config and the wrangler config at
 # the worker root, the tests in test/ as a package of their own.
 package(default_visibility = ["//visibility:public"])
+
+# keep
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/workers:node_modules/.pnpm/node_modules",
+    deps = ["@npm_workers//:cloudflare_vitest-pool-workers"],
+)
 
 # The worker has its srcs in src/; a BUILD file there would turn it into a
 # package and make those labels cross a package boundary.

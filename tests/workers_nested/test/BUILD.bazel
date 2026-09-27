@@ -1,12 +1,39 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//npm:defs.bzl", "node_modules")
 load("//tests/vitest:vitest_config.bzl", "vitest_config")
 load("//ts:defs.bzl", "ts_test")
-load(":wrangler_config_tests.bzl", "config_runfiles", "data_shadow_test", "ordinary_twin_runner", "ordinary_twin_test", "wrangler_config_runfiles_test")
+load(":wrangler_config_tests.bzl", "config_runfiles", "data_shadow_test", "different_pool_importer", "ordinary_twin_runner", "ordinary_twin_test", "workspace_pool_package", "wrangler_config_runfiles_test")
 
 # The go_test is hand-named, so the Go language would add a second target for
 # the same source.
 # gazelle:exclude *_test.go
+
+# keep
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/workers:node_modules/.pnpm/node_modules",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+    deps = [
+        "@npm_workers//:vitest",
+        "@npm_workers//:vitest_coverage-istanbul",
+        "@npm_workers//:zod",
+    ],
+)
+
+different_pool_importer(
+    name = "different_pool_importer",
+    testonly = True,
+    base = ":node_modules",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+)
+
+workspace_pool_package(
+    name = "workspace_pool",
+    testonly = True,
+    base = "@npm_workers//:cloudflare_vitest-pool-workers",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+)
 
 ts_test(
     name = "worker_test",
@@ -16,10 +43,12 @@ ts_test(
         "worker.test.ts",
     ],
     config = "//tests/workers_nested:vitest_config",
+    config_node_modules = ["//tests/workers_nested:node_modules"],
     coverage_provider = "istanbul",
     emit = True,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = "//tests/workers_nested:worker_tsconfig",
+    workers_pool = "//tests/workers_nested:node_modules",
     wrangler_config = "//tests/workers_nested:wrangler.jsonc",
     deps = [
         "//tests/codegen_tree:tree",  # keep
@@ -39,6 +68,7 @@ ts_test(
     ],
     config = "//tests/workers_nested:vitest_config",
     coverage_provider = "istanbul",
+    data = ["//tests/workers_nested:node_modules"],
     emit = False,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = "//tests/workers_nested:worker_tsconfig",
@@ -54,6 +84,7 @@ ts_test(
 
 wrangler_config_runfiles_test(
     name = "wrangler_config_runfiles_test",
+    config_importer = "//tests/workers_nested:node_modules",
     dep = "//tests/workers_nested:worker",
     expected_entry = "tests/workers_nested/workers_nested/src/index.js",
     expected_test = "tests/workers_nested/test/workers_nested/test/worker.test.js",
@@ -62,6 +93,7 @@ wrangler_config_runfiles_test(
 
 wrangler_config_runfiles_test(
     name = "source_worker_retains_runtime_module_identity_test",
+    config_importer = "//tests/workers:node_modules",
     dep = "//tests/workers_nested:source_worker",
     expected_entry = "tests/workers_nested/src/index.ts",
     expected_test = "tests/workers_nested/test/worker.test.ts",
@@ -77,6 +109,7 @@ ts_test(
     ],
     config = "//tests/workers_nested:vitest_config",
     coverage_provider = "istanbul",
+    data = ["//tests/workers_nested:node_modules"],
     emit = False,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = "//tests/workers_nested:worker_tsconfig",
@@ -92,6 +125,7 @@ ts_test(
 
 wrangler_config_runfiles_test(
     name = "moved_source_worker_retains_runtime_module_identity_test",
+    config_importer = "//tests/workers:node_modules",
     dep = "//tests/workers_nested/moved_source:worker",
     expected_entry = "tests/workers_nested/moved_source/workers_nested/src/index.ts",
     expected_test = "tests/workers_nested/test/workers_nested/test/worker.test.ts",
@@ -108,6 +142,7 @@ ts_test(
     ],
     config = "//tests/workers_nested:vitest_config",
     coverage_provider = "istanbul",
+    data = ["//tests/workers_nested:node_modules"],
     emit = True,
     node_modules = "//tests/workers:node_modules",
     tsconfig = "//tests/workers_nested:worker_tsconfig",
@@ -123,6 +158,7 @@ ts_test(
 
 wrangler_config_runfiles_test(
     name = "previous_provider_retains_emitted_worker_identity_test",
+    config_importer = "//tests/workers:node_modules",
     dep = "//tests/workers_nested:previous_worker",
     expected_entry = "tests/workers_nested/src/index.js",
     expected_test = "tests/workers_nested/test/worker.test.js",
@@ -252,12 +288,14 @@ ts_test(
         "worker.test.ts",
     ],
     config = "//tests/workers_nested:vitest_config",
+    config_node_modules = ["//tests/workers_nested:node_modules"],
     coverage_provider = "istanbul",
     emit = False,  # keep
     env = {"WORKERS_TEST_ENV": "unavailable"},
     node_modules = "//tests/workers:node_modules",
     tags = ["manual"],  # Executed by the expected-failure test.
     tsconfig = "//tests/workers_nested:worker_tsconfig",
+    workers_pool = "//tests/workers_nested:node_modules",
     wrangler_config = "//tests/workers_nested:wrangler.jsonc",
     deps = [
         "//tests/workers_nested:source_worker",

@@ -69,7 +69,7 @@ is replaced unless a `# keep` holds it:
 |------|-------------------------|
 | `ts_proto_library` | `proto`, `out_dir`, `tsconfig`, `node_modules`, `options`, `deps`, `type_inputs`, `visibility` |
 | `ts_compile` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `visibility` |
-| `ts_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `wrangler_config`, `coverage_provider` |
+| `ts_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
 | `ts_config` | `src`, `deps`, `visibility` |
 | `filegroup(name = "vitest_config")` | `srcs`, `visibility` |
 | `filegroup(name = "wrangler_config")` | `srcs`, `visibility` |

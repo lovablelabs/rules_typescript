@@ -3864,6 +3864,12 @@ func generatedConfigStagesScalarRuntime(it *harness.IT) {
 			helperInput := it.Path("configured/config-helper.txt")
 			it.RequireNoFile(helperInput, "the config helper input must be staged by this check")
 			defer os.Remove(helperInput)
+			declarationInput := it.Path("configured/config-declaration.txt")
+			if producerKind == "ts_codegen" {
+				it.RequireNoFile(declarationInput, "the generated config declaration input must be staged by this check")
+				defer os.Remove(declarationInput)
+				it.Write(declarationInput, "export declare const value: number;\n")
+			}
 			standaloneInput := it.Path("configured/config-standalone.txt")
 			it.RequireNoFile(standaloneInput, "the standalone config input must be staged by this check")
 			defer os.Remove(standaloneInput)
@@ -3879,6 +3885,7 @@ func generatedConfigStagesScalarRuntime(it *harness.IT) {
 			build := it.Path("configured/BUILD.bazel")
 			file, err := rule.LoadData(build, "configured", []byte(loadTsCodegen+it.Read(build)+`
 # gazelle:exclude generated/value.mjs
+# gazelle:exclude generated/value.d.mts
 # gazelle:exclude generated/helper.mjs
 # gazelle:exclude generated/standalone.mjs
 # gazelle:exclude generated/value.json
@@ -3910,9 +3917,9 @@ func generatedConfigStagesScalarRuntime(it *harness.IT) {
 					producer.SetAttr("args", []string{"{srcs}", "{out}"})
 					producer.SetAttr("generator", "//:json_gen")
 					if output.name == "config_runtime" {
-						producer.SetAttr("srcs", []string{output.src, "config-helper.txt"})
-						producer.SetAttr("outs", []string{output.out, "generated/helper.mjs"})
-						producer.SetAttr("args", []string{"{srcs_dir}/config-runtime.txt", "{outs_dir}/value.mjs", "{srcs_dir}/config-helper.txt", "{outs_dir}/helper.mjs"})
+						producer.SetAttr("srcs", []string{output.src, "config-helper.txt", "config-declaration.txt"})
+						producer.SetAttr("outs", []string{output.out, "generated/helper.mjs", "generated/value.d.mts"})
+						producer.SetAttr("args", []string{"{srcs_dir}/config-runtime.txt", "{outs_dir}/value.mjs", "{srcs_dir}/config-helper.txt", "{outs_dir}/helper.mjs", "{srcs_dir}/config-declaration.txt", "{outs_dir}/value.d.mts"})
 					} else if output.name == "config_typescript" {
 						producer.SetAttr("srcs", []string{output.src, "config-typescript-helper.txt"})
 						producer.SetAttr("outs", []string{output.out, "generated/typescript-helper.mjs"})
@@ -3979,6 +3986,9 @@ import { typeScriptValue } from './`+typeScriptFile+`';
 					runtimeValue = 39
 					typeScriptValue = 3
 					it.Write(it.Path("configured/generated/value.mjs"), "export { value } from './stale-secret.mjs';\n")
+					if producerKind == "ts_codegen" {
+						it.Write(it.Path("configured/generated/value.d.mts"), "export { value } from './stale-secret.mjs';\n")
+					}
 					it.Write(it.Path("configured/generated/helper.mjs"), "export const helper = -1;\n")
 					it.Write(it.Path("configured/generated/standalone.mjs"), "export { standaloneValue } from './stale-secret.mjs';\n")
 					it.Write(it.Path("configured/generated/value.json"), `{"offset":-1}`)
@@ -4005,7 +4015,7 @@ import { typeScriptValue } from './`+typeScriptFile+`';
 				if ordinaryInput {
 					wantSources = append(wantSources, "//configured:generated/standalone.mjs")
 					requireLabels(it, "srcs", "//configured:configured", []string{
-						"//configured:config-data.txt", "//configured:config-helper.txt", "//configured:config-runtime.txt",
+						"//configured:config-data.txt", "//configured:config-declaration.txt", "//configured:config-helper.txt", "//configured:config-runtime.txt",
 						"//configured:config-standalone.txt", "//configured:config-typescript-helper.txt", "//configured:config-typescript.txt",
 						"//configured:generated/standalone.mjs", "//configured:src/index.ts",
 					})
@@ -4025,7 +4035,12 @@ import { typeScriptValue } from './`+typeScriptFile+`';
 					}
 				}
 				requireLabels(it, "srcs", "//configured/test:test_test", wantSources)
-				requireLabels(it, "config_srcs", "//configured/test:test_test", []string{"//configured:generated/standalone.mjs", "//configured:" + typeScriptFile, "//configured:generated/value.json", "//configured:generated/value.mjs", "//configured:package.json"})
+				configSrcs := []string{"//configured:generated/standalone.mjs", "//configured:" + typeScriptFile, "//configured:generated/value.json", "//configured:package.json"}
+				if producerKind == "genrule" {
+					configSrcs = append(configSrcs, "//configured:generated/value.mjs")
+					slices.Sort(configSrcs)
+				}
+				requireLabels(it, "config_srcs", "//configured/test:test_test", configSrcs)
 				if producerKind == "ts_codegen" {
 					typeScriptOwner := "//configured:make_config_typescript"
 					if generated.compiled {
@@ -4542,7 +4557,7 @@ func workersPoolConfigReachesTheTest(it *harness.IT) {
 	it.RequireContains(below, `coverage_provider = "istanbul"`,
 		"the pooled test got no coverage_provider; the pool refuses v8")
 	requireLabels(it, "deps", "//pooled/test:test_test", []string{
-		"//pooled:pooled", "@npm//:types_node", "@npm//pooled:cloudflare_vitest-pool-workers",
+		"//pooled:pooled", "@npm//pooled:cloudflare_vitest-pool-workers",
 		"@npm//pooled:cloudflare_workers-types", "@npm//pooled:vitest",
 		"@npm//pooled:vitest_coverage-istanbul"})
 	it.Pass("coverage_provider is istanbul and @vitest/coverage-istanbul is a " +

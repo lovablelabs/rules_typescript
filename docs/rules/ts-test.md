@@ -40,13 +40,16 @@ the compiled files.
 | `args` | `string_list` | `[]` | The runner's command-line flags: node's under the node:test runner, vitest's under the vitest runner; `bazel test --test_arg` appends to them. See [The node:test Runner](#the-nodetest-runner) |
 | `config` | `label` | `None` | The vitest config file (`.ts`/`.mts`/`.cts`/`.js`/`.mjs`/`.cjs`), merged over the generated config's Bazel layer. Every vitest setting is the file's. See [A Config File](#a-config-file) |
 | `config_srcs` | `label_list` | `[]` | The modules `config` imports relatively, and theirs, each at its own path in the runfiles; Gazelle writes it from the config's listing. See [A Config File](#a-config-file) |
+| `config_node_modules` | `label_list` | `[]` | `NodeModulesInfo` importers or `NpmLinkInfo` workspace-member links for the config's npm packages. Their links and store closures are runfiles at their owner paths; Gazelle derives this list without changing `data`, `deps` or the test's `node_modules` |
 | `data` | `label_list` | `[]` | Extra runfiles: fixtures, anything read at run time. `TsInfo` targets retain their declared runtime closure and npm bindings without joining the compiler program or test entry roots |
 | `wrangler_config` | `label` | `None` | The wrangler config a Workers-pool `config` names through `wrangler.configPath`. See [A Workers Pool](#a-workers-pool) |
+| `workers_pool` | `label` | `None` | The `NodeModulesInfo` importer or `NpmLinkInfo` member link declaring the pool imported by the config or its helper. When set, stages the pool for runtime and selects its Wrangler for config preparation. Otherwise preparation uses the first pool on the test's importer chain, including member links in `deps`. Gazelle derives the explicit owner from the resolved import |
 | `coverage_provider` | `string` | `""` | `test.coverage.provider`: `"v8"` (vitest's default) or `"istanbul"`. See [Coverage](#coverage) |
 | `size`, `timeout`, `tags`, `visibility` | | | Bazel's test attributes |
 
-`config`, `config_srcs`, `coverage_provider` and `wrangler_config` are the
-vitest runner's and an analysis error under the node:test runner.
+`config`, `config_srcs`, `config_node_modules`, `workers_pool`, `coverage_provider` and
+`wrangler_config` are the vitest runner's and an analysis error under the
+node:test runner.
 
 Gazelle writes `test_srcs` when an automatically discovered test's closure adds
 labels outside its original roots. Growing that helper closure does
@@ -307,7 +310,7 @@ plain `vitest`:
 
 | Layer | Contents | Workspace projects |
 |-------|----------|---|
-| 1. Bazel | `root` (the `config`'s package; the test's own with none), `cacheDir` under `TEST_TMPDIR`, `server.fs.allow` naming the workspace's runfiles and `bazel-bin`'s realpath, `test.coverage.allowExternal`, `test.server.deps.inline` naming each workspace member in the closure, the plugin giving each module its id (below), the plugin resolving a relative `.ts` specifier to its compiled sibling, and the plugin resolving a tsconfig `paths` alias | yes |
+| 1. Bazel | `cacheDir` under `TEST_TMPDIR`, `server.fs.allow` naming the workspace's runfiles and `bazel-bin`'s realpath, `test.coverage.allowExternal`, `test.server.deps.inline` naming each workspace member in the closure, the plugin giving each module its id (below), the plugin resolving a relative `.ts` specifier to its compiled sibling, and the plugin resolving a tsconfig `paths` alias | yes |
 | 2. user | the `config` file | it supplies the projects |
 | 3. provider | `test.coverage.provider` from `coverage_provider` | no, root only |
 | 4. snapshots | `test.resolveSnapshotPath` | no, root only |
@@ -318,6 +321,11 @@ from a later layer win: a `cacheDir` the config sets wins over layer 1's, and
 `coverage_provider` over a provider the config names. Layers 3
 and 4 are root-only because coverage and `resolveSnapshotPath` are vitest's
 non-project options, applied once and never merged into a project.
+
+After the merge, `root` resolves relative to the config's directory, or the
+test's package with no config. Inline projects inherit that effective root;
+an explicit project `root` resolves relative to it. Absolute roots stay
+absolute.
 
 `test.include` and `test.dir` are set after the merge, on the root and on
 every project. The include matches `.test` and `.spec` filenames using the
@@ -334,6 +342,15 @@ for positional CLI filters too, even when the tests execute emitted JavaScript.
 After discovery, module ids follow the runfiles rules below and snapshots use
 their source locations ([Snapshots](#snapshots)).
 `//tests/vitest/config_include` and `//tests/vitest/many_files` are examples.
+
+When neither the config nor the project declares a root, additional include
+patterns prepend `../` for each ancestor through the staged discovery root, so a
+shared config can discover declared tests in sibling directories. An explicit
+root, including one inherited from the parent config, scopes discovery to its
+staged subtree. Exclusions keep their path basis at the effective root's
+`test.dir`; expanding the include patterns does not rebase them. The config's
+authored `include` and `dir` are replaced so discovery uses the selected source paths. The cost of this traversal is not measured.
+
 
 A module's id is its runfiles path where the runfiles hold the file and its
 realpath otherwise. Vite resolves every id to its realpath -- a test file's and
@@ -386,12 +403,12 @@ either. An array is read as a list of vitest projects and becomes
 `test.projects`; each project in it receives the Bazel layer too, because every
 project gets its own Vite server.
 
-Vite's root is the config's package, so a relative path in the config names the
-directory the file sits in, as under plain `vitest`, whether the test is in that
-package or one below it; with no config it is the test's package. vitest runs
-from that directory, and the config is loaded from its own path in it, so
-`__dirname` and `import.meta.dirname` name it too ([Files at Run
-Time](#files-at-run-time)).
+Vite's root defaults to the config's directory, or the test's package with no
+config. The config can set `root`; inline projects inherit it or set their own
+([The Generated vitest Config](#the-generated-vitest-config)). Vitest's working
+directory stays at the config's directory, and the config loads from its own
+path, so `__dirname` and `import.meta.dirname` name that directory too
+([Files at Run Time](#files-at-run-time)).
 
 `config_srcs` names the modules the config imports relatively and the ones
 they import; each is written at its own path in the runfiles, so `./plugins/foo`
@@ -409,6 +426,25 @@ authored scope File. A producer's unchanged scope symlink retains its exact inpu
 File identity, so staging that input is allowed. Copying the same published File
 remains supported. JSON modules retain exact File identity without requiring
 JavaScript package-scope equality.
+
+`config_node_modules` names the importer or member-link targets that supply the authored
+config's npm imports, including imports from its relative modules and packages
+declared by an ancestor importer. These targets use the same runfiles staging
+as `data`. The test keeps its own `node_modules` and `deps`, so a sibling config
+may use another version of the same npm package. `//tests/vitest/config_importer`
+asserts both versions at run time. Existing importer targets in `data` continue
+to work and remain authored inputs; Gazelle manages only `config_node_modules`
+for this closure, withdrawing entries when imports or config selection change.
+A `# keep` on `config_node_modules` preserves the authored list, including an
+empty one. Gazelle cannot infer missing runfiles from that list: the test's
+importer and dependencies, `data` filegroups or `workers_pool` can supply them.
+The author owns the kept closure; Bazel analysis and runtime loading check the
+actual inputs.
+
+Member packages load from their store closures; their source files are not copied into `config_srcs`.
+Generated config files retain their declared runtime owner in `deps`. A source
+import resolved through a generated declaration retains that owner's JavaScript
+and data outputs without copying the declaration or following its imports.
 
 Gazelle writes `config` from the file plain `vitest` would read -- a
 `vitest.config.*`, else a `vite.config.*`; `//tests/vitest/vite_config` is the
@@ -640,12 +676,11 @@ takes the file as it is.
 ### A Workers Pool
 
 A `config` whose `plugins` hold `@cloudflare/vitest-pool-workers` runs the tests
-inside workerd. Two things put the compiled worker in front of it. One is
-layer 1's: the root is the config's package, so `wrangler.configPath` names the
-file beside the config, and every module has one id ([The Generated vitest
-Config](#the-generated-vitest-config)) -- the pool resolves vitest's own
-modules for workerd by realpath, and a package's file has its realpath as its
-id. The other is `wrangler_config`:
+inside workerd. The default effective root is the config's directory, so
+`wrangler.configPath` names the file beside it. The generated config gives each
+module one id ([The Generated vitest Config](#the-generated-vitest-config)):
+the pool resolves vitest's own modules for workerd by realpath, and a package's
+file has its realpath as its id. `wrangler_config` prepares the worker entry:
 
 ```python
 ts_test(
@@ -654,6 +689,7 @@ ts_test(
     config = "//workers/proxy:vitest_config",
     coverage_provider = "istanbul",
     tsconfig = "tsconfig.json",   # lib esnext + webworker; types @cloudflare/vitest-pool-workers/types
+    workers_pool = "//workers/proxy:node_modules",
     wrangler_config = "//workers/proxy:wrangler.jsonc",
     deps = [
         "//workers/proxy:worker",
@@ -667,6 +703,48 @@ ts_test(
 The pool boots the file `main` names, relative to the configuration directory. `wrangler_config` selects the exact live source/runtime File pair, including moved TypeScript and emitted JavaScript. A test's own `srcs` take precedence for those exact sources; joining dependency sources for checking does not recompile them. For compatibility with older providers, an unmatched entry can select its conventional emitted path from declared runtime JavaScript Files not covered by explicit pairs. A simultaneously published source entry is ambiguous and fails. Explicit pairs, including identity pairs, remain authoritative; incidental files on disk do not establish an entry mapping. Conflicting runtime owners fail; choose one representation in the test dependencies.
 
 The action uses the pool's Wrangler parser and prepares one copy. It replaces the original configuration's runfiles binding and every live asset/module binding whose record names that exact original File, including moved `?raw` imports. Environment entries use the same entry projection. An entry with no declared runtime match remains unchanged, so unused environments need no extra dependencies; the pool reports a missing entry if that environment is selected. A configuration with no `main`, or a `.toml` file containing `#` comments, still fails the action. Other keys and supported comments survive with Wrangler's formatting.
+
+`workers_pool` names the importer or workspace-member link that declares the pool
+for the module importing it. If `config` imports `./pool/setup.mjs` and that helper
+imports the pool, name the helper's declaring importer or member link. Its pool link and store are inputs to
+`WranglerTestConfig` and are staged for the runtime config. `config_node_modules`
+and `data` alone do not identify which of their packages the config imports.
+An explicit `workers_pool` takes precedence over the test's importer chain.
+Existing hand-written targets that omit it keep using the first pool linked
+on that chain, including member links in `deps`; they need no attribute changes. An explicit owner that
+links no pool is an error and does not fall back to the test's pool.
+Gazelle writes this selection from the resolved npm edge when preparing a
+Wrangler config. Importers of the same full pool resolution, including its peer
+dependencies, share preparation; Gazelle keeps their runtime links and selects a
+stable owner. Automatic selection requires one full pool resolution. A
+`workers_pool` with `# keep` supplies the owner directly and bypasses inferred
+pool conflicts; Gazelle still derives config inputs, Wrangler and coverage
+settings. Without Wrangler preparation, no selection is needed; the runtime
+imports and coverage settings remain the config's.
+
+Automatic selection and config runtime staging follow compiler-observed source
+imports. Gazelle omits declaration files and helpers reached only through type
+references or declarations from config runtime inputs. A source import retains
+its npm link or generated owner before traversal stops at the declaration.
+The compiler listing cannot distinguish `import type` in ordinary TypeScript
+source from runtime imports. If a type-only helper introduces another pool
+resolution, set `workers_pool` to the pool that executes and mark it `# keep`.
+The author owns that choice; analysis validates the selected pool link and
+Wrangler loads its parser. Configs that actually run different pools require
+separate test targets.
+
+A workspace wrapper with separate `types` and `import` exports can expose only
+its declaration entry to the compiler while its member store executes JavaScript
+that loads the pool. Gazelle cannot infer that hidden runtime pool. Before
+regenerating such a target, set `workers_pool` to the importer or member link
+declaring the actual pool, set `wrangler_config`, and set
+`coverage_provider = "istanbul"`. Add [`# keep`](../gazelle/directives.md#keep) to
+each attribute and to the matching `@vitest/coverage-istanbul` entry in `deps`.
+Mark existing generated settings the same way when upgrading: generation can
+withdraw unmarked settings and the coverage dependency. The wrapper's member
+store continues to supply its runtime files and dependencies through
+`config_node_modules`; they need no copied `config_srcs` or direct test
+dependencies.
 
 The runner omits each replaced config File and validates that every binding selects the prepared File. Listing the authored config separately in `data`, `config_srcs` or transitive runfiles cannot override it; analysis reports the conflicting File. Other dependency assets retain their published identities. `//tests/workers_nested` covers a moved producer and nested test; `//tests/workers` covers a config beside the tests.
 
@@ -764,9 +842,9 @@ coverage_provider. Every one of them configures vitest, which this target does
 not run. Drop them, or drop `runner` to run the test under vitest.
 ```
 
-The rejected set is `config`, `config_srcs`, `coverage_provider` and
-`wrangler_config`. `bazel coverage` on such a target fails saying it reports
-none. `--test_filter` reaches node as
+The rejected set is `config`, `config_srcs`, `config_node_modules`, `workers_pool`,
+`coverage_provider` and `wrangler_config`. `bazel coverage` on such a target
+fails saying it reports none. `--test_filter` reaches node as
 `--test-name-pattern` (a regular expression over test names), and the exit
 status is the test result. Nothing writes a JUnit XML on either runner; Bazel
 synthesises `test.xml` from the log.
@@ -820,6 +898,7 @@ module's native lookup selects no package. `deps` lists what the test files
 import, each resolved through the
 test's own chain ([the chain](node-modules.md#the-chain)).
 `bazel run //:gazelle` writes the list from tsgo's listing of the package: the
-edges of the test files, the production sources and the declarations, the
-vitest config's imports, and the nearest `package.json`'s `dependencies` and
-`devDependencies`.
+edges of the test files, the production sources and the declarations, and the
+nearest `package.json`'s `dependencies` and `devDependencies`. The authored
+config's npm imports contribute their declaring importers to
+`config_node_modules`; first-party runtime owners remain in `deps`.

@@ -118,6 +118,8 @@ def _node_test_launch(ctx, test):
         for name, value in [
             ("config", ctx.attr.config),
             ("config_srcs", ctx.attr.config_srcs),
+            ("config_node_modules", ctx.attr.config_node_modules),
+            ("workers_pool", ctx.attr.workers_pool),
             ("coverage_provider", ctx.attr.coverage_provider),
             ("wrangler_config", ctx.attr.wrangler_config),
         ]

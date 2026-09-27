@@ -148,27 +148,64 @@ func importsWorkersPool(edges []explainfiles.Edge) bool {
 	return false
 }
 
-func workersPoolAttrs(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
-	edges []explainfiles.Edge, from label.Label) string {
-	if !importsWorkersPool(edges) {
-		return ""
+func workersPoolImport(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
+	e explainfiles.Edge, importer string, from label.Label) bool {
+	if !importsWorkersPool([]explainfiles.Edge{e}) {
+		return false
 	}
 	effective := tc.programs.semanticRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name))
 	if effective == nil {
 		effective = r
 	}
 	if effective.ShouldKeep() {
-		return ""
+		return false
 	}
+	wrangler := effective.AttrString("wrangler_config")
 	if !attrKept(effective, "wrangler_config") {
+		wrangler = ""
 		file, err := tc.programs.wranglerConfigOf(c, cfg)
 		if err != nil {
 			log.Fatal(err)
 		}
 		if file != "" {
-			r.SetAttr("wrangler_config", wranglerConfigLabel(tc, file, cfg, from.Pkg))
+			wrangler = wranglerConfigLabel(tc, file, cfg, from.Pkg)
+			r.SetAttr("wrangler_config", wrangler)
 		}
 	}
+	if wrangler != "" && !attrKept(effective, "workers_pool") {
+		if previous := r.AttrString("workers_pool"); previous != "" && previous != importer {
+			resolution := workersPoolResolution(tc.lock, previous, from)
+			if resolution == "" || resolution != workersPoolResolution(tc.lock, importer, from) {
+				log.Fatalf("typescript: %s: config imports Workers pools from both %s and %s with different resolutions; one wrangler_config needs one pool resolution. Did you mean to split these configs into separate ts_test targets?", from, previous, importer)
+			}
+			if previous < importer {
+				importer = previous
+			}
+		}
+		r.SetAttr("workers_pool", importer)
+	}
+	return true
+}
+
+func workersPoolResolution(lock *npmLock, owner string, from label.Label) string {
+	if lock == nil {
+		return ""
+	}
+	importer, err := label.Parse(owner)
+	if err != nil {
+		return ""
+	}
+	entry := lock.importers[importer.Abs(from.Repo, from.Pkg).Pkg]
+	if entry == nil {
+		return ""
+	}
+	if member := entry.links[workersPoolPackage]; member != "" {
+		return "link:" + member
+	}
+	return entry.deps[workersPoolPackage]
+}
+
+func workersPoolCoverage(tc *tsConfig, r *rule.Rule, cfg string, from label.Label) string {
 	available := false
 	if tc.lock != nil {
 		_, available = tc.lock.declaring(istanbulPackage, from.Pkg)

@@ -370,6 +370,8 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 	for _, dep := range imps.deps {
 		addDep(dep, true)
 	}
+	configImporters := map[string]bool{}
+	configUsesPool := false
 	reported := map[string]bool{}
 	srcs := map[string]sourceInput{}
 	effective := tc.programs.semanticRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name))
@@ -411,7 +413,37 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 			retainScope(scope, spec.Imp)
 		}
 	}
-	walk := func(p *program, edges []explainfiles.Edge, candidates []resolutionCandidate, configFiles map[string]bool) []explainfiles.Edge {
+	walk := func(p *program, edges []explainfiles.Edge, candidates []resolutionCandidate, configFiles map[string]bool) {
+		addEdgeDep := func(e explainfiles.Edge, dep string, storeSource bool) bool {
+			if dep == "" {
+				return false
+			}
+			if configFiles != nil {
+				if npm, err := label.Parse(dep); err == nil {
+					importer := ""
+					if npm.Repo == "npm" {
+						importer = label.New(from.Repo, npm.Pkg, nodeModulesTargetName).Rel(from.Repo, from.Pkg).String()
+					} else if tc.lock != nil && tc.lock.members[barePackageName(e.Specifier)] != "" &&
+						sourceLabelIdentity(npm, language.GenerateArgs{Config: c, Rel: from.Pkg}).Repo == from.Repo &&
+						npm.Name == nodeModulesTargetName+"/"+barePackageName(e.Specifier) {
+						importer = dep
+					}
+					if importer != "" {
+						if !storeSource {
+							configImporters[importer] = true
+						}
+						if workersPoolImport(c, tc, r, imps.config, e, importer, from) {
+							configUsesPool = true
+						}
+						return true
+					}
+				}
+			}
+			if !storeSource {
+				addDep(dep, configFiles != nil, e)
+			}
+			return false
+		}
 		byFrom := p.edgesBySource()
 		candidatesByFrom := map[string][]resolutionCandidate{}
 		if p != nil {
@@ -419,7 +451,14 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 				candidatesByFrom[candidate.from] = append(candidatesByFrom[candidate.from], candidate)
 			}
 		}
-		queue := slices.Clone(edges)
+		type step struct {
+			edge  explainfiles.Edge
+			store bool
+		}
+		queue := make([]step, len(edges))
+		for i, e := range edges {
+			queue[i] = step{edge: e}
+		}
 		admitCandidates := func(candidates []resolutionCandidate) {
 			said := map[int]bool{}
 			for _, candidate := range candidates {
@@ -443,21 +482,31 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 			}
 		}
 		admitCandidates(candidates)
-		reached := map[string]bool{}
-		var resolved []explainfiles.Edge
+		type reachedFile struct {
+			file  string
+			store bool
+		}
+		reached := map[reachedFile]bool{}
 		for len(queue) > 0 {
-			e := queue[0]
+			e, store := queue[0].edge, queue[0].store
 			queue = queue[1:]
 			if linkedMember && (sourceMember || isDeclarationFile(e.From)) && configFiles == nil && strings.HasPrefix(e.From, from.Pkg+"/") &&
 				strings.HasPrefix(e.Specifier, ".") && firstParty(e.To) && isDeclarationFile(e.To) &&
 				!strings.HasPrefix(e.To, from.Pkg+"/") {
 				log.Fatalf("typescript: workspace member %s imports foreign declaration %s from %s; npm_store_member cannot preserve this relative layout. Did you mean to move the declaration inside the member or import it through a separately published package?", from, e.To, e.From)
 			}
+			if configFiles != nil && (e.Kind != explainfiles.Import || isDeclarationFile(e.From)) {
+				continue
+			}
 			source := false
-			if firstParty(e.From) || e.Kind == explainfiles.TypeReference && !firstParty(e.To) {
+			if store {
+				if firstParty(e.From) && tc.lock != nil && e.Kind.ModuleSpecifier() && isBareSpecifier(e.Specifier) {
+					addEdgeDep(e, tc.lock.edgeLabel(e, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))), true)
+				}
+			} else if firstParty(e.From) || configFiles == nil && e.Kind == explainfiles.TypeReference && !firstParty(e.To) {
 				dep, direct := edgeDep(c, ix, tc, e, from, reported, srcs, configFiles, sourceOwner...)
 				source = direct
-				addDep(dep, configFiles != nil, e)
+				store = addEdgeDep(e, dep, false) && source
 				if tc.lock != nil {
 					manifest := tc.programs.nearestManifest(c, parentDir(e.From))
 					if name, member := tc.lock.runtimePackage(e, manifest, tc.programs.generatedProgramFile(c, ix, e.To, true)); name != "" {
@@ -465,13 +514,16 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 						if member {
 							runtime = tc.lock.memberLabel(name, parentDir(e.From), from.Pkg)
 						}
-						addDep(runtime, configFiles != nil, e)
+						addEdgeDep(e, runtime, false)
 					}
 				}
-				resolved = append(resolved, e)
 			}
-			if (source || !firstParty(e.To)) && !reached[e.To] {
-				reached[e.To] = true
+			if configFiles != nil && isDeclarationFile(e.To) {
+				continue
+			}
+			key := reachedFile{file: e.To, store: store}
+			if (source || store || !firstParty(e.To)) && !reached[key] {
+				reached[key] = true
 				if source {
 					if configFiles == nil {
 						if scope := requiredInputScope(c, ix, e.To, e.From); scope != "" {
@@ -488,10 +540,11 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					}
 					admitCandidates(candidatesByFrom[e.To])
 				}
-				queue = append(queue, byFrom[e.To]...)
+				for _, next := range byFrom[e.To] {
+					queue = append(queue, step{edge: next, store: store})
+				}
 			}
 		}
-		return resolved
 	}
 	walk(imps.program, imps.edges, imps.candidates, nil)
 	var typeCandidates []resolutionCandidate
@@ -500,7 +553,6 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 	}
 	walk(imps.program, typeEdges, typeCandidates, nil)
 	if imps.config != "" {
-		var configEdges []explainfiles.Edge
 		files := map[string]bool{}
 		if tc.programs.requireInput(c, ix, imps.config, from.String()) == generatedInput {
 			if dep, _ := edgeDep(c, ix, tc, explainfiles.Edge{From: imps.config, To: imps.config}, from, reported, nil, files); dep != "" {
@@ -519,7 +571,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					}
 				}
 			}
-			configEdges = walk(p, sourceEdges(p.edgesBySource(), []string{imps.config}), candidates, files)
+			walk(p, sourceEdges(p.edgesBySource(), []string{imps.config}), candidates, files)
 		}
 		files[imps.config] = true
 		// An emitted owner publishes a rewritten scope that staging the authored File would replace.
@@ -542,8 +594,10 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 		} else {
 			r.DelAttr("config_srcs")
 		}
-		if dep := workersPoolAttrs(c, tc, r, imps.config, configEdges, from); dep != "" {
-			addDep(dep, true)
+		if configUsesPool {
+			if dep := workersPoolCoverage(tc, r, imps.config, from); dep != "" {
+				addDep(dep, true)
+			}
 		}
 	}
 	for _, scope := range slices.Sorted(maps.Keys(runtimeScopes)) {
@@ -572,6 +626,9 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 	}
 	if len(deps) > 0 {
 		r.SetAttr("deps", slices.Sorted(maps.Keys(deps)))
+	}
+	if len(configImporters) > 0 {
+		r.SetAttr("config_node_modules", slices.Sorted(maps.Keys(configImporters)))
 	}
 	return deps
 }
@@ -1460,7 +1517,9 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 	// Stage the declared File; its owner supplies any declared runtime closure.
 	if configFiles != nil {
 		if producer, _ := s.outputProducer(e.To); producer != nil {
-			configFiles[e.To] = true
+			if !isDeclarationFile(e.To) {
+				configFiles[e.To] = true
+			}
 			owner, _ := generatedDep(c, ix, tc, e.To, from)
 			return owner, false
 		}
@@ -1473,21 +1532,21 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 	generatedFile := producer != nil
 	if !generatedFile {
 		s.requireInput(c, ix, e.To, e.From)
-		if configFiles != nil {
+		if generated == "" && tc.lock != nil {
+			if lbl, ok := tc.lock.memberView(e.Specifier, e.From, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))); ok {
+				if configFiles == nil && len(sourceOwner) > 0 {
+					if key, owner := programDependencyTarget(c, from, lbl); owner != nil {
+						return lbl, readsSources(key)
+					}
+				}
+				return lbl, configFiles != nil
+			}
+		}
+		if configFiles != nil && !isDeclarationFile(e.To) {
 			configFiles[e.To] = true
 		}
 		owner, held := generated, generated != ""
 		if !held {
-			if tc.lock != nil {
-				if lbl, ok := tc.lock.memberView(e.Specifier, e.From, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))); ok {
-					if configFiles == nil && len(sourceOwner) > 0 {
-						if key, owner := programDependencyTarget(c, from, lbl); owner != nil {
-							return lbl, readsSources(key)
-						}
-					}
-					return lbl, configFiles != nil
-				}
-			}
 			owner, held = ruleHolding(c, ix, spec, from, sourceRole)
 		}
 		if held {

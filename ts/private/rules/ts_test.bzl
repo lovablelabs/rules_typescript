@@ -26,7 +26,7 @@ load(
     "validate_runfiles_modules",
 )
 load("//ts/private:node_modules.bzl", "runfiles_dir", "runtime_npm_contexts")
-load("//ts/private:providers.bzl", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations")
+load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations")
 load(
     "//ts/private:runtime.bzl",
     "JS_RUNTIME_TOOLCHAIN_TYPE",
@@ -437,9 +437,10 @@ def _ts_test_impl(ctx):
     if runtime_binary:
         config["runtime"] = rlocation_path(ctx, runtime_binary)
 
+    config_importers = ctx.attr.config_node_modules + ([ctx.attr.workers_pool] if ctx.attr.workers_pool else [])
     files = (
         [test_files_list] + program_outputs +
-        [file for file in ctx.files.data if file not in data_outputs or (file not in replaced_links and file not in replacements)] + launched.files + context_inputs
+        [file for file in ctx.files.data if file not in data_outputs or (file not in replaced_links and file not in replacements)] + ctx.files.config_node_modules + ctx.files.workers_pool + launched.files + context_inputs
     )
     runfiles = ctx.runfiles(
         files = files,
@@ -448,7 +449,7 @@ def _ts_test_impl(ctx):
         ),
         symlinks = _layout_data(ctx, program.layout, [file for file in ctx.files.data if file not in data_outputs]) | launched.symlinks,
     )
-    for target in ctx.attr.data:
+    for target in ctx.attr.data + config_importers:
         runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
     staged_scopes = _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules)
     workspace = ctx.workspace_name + "/"
@@ -564,6 +565,14 @@ _TEST_ATTRS = {
               "or change a JavaScript or TypeScript module's nearest package scope. Use a separate config scope or source mode when they overlap.",
         allow_files = True,
     ),
+    "config_node_modules": attr.label_list(
+        doc = "The importers or member links declaring the authored config's npm packages, " +
+              "including those its relative modules import. Their links and " +
+              "store files enter runfiles at their owner paths, without " +
+              "changing the test program's node_modules or deps. Gazelle " +
+              "derives this list separately from authored data.",
+        providers = [[NodeModulesInfo], [NpmLinkInfo]],
+    ),
     "data": attr.label_list(
         doc = "Extra runfiles for the test: fixtures, anything read at run " +
               "time. TsInfo targets retain their declared runtime closure and npm bindings without joining the compiler program or test entry roots.",
@@ -618,8 +627,8 @@ placed with the test's files in the shared source layout. The importer chain tsg
 checked the tests against is what they run in: the chain's links and the store
 files the program reaches sit in the runfiles at their own paths. `runner`
 names the target that runs the compiled files, //ts/runners:vitest by default;
-`config`, `data`, `coverage_provider` and `wrangler_config` are the vitest
-runner's.
+`config`, `config_srcs`, `config_node_modules`, `workers_pool`, `coverage_provider` and
+`wrangler_config` are the vitest runner's; `data` adds runfiles on either runner.
 """,
 )
 

@@ -4,7 +4,7 @@ load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("//tests:runnable_actions.bzl", "runnable_action_aspect", "runnable_actions")
 load("//tools/launcher:launcher.bzl", "rlocation_path", "runfiles_scope_paths")
-load("//ts/private:providers.bzl", "TsInfo", "TsTestRunnerInfo", "ts_info")
+load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "NpmPackageInfo", "TsInfo", "TsTestRunnerInfo", "ts_info")
 
 _SOURCE = "tests/workers_nested/wrangler.jsonc"
 
@@ -72,6 +72,94 @@ def _ordinary_twin_impl(ctx):
     return analysistest.end(env)
 
 ordinary_twin_test = analysistest.make(_ordinary_twin_impl, attrs = {"dep": attr.label(providers = [TsInfo])})
+
+def _assert_config_pool(env, ctx, action):
+    owner = ctx.attr.config_importer
+    pool = owner[NpmLinkInfo] if NpmLinkInfo in owner else owner[NodeModulesInfo].links["@cloudflare/vitest-pool-workers"]
+    directory = pool.link.path[:-len("/@cloudflare/vitest-pool-workers")]
+    argv = action.argv
+    asserts.true(
+        env,
+        "--node-modules" in argv and argv[argv.index("--node-modules") + 1] == directory,
+        "Wrangler must load the exact pool link used by the authored config",
+    )
+    inputs = action.inputs.to_list()
+    selected_files = [pool.link] + pool.store.transitive.to_list()
+    for file in selected_files:
+        asserts.true(env, file in inputs, "config pool input missing: " + file.path)
+    if ctx.attr.other_importer:
+        other = ctx.attr.other_importer[NodeModulesInfo].links["@cloudflare/vitest-pool-workers"]
+        for file in [other.link] + other.store.transitive.to_list():
+            if file not in selected_files:
+                asserts.false(env, file in inputs, "test pool leaked into config action: " + file.path)
+
+    runfiles = analysistest.target_under_test(env)[DefaultInfo].default_runfiles.files.to_list()
+    for file in selected_files:
+        asserts.true(env, file in runfiles, "runtime config pool input missing: " + file.path)
+
+def _config_pool_action_impl(ctx):
+    env = analysistest.begin(ctx)
+    patches = [a for a in runnable_actions(env) if a.mnemonic == "WranglerTestConfig"]
+    asserts.equals(env, 1, len(patches))
+    if patches:
+        _assert_config_pool(env, ctx, patches[0])
+    return analysistest.end(env)
+
+_CONFIG_IMPORTER = {
+    "config_importer": attr.label(mandatory = True, providers = [[NodeModulesInfo], [NpmLinkInfo]]),
+    "other_importer": attr.label(providers = [NodeModulesInfo]),
+}
+
+config_pool_action_test = analysistest.make(_config_pool_action_impl, attrs = _CONFIG_IMPORTER, extra_target_under_test_aspects = [runnable_action_aspect])
+
+def _workspace_pool_package_impl(ctx):
+    base = ctx.attr.base
+    package = base[NpmPackageInfo]
+    return [
+        base[DefaultInfo],
+        base[TsInfo],
+        NpmPackageInfo(
+            package_name = package.package_name,
+            package_version = package.package_version,
+            peer_id = package.peer_id,
+            package_dir = None,
+            package_root = package.package_root,
+            all_files = package.all_files,
+            transitive_deps = package.transitive_deps,
+            store = package.store,
+        ),
+    ]
+
+workspace_pool_package = rule(
+    implementation = _workspace_pool_package_impl,
+    attrs = {"base": attr.label(mandatory = True, providers = [NpmPackageInfo, TsInfo])},
+)
+
+def _different_pool_importer_impl(ctx):
+    base = ctx.attr.base[NodeModulesInfo]
+
+    link = ctx.actions.declare_file("node_modules/@cloudflare/vitest-pool-workers")
+    store = ctx.actions.declare_file("different_pool_store")
+    ctx.actions.write(link, "analysis-only pool link\n")
+    ctx.actions.write(store, "analysis-only pool store\n")
+    return [
+        DefaultInfo(files = depset([link, store], transitive = [ctx.attr.base[DefaultInfo].files], order = "postorder")),
+        NodeModulesInfo(
+            label = ctx.label,
+            dir = base.dir,
+            links = base.links | {"@cloudflare/vitest-pool-workers": NpmLinkInfo(
+                link = link,
+                store = struct(key = "analysis-only-pool", transitive = depset([store])),
+            )},
+            parent = base.parent,
+            hoist = base.hoist,
+        ),
+    ]
+
+different_pool_importer = rule(
+    implementation = _different_pool_importer_impl,
+    attrs = {"base": attr.label(mandatory = True, providers = [NodeModulesInfo])},
+)
 
 def _wrangler_config_runfiles_impl(ctx):
     env = analysistest.begin(ctx)
@@ -150,6 +238,8 @@ def _wrangler_config_runfiles_impl(ctx):
         asserts.false(env, prepared in files, "the prepared File is exposed only through the declared config bindings")
         for file in configs:
             asserts.false(env, file in files, "an original config File must not shadow its prepared replacement")
+
+        _assert_config_pool(env, ctx, patches[0])
         argv = patches[0].argv
         asserts.equals(env, ctx.file.config.path, argv[argv.index("--config") + 1])
         transported = [json.decode(argv[i + 1]) for i in range(len(argv) - 1) if argv[i] == "--runtime-file"]
@@ -188,7 +278,7 @@ wrangler_config_runfiles_test = analysistest.make(_wrangler_config_runfiles_impl
     "greeting": attr.label(default = Label("//tests/workers_nested:src/greeting.txt"), allow_single_file = True),
     "previous_provider": attr.label(providers = [TsInfo]),
     "test_source": attr.label(default = Label("//tests/workers_nested/test:worker.test.ts"), allow_single_file = True),
-}, extra_target_under_test_aspects = [runnable_action_aspect])
+} | _CONFIG_IMPORTER, extra_target_under_test_aspects = [runnable_action_aspect])
 
 def _fails_with(*messages):
     def _impl(ctx):
