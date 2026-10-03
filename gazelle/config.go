@@ -27,6 +27,8 @@ type tsConfig struct {
 	protoEnabled    []string
 	// The nearest package.json above when the lockfile has no importer for it.
 	foreignManifest string
+	// gazelle:generation_mode update_only: a subdirectory without a BUILD file is not configured.
+	updateOnly bool
 
 	programs   *programStore
 	lock       *npmLock
@@ -316,6 +318,14 @@ func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(
 	if tc.foreignManifest != "" {
 		tc.programs.foreign[rel] = tc.foreignManifest
 	}
+	if f != nil {
+		for _, d := range f.Directives {
+			if d.Key == "generation_mode" {
+				tc.updateOnly = strings.TrimSpace(d.Value) == "update_only"
+			}
+		}
+	}
+	tc.programs.prefetchSubdirListings(c, tc, rel, dirInfo)
 	if tc.programs.generatedOutput(tc.programs.index, rel, false) {
 		c.Exts[languageName] = tc
 		return

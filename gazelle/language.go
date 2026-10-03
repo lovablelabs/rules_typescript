@@ -84,6 +84,7 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if recursive := fs.Lookup("r"); recursive != nil {
 		store.recursive = recursive.Value.String() == "true"
 	}
+	getConfig(c).programs.fullWalk = store.recursive && slices.Equal(store.roots, []string{""})
 
 	if tsgo := getConfig(c).programs.tsgoFlag; tsgo != "" {
 		if _, err := os.Stat(tsgo); err != nil {
@@ -370,6 +371,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 func (l *tsLang) DoneGeneratingRules() {
 	l.programs.ruleListsMayChange()
 	if l.programs != nil {
+		l.programs.stopPrefetch()
 		l.programs.reportCensus()
 		l.programs.reportUnlisted()
 		l.programs.reportUnowned()
