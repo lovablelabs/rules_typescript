@@ -26,6 +26,104 @@ func TestCompilerRetainsInheritedOptionsAndIncludePriority(t *testing.T) {
 	}
 }
 
+func TestCompilerGeneratedRootLosesDeclaredPackageImportScope(t *testing.T) {
+	compiler, err := runfiles.Rlocation(os.Getenv("TSGO_RLOCATION"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, err = filepath.Abs(compiler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, module := range []string{"preserve", "nodenext"} {
+		t.Run(module, func(t *testing.T) {
+			root := t.TempDir()
+			t.Chdir(root)
+			packageType, helperFile, helperBody := "module", "pkg/helper.mjs", "export const helper = 42;\n"
+			if module == "nodenext" {
+				packageType, helperFile, helperBody = "commonjs", "pkg/helper.cjs", "exports.helper = 42;\n"
+			}
+			const generated = binDir + "/pkg/config.ts"
+			const config = binDir + "/pkg/config.tsconfig.json"
+			const options = binDir + "/pkg/config.options.json"
+			const ownership = binDir + "/pkg/config.ownership"
+			const output = binDir + "/pkg/declarations"
+			for name, body := range map[string]string{
+				"baseline.json":    `{"compilerOptions":{"target":"es2022","module":"` + module + `","strict":true,"skipLibCheck":true,"types":[]}}`,
+				"pkg/package.json": `{"type":"` + packageType + `","imports":{"#helper":"./` + filepath.Base(helperFile) + `"}}`,
+				helperFile:         helperBody,
+				generated:          "import { helper } from '#helper'; export const value: number = helper;\n",
+				ownership:          "label\t//pkg:config\nown\t" + generated + "\nown\t" + helperFile + "\nown\tpkg/package.json\n",
+			} {
+				writeFile(t, name, body)
+			}
+			projection := overlayArg(t, generated, "pkg/config.ts")
+			for _, poisoned := range []bool{false, true} {
+				if poisoned {
+					writeFile(t, "pkg/config.ts", "import '#undeclared-stale-helper'; export const value: never = 0;\n")
+				}
+				if err := writeTsconfig([]string{
+					"-tsgo=" + compiler, "-baseline=baseline.json", "-out=" + config,
+					"-options=" + options, "-bin_dir=" + binDir, "-source_only",
+					generated, helperFile,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if err := runTsgo([]string{
+					"-root=" + programRoot, "-source=pkg/package.json", "-source=" + helperFile,
+					projection, "-check=" + ownership,
+					"--", compiler, "--project", config, "--noEmit", "--explainFiles", "--pretty", "false",
+				}); err != nil {
+					t.Fatalf("generated root lost declared package import (poisoned checkout %t): %v", poisoned, err)
+				}
+				if err := runEmit([]string{
+					"-options=" + options, "-tsgo=" + compiler, "-tsconfig=" + config,
+					"-source=pkg/package.json", "-source=" + helperFile, projection,
+					"-root=" + binDir + "/pkg", "-out_dir=" + output,
+					"-scratch=" + binDir + "/pkg/declare", "-declarations_only", generated,
+				}); err != nil {
+					t.Fatalf("declaration emit lost generated root scope: %v", err)
+				}
+				declaration, err := os.ReadFile(output + "/config.d.ts")
+				if err != nil || !strings.Contains(string(declaration), "export declare const value: number;") {
+					t.Fatalf("declaration was not projected to its declared output: %q, %v", declaration, err)
+				}
+				if module == "nodenext" {
+					if err := runEmit([]string{
+						"-options=" + options, "-tsgo=" + compiler, "-tsconfig=" + config,
+						"-source=pkg/package.json", "-source=" + helperFile, projection,
+						"-root=" + binDir + "/pkg", "-out_dir=" + output,
+						"-scratch=" + binDir + "/pkg/commonjs", generated,
+					}); err != nil {
+						t.Fatalf("CommonJS emit lost generated root scope: %v", err)
+					}
+					body, err := os.ReadFile(output + "/config.js")
+					if err != nil || !strings.Contains(string(body), `require("#helper")`) {
+						t.Fatalf("CommonJS output lost its runtime import: %q, %v", body, err)
+					}
+				}
+				if err := layOutProgramRoot(programRoot, []string{"pkg/package.json", helperFile}, nil, nil, []string{projection[len("-overlay="):]}, nil); err != nil {
+					t.Fatal(err)
+				}
+				for logical, original := range map[string]string{"pkg/config.ts": generated, helperFile: helperFile, "pkg/package.json": "pkg/package.json"} {
+					if actual := throughRoot(filepath.Join(root, programRoot), root, root, logical); actual != original {
+						t.Fatalf("%s changed File identity: got %s, want %s", logical, actual, original)
+					}
+				}
+				if err := os.RemoveAll(programRoot); err != nil {
+					t.Fatal(err)
+				}
+				if poisoned {
+					body, err := os.ReadFile("pkg/config.ts")
+					if err != nil || !strings.Contains(string(body), "#undeclared-stale-helper") {
+						t.Fatalf("compiler view changed the checkout twin: %q, %v", body, err)
+					}
+				}
+			}
+		})
+	}
+}
+
 func compilerConfigFixture(t *testing.T, ambient, roots string, hasTypes, hasRoots bool) {
 	compiler, err := runfiles.Rlocation(os.Getenv("TSGO_RLOCATION"))
 	if err != nil {

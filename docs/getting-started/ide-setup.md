@@ -273,9 +273,9 @@ build --aspects=@rules_typescript//ts/private:tsconfig_aspect.bzl%tsconfig_aspec
 build --output_groups=+ide_fragments
 ```
 
-Every target whose closure holds a `ts_compile` package then gets a
-`<target>.tsconfig-fragment.json` beside its other outputs in
-`bazel-out`, and the resolver merges what it finds there into the map. `+group` is
+Each compiler target that contributes a package writes a
+`<target>.tsconfig-fragment.json` beside its other outputs in `bazel-out`.
+Wrappers forward those fragments, and the resolver merges them into the map. `+group` is
 additive, so this composes with `--output_groups=+_validation` and with anything
 a command line adds, and any ordinary `bazel build` refreshes the fragments.
 

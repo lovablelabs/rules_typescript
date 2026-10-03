@@ -1,12 +1,39 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//npm:defs.bzl", "node_modules")
 load("//tests/vitest:vitest_config.bzl", "vitest_config")
 load("//ts:defs.bzl", "ts_test")
-load(":wrangler_config_tests.bzl", "data_shadow_test", "wrangler_config_runfiles_test")
+load(":wrangler_config_tests.bzl", "config_runfiles", "data_shadow_test", "different_pool_importer", "ordinary_twin_runner", "ordinary_twin_test", "workspace_pool_package", "wrangler_config_runfiles_test")
 
 # The go_test is hand-named, so the Go language would add a second target for
 # the same source.
 # gazelle:exclude *_test.go
+
+# keep
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/workers:node_modules/.pnpm/node_modules",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+    deps = [
+        "@npm_workers//:vitest",
+        "@npm_workers//:vitest_coverage-istanbul",
+        "@npm_workers//:zod",
+    ],
+)
+
+different_pool_importer(
+    name = "different_pool_importer",
+    testonly = True,
+    base = ":node_modules",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+)
+
+workspace_pool_package(
+    name = "workspace_pool",
+    testonly = True,
+    base = "@npm_workers//:cloudflare_vitest-pool-workers",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+)
 
 ts_test(
     name = "worker_test",
@@ -16,10 +43,12 @@ ts_test(
         "worker.test.ts",
     ],
     config = "//tests/workers_nested:vitest_config",
+    config_node_modules = ["//tests/workers_nested:node_modules"],
     coverage_provider = "istanbul",
     emit = True,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = "//tests/workers_nested:worker_tsconfig",
+    workers_pool = "//tests/workers_nested:node_modules",
     wrangler_config = "//tests/workers_nested:wrangler.jsonc",
     deps = [
         "//tests/codegen_tree:tree",  # keep
@@ -39,6 +68,7 @@ ts_test(
     ],
     config = "//tests/workers_nested:vitest_config",
     coverage_provider = "istanbul",
+    data = ["//tests/workers_nested:node_modules"],
     emit = False,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = "//tests/workers_nested:worker_tsconfig",
@@ -54,7 +84,86 @@ ts_test(
 
 wrangler_config_runfiles_test(
     name = "wrangler_config_runfiles_test",
+    config_importer = "//tests/workers_nested:node_modules",
+    dep = "//tests/workers_nested:worker",
+    expected_entry = "tests/workers_nested/workers_nested/src/index.js",
+    expected_test = "tests/workers_nested/test/workers_nested/test/worker.test.js",
     target_under_test = ":worker_test",
+)
+
+wrangler_config_runfiles_test(
+    name = "source_worker_retains_runtime_module_identity_test",
+    config_importer = "//tests/workers:node_modules",
+    dep = "//tests/workers_nested:source_worker",
+    expected_entry = "tests/workers_nested/src/index.ts",
+    expected_test = "tests/workers_nested/test/worker.test.ts",
+    target_under_test = ":source_worker_test",
+)
+
+ts_test(
+    name = "moved_source_worker_test",
+    size = "medium",
+    srcs = [
+        "raw.d.ts",
+        "worker.test.ts",
+    ],
+    config = "//tests/workers_nested:vitest_config",
+    coverage_provider = "istanbul",
+    data = ["//tests/workers_nested:node_modules"],
+    emit = False,  # keep
+    node_modules = "//tests/workers:node_modules",
+    tsconfig = "//tests/workers_nested:worker_tsconfig",
+    wrangler_config = "//tests/workers_nested:wrangler.jsonc",
+    deps = [
+        "//tests/codegen_tree:tree",  # keep
+        "//tests/workers_nested/moved_source:worker",
+        "@npm_workers//:cloudflare_vitest-pool-workers",
+        "@npm_workers//:vitest",
+        "@npm_workers//:vitest_coverage-istanbul",
+    ],
+)
+
+wrangler_config_runfiles_test(
+    name = "moved_source_worker_retains_runtime_module_identity_test",
+    config_importer = "//tests/workers:node_modules",
+    dep = "//tests/workers_nested/moved_source:worker",
+    expected_entry = "tests/workers_nested/moved_source/workers_nested/src/index.ts",
+    expected_test = "tests/workers_nested/test/workers_nested/test/worker.test.ts",
+    target_under_test = ":moved_source_worker_test",
+)
+
+# keep
+ts_test(
+    name = "previous_provider_worker_test",
+    size = "medium",
+    srcs = [
+        "raw.d.ts",
+        "worker.test.ts",
+    ],
+    config = "//tests/workers_nested:vitest_config",
+    coverage_provider = "istanbul",
+    data = ["//tests/workers_nested:node_modules"],
+    emit = True,
+    node_modules = "//tests/workers:node_modules",
+    tsconfig = "//tests/workers_nested:worker_tsconfig",
+    wrangler_config = "//tests/workers_nested:wrangler.jsonc",
+    deps = [
+        "//tests/codegen_tree:tree",
+        "//tests/workers_nested:previous_worker_provider",
+        "@npm_workers//:cloudflare_vitest-pool-workers",
+        "@npm_workers//:vitest",
+        "@npm_workers//:vitest_coverage-istanbul",
+    ],
+)
+
+wrangler_config_runfiles_test(
+    name = "previous_provider_retains_emitted_worker_identity_test",
+    config_importer = "//tests/workers:node_modules",
+    dep = "//tests/workers_nested:previous_worker",
+    expected_entry = "tests/workers_nested/src/index.js",
+    expected_test = "tests/workers_nested/test/worker.test.js",
+    previous_provider = "//tests/workers_nested:previous_worker_provider",
+    target_under_test = ":previous_provider_worker_test",
 )
 
 # The same file in `data` as well; asserted to fail at analysis, so manual.
@@ -62,7 +171,7 @@ ts_test(
     name = "data_shadow",
     srcs = ["data_shadow.test.ts"],
     data = ["//tests/workers_nested:wrangler.jsonc"],
-    emit = True,  # keep
+    emit = False,  # keep
     node_modules = "//tests/workers:node_modules",
     tags = ["manual"],
     wrangler_config = "//tests/workers_nested:wrangler.jsonc",
@@ -72,6 +181,75 @@ ts_test(
 data_shadow_test(
     name = "data_shadow_test",
     target_under_test = ":data_shadow",
+)
+
+config_runfiles(
+    name = "authored_config_runfiles",
+    testonly = True,
+    config = "//tests/workers_nested:wrangler.jsonc",
+)
+
+ts_test(
+    name = "transitive_data_shadow",
+    srcs = ["data_shadow.test.ts"],
+    data = [":authored_config_runfiles"],
+    emit = False,  # keep
+    node_modules = "//tests/workers:node_modules",
+    tags = ["manual"],  # Expected analysis failure.
+    wrangler_config = "//tests/workers_nested:wrangler.jsonc",
+    deps = ["@npm_workers//:cloudflare_vitest-pool-workers"],
+)
+
+data_shadow_test(
+    name = "transitive_data_cannot_replace_prepared_config_test",
+    target_under_test = ":transitive_data_shadow",
+)
+
+ts_test(
+    name = "config_srcs_shadow",
+    srcs = [
+        "data_shadow.test.ts",
+        "//tests/workers_nested:src/environment.ts",
+        "//tests/workers_nested:src/greeting.txt",
+        "//tests/workers_nested:src/index.ts",
+        "//tests/workers_nested:src/layout.ts",
+        "//tests/workers_nested:src/text.d.ts",
+    ],
+    config = "//tests/workers_nested:vitest_config",
+    config_srcs = ["//tests/workers_nested:wrangler.jsonc"],
+    emit = False,  # keep
+    node_modules = "//tests/workers:node_modules",
+    tags = ["manual"],  # Expected analysis failure.
+    tsconfig = "//tests/workers_nested:worker_tsconfig",
+    wrangler_config = "//tests/workers_nested:wrangler.jsonc",
+    deps = [
+        "@npm_workers//:cloudflare_vitest-pool-workers",
+        "@npm_workers//:vitest",
+        "@npm_workers//:zod",
+    ],
+)
+
+data_shadow_test(
+    name = "config_srcs_shadow_test",
+    target_under_test = ":config_srcs_shadow",
+)
+
+ordinary_twin_runner(
+    name = "ordinary_twin_runner",
+    testonly = True,
+)
+
+ts_test(
+    name = "ordinary_twin_subject",
+    runner = ":ordinary_twin_runner",
+    tags = ["manual"],  # The analysis test checks the synthetic runner's runfiles.
+    deps = [":ordinary_twin_runner"],
+)
+
+ordinary_twin_test(
+    name = "ordinary_module_precedence_survives_unused_es_twin_test",
+    dep = ":ordinary_twin_runner",
+    target_under_test = ":ordinary_twin_subject",
 )
 
 vitest_config(
@@ -110,12 +288,14 @@ ts_test(
         "worker.test.ts",
     ],
     config = "//tests/workers_nested:vitest_config",
+    config_node_modules = ["//tests/workers_nested:node_modules"],
     coverage_provider = "istanbul",
     emit = False,  # keep
     env = {"WORKERS_TEST_ENV": "unavailable"},
     node_modules = "//tests/workers:node_modules",
     tags = ["manual"],  # Executed by the expected-failure test.
     tsconfig = "//tests/workers_nested:worker_tsconfig",
+    workers_pool = "//tests/workers_nested:node_modules",
     wrangler_config = "//tests/workers_nested:wrangler.jsonc",
     deps = [
         "//tests/workers_nested:source_worker",

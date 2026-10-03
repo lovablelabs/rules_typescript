@@ -3,8 +3,85 @@ declare; styles-alias declares it, and pnpm's hidden hoist links app-a's
 5.0.1, a snapshot no edge of this closure reaches. The test runs the import;
 the chain test pins the link and its tree among the tsgo action's inputs."""
 
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("//npm:defs.bzl", "node_modules", "node_modules_member")
+load("//npm/private:npm_translate_lock.bzl", "peer_suffix_dir_name")
+load("//npm/private:store.bzl", "npm_store_member")
+load("//npm/private:workspace_package.bzl", "npm_workspace_package")
 load("//tests/npm:forest_tests.bzl", "chain_test")
-load("//ts:defs.bzl", "ts_test")
+load("//ts:defs.bzl", "ts_compile", "ts_test")
+
+exports_files(
+    ["vitest.config.mjs"],
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+)
+
+# keep
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/npm/features:node_modules/.pnpm/node_modules",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+    deps = [
+        "@npm_features//:styles-alias",
+        "@npm_features//:zod",
+    ],
+)
+
+write_file(
+    name = "config_member_source",
+    out = "config-member.mjs",
+    content = [
+        'import "styles-alias";',
+        'export { z } from "zod";',
+    ],
+)
+
+write_file(
+    name = "config_member_manifest",
+    out = "package.json",
+    content = [json.encode({
+        "name": "config-hoist-member",
+        "type": "module",
+        "exports": "./config-member.mjs",
+    })],
+)
+
+# keep
+ts_compile(
+    name = "config_member",
+    srcs = [":config_member_source"],
+    emit = True,
+    node_modules = ":node_modules",
+    package_scopes = [":config_member_manifest"],
+    deps = [
+        "@npm_features//:styles-alias",
+        "@npm_features//:zod",
+    ],
+)
+
+npm_store_member(
+    name = "node_modules/.pnpm/config-hoist-member@0.0.0/node_modules/config-hoist-member",
+    member = ":config_member",
+    member_dir = "tests/npm/features/hoist",
+    deps = {
+        "//tests/npm/features:node_modules/.pnpm/ansi-styles@6.2.3_{}/node_modules/ansi-styles".format(peer_suffix_dir_name("(ansi-regex@6.2.2)")): "styles-alias",
+        "//tests/npm/features:node_modules/.pnpm/zod@3.24.2/node_modules/zod": "zod",
+    },
+)
+
+npm_workspace_package(
+    name = "config_member_package",
+    package_name = "config-hoist-member",
+    member_dir = "tests/npm/features/hoist",
+    store = ":node_modules/.pnpm/config-hoist-member@0.0.0/node_modules/config-hoist-member",
+    target = ":config_member",
+)
+
+node_modules_member(
+    name = "node_modules/config-hoist-member",
+    member = ":config_member_package",
+    visibility = ["//tests/vitest/config_importer/test:__pkg__"],
+)
 
 # keep
 ts_test(

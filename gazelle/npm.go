@@ -26,25 +26,25 @@ type pnpmImporter struct {
 // What pnpm-lock.yaml says the hub declares: every name it mentions, the
 // importers by directory ("" is the root) and each member's directory.
 type npmLock struct {
-	repoRoot  string
 	names     map[string]bool
 	importers map[string]*pnpmImporter
 	members   map[string]string
+	// Built on first use: members is complete once the lockfile is parsed.
+	memberLabels map[string]string
 }
 
-func loadNpmLock(repoRoot string) (*npmLock, error) {
+func loadNpmLock(repoRoot string, manifestAt func(string) *manifest) (*npmLock, error) {
 	data, err := os.ReadFile(filepath.Join(repoRoot, pnpmLockfileName))
 	if err != nil {
 		return nil, err
 	}
-	return parseNpmLock(repoRoot, strings.Split(string(data), "\n")), nil
+	return parseNpmLock(strings.Split(string(data), "\n"), manifestAt), nil
 }
 
 // The members are the hub's (npm/lazy.bzl): every link: name, then the
 // manifest name of every importer but the root that no link names.
-func parseNpmLock(repoRoot string, lines []string) *npmLock {
+func parseNpmLock(lines []string, manifestAt func(string) *manifest) *npmLock {
 	l := &npmLock{
-		repoRoot:  repoRoot,
 		names:     parsePnpmLockNames(lines),
 		importers: parsePnpmImporters(lines),
 		members:   map[string]string{},
@@ -63,7 +63,7 @@ func parseNpmLock(repoRoot string, lines []string) *npmLock {
 		if dir == "" || linked[dir] {
 			continue
 		}
-		if m := readManifest(repoRoot, dir); m != nil && m.name != "" {
+		if m := manifestAt(dir); m != nil && m.name != "" {
 			l.members[m.name] = dir
 		}
 	}
@@ -124,8 +124,15 @@ func (l *npmLock) nodeModulesLabel(pkg string) string {
 
 // declaring is the nearest importer at or above dir that declares name.
 func (l *npmLock) declaring(name, dir string) (string, bool) {
+	return l.importerDeclaring(name, dir, false)
+}
+
+func (l *npmLock) importerDeclaring(name, dir string, member bool) (string, bool) {
 	for imp := l.importerAbove(dir); ; imp = l.importerAbove(parentDir(imp)) {
 		if i := l.importers[imp]; i != nil {
+			if member && i.links[name] != "" {
+				return imp, true
+			}
 			if _, ok := i.deps[name]; ok {
 				return imp, true
 			}
@@ -170,62 +177,115 @@ func (l *npmLock) chainTypesLabel(e explainfiles.Edge, pkg string) string {
 
 // memberView is the member a bare specifier from file names, spelled by
 // memberLabel; the nearest manifest's own name is a self-reference, no view.
-func (l *npmLock) memberView(spec, file, pkg string) (string, bool) {
-	if !isBareSpecifier(spec) {
+func (l *npmLock) memberView(spec, file, pkg string, m *manifest) (string, bool) {
+	name := l.memberName(spec, m)
+	if name == "" {
 		return "", false
+	}
+	view := l.memberLabel(name, parentDir(file), pkg)
+	return view, view != ""
+}
+
+func (l *npmLock) memberName(spec string, m *manifest) string {
+	if !isBareSpecifier(spec) {
+		return ""
 	}
 	name := barePackageName(spec)
 	if _, ok := l.members[name]; !ok {
-		return "", false
+		return ""
 	}
-	m := nearestManifest(l.repoRoot, parentDir(file))
 	if m != nil && m.name == name {
-		return "", false
+		return ""
 	}
-	return l.memberLabel(name, pkg), true
+	return name
 }
 
-// memberLabel spells member name as the nearest importer at or above pkg has
-// it: a link's target, a registry version's hub label, or "" and a line.
-func (l *npmLock) memberLabel(name, pkg string) string {
-	for dir, more := pkg, true; more; dir, more = parentDir(dir), dir != "" {
-		imp, ok := l.importers[dir]
-		if !ok {
-			continue
-		}
-		if imp.links[name] != "" {
+func (l *npmLock) memberLabel(name, origin, pkg string) string {
+	if dir, ok := l.importerDeclaring(name, origin, true); ok {
+		if l.importers[dir].links[name] != "" {
 			return label.New("", dir, "node_modules/"+name).Rel("", pkg).String()
 		}
-		if _, ok := imp.deps[name]; ok {
-			return l.label(name, dir)
-		}
+		return l.label(name, dir)
 	}
 	log.Printf("typescript: %s: the workspace member %q is neither linked nor "+
-		"declared by an importer at or above it; no dep", orRepoRoot(pkg), name)
+		"declared by an importer at or above it; no dep", orRepoRoot(origin), name)
 	return ""
 }
 
 // edgeLabel is the label an edge into node_modules takes: the chain's @types
 // for a store file's, else the lockfile's name for the specifier or the file.
-func (l *npmLock) edgeLabel(e explainfiles.Edge, pkg string) string {
+func (l *npmLock) edgeLabel(e explainfiles.Edge, pkg string, m *manifest) string {
 	if !firstParty(e.From) {
 		return l.chainTypesLabel(e, pkg)
 	}
-	if lbl, ok := l.memberView(e.Specifier, e.From, pkg); ok {
+	if lbl, ok := l.memberView(e.Specifier, e.From, pkg, m); ok {
 		return lbl
 	}
-	name := npmPackageName(e.To)
-	if e.Kind.ModuleSpecifier() && isBareSpecifier(e.Specifier) {
-		if bare := barePackageName(e.Specifier); l.names[bare] || !l.names[name] {
-			name = bare
-		}
-	}
+	name := l.edgeName(e)
 	if !l.names[name] {
 		log.Printf("typescript: %s: %q names the npm package %q, which %s does "+
 			"not mention; no dep", e.From, e.Specifier, name, pnpmLockfileName)
 		return ""
 	}
 	return l.label(name, parentDir(e.From))
+}
+
+func (l *npmLock) edgeName(e explainfiles.Edge) string {
+	name := npmPackageName(e.To)
+	if e.Kind.ModuleSpecifier() && isBareSpecifier(e.Specifier) {
+		if bare := barePackageName(e.Specifier); l.names[bare] || !l.names[name] {
+			name = bare
+		}
+	}
+	return name
+}
+
+func (l *npmLock) runtimePackage(e explainfiles.Edge, m *manifest, generated bool) (string, bool) {
+	if !e.Kind.ModuleSpecifier() || !isBareSpecifier(e.Specifier) || !isDeclarationFile(e.To) && !generated {
+		return "", false
+	}
+	name := barePackageName(e.Specifier)
+	if _, member := l.members[name]; member {
+		return l.memberName(e.Specifier, m), true
+	}
+	if _, declared := l.declaring(name, parentDir(e.From)); declared {
+		return name, false
+	}
+	return "", false
+}
+
+func (l *npmLock) edgeImporter(e explainfiles.Edge, m *manifest, pkg string, generated bool) (string, bool) {
+	if !firstParty(e.From) {
+		return "", false
+	}
+	type lookup struct {
+		name   string
+		member bool
+	}
+	names := []lookup{{name: npmPackageName(e.To)}}
+	if name := l.memberName(e.Specifier, m); name != "" {
+		names = append(names, lookup{name: name, member: true})
+	} else if name, member := l.runtimePackage(e, m, generated); name != "" {
+		names = append(names, lookup{name: name, member: member})
+	} else if npmPackageName(e.To) != "" {
+		names = append(names, lookup{name: l.edgeName(e)})
+	}
+	scope, needed := "", false
+	for _, name := range names {
+		if name.name == "" {
+			continue
+		}
+		dir, ok := l.importerDeclaring(name.name, parentDir(e.From), name.member)
+		if !ok {
+			continue
+		}
+		consumer, supplied := l.importerDeclaring(name.name, pkg, name.member)
+		needed = needed || !supplied || consumer != dir
+		if len(dir) > len(scope) {
+			scope = dir
+		}
+	}
+	return scope, needed
 }
 
 // manifestLabels is a ts_test's runtime union: the manifest's dependencies
@@ -238,7 +298,7 @@ func (l *npmLock) manifestLabels(m *manifest, pkg string) []string {
 	for _, name := range m.deps {
 		switch _, member := l.members[name]; {
 		case member:
-			if lbl := l.memberLabel(name, pkg); lbl != "" {
+			if lbl := l.memberLabel(name, pkg, pkg); lbl != "" {
 				labels = append(labels, lbl)
 			}
 		case l.names[name]:

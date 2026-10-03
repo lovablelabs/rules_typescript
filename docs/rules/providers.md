@@ -42,9 +42,9 @@ all or leaves a target's out.
 | `js` | `depset of File` | The `.js` files this target produces: compiled output, plus any JavaScript src staged as-is |
 | `js_maps` | `depset of File` | The `.js.map` beside them |
 | `declarations` | `depset of File` | The declarations this target produces, plus the ambient ones it passes through from `srcs`. Emitted when a consumer's compile reads them or `--output_groups=declarations` asks, never as a default output ([Which Tool Emits the Declarations](ts-compile.md#which-tool-emits-the-declarations)). A global one is in scope in a consumer only when the consumer's tsconfig `types` names it |
-| `data` | `depset of File` | The srcs that are neither TypeScript, JavaScript nor declarations, staged at their package-relative paths beside the compiled `.js` |
-| `manifest` | `File or None` | The `package.json` at the package's root as built, every source-file target rewritten to the emitted file, `<name>.package.json`; a dependent's program root lays it at the package's path and the member's store tree copies it there. The src as written is in `data` |
-| `sources` | `depset of File` | The srcs the program reads as its own: `.ts`, `.tsx`, JavaScript and declarations. A `ts_test` in the same package stages them in its runfiles at their source paths; one under the same `tsconfig` checks them as its own program's ([The Test's Program](ts-test.md#the-tests-program)) |
+| `data` | `depset of File` | Non-program srcs and explicit `ts_compile.data` assets. Assets use package-relative paths; JSON follows the importing module's runtime layout, with original paths for an all-source closure |
+| `manifest` | `File or None` | The package-root npm publication manifest: `<name>.package.json` with entry points projected when emission is enabled or runtime placement changes; the original File for source mode with an unchanged layout. A dependent's compiler overlay and a member's store tree use it. Runtime package scopes use the `package_scopes` projection; explicit JSON modules in `srcs` retain authored contents, subject to scope compatibility ([Compiler inputs and emitted layout](ts-compile.md#compiler-inputs-and-emitted-layout)) |
+| `sources` | `depset of File` | The original source Files the compiler reads as its own: `.ts`, `.tsx`, JavaScript and declarations. A `ts_test` under the same `tsconfig` checks them as its own program's inputs; runtime placement uses the recorded source/runtime pairs ([The Test's Program](ts-test.md#the-tests-program)) |
 | `tsconfig` | `File or None` | The `tsconfig.json` the program's options come from, the `tsconfig` attribute's file: the identity a `ts_test` joins a dep's sources by |
 | `transitive_js` | `depset of File` | Every `.js` from this target and its first-party deps |
 | `transitive_js_maps` | `depset of File` | Their `.js.map` |
@@ -52,7 +52,32 @@ all or leaves a target's out.
 | `transitive_es_twins` | `depset of (File, File)` | For a program tsgo emits, each `.js` of this target and its first-party deps paired with the ES module oxc emits from the same source; the vitest runner stages the second at the first's runfiles path ([The Module Format](ts-compile.md#the-module-format)) |
 | `npm_packages` | `depset of NpmPackageInfo` | The npm closure of this target's deps: what the ownership manifest names and a runner checks its packages against. A package itself arrives through its `NpmPackageInfo` |
 | `npm_files` | `depset of File` | The store files this target's program and runtime reach: the importer links of its direct npm deps and their `@types` twins, the member links its deps name, every store tree and edge link of their closures, the hoist links whose names the closure holds with the trees they enter ([The Store](node-modules.md#the-store)), and its first-party deps' `npm_files`. An action stages this and nothing else of the store. A dep's emitted `.d.ts` imports the packages the dep declared and resolves them from the dep's own importer's links, which this depset carries into the consumer's action |
-| `owners` | `depset of struct(label, files, declarations)` | One record per first-party target in the closure, this one first: `label`, the string a `deps` list writes for it; `files`, the sources, declarations, data and manifest as built it stages; `declarations`, its own alone. The tsgo action reads the closure's records to name the target a listed file belongs to ([Deps have to be direct](ts-compile.md#deps-have-to-be-direct)); a consumer's program reads the `declarations` of every record in its closure but a dep's it holds as sources, so that dep's declarations arrive by no path ([The Test's Program](ts-test.md#the-tests-program)). An npm package's declarations reach a consumer through `npm_files`, not through a record |
+| `owners` | `depset of struct(label, files, declarations, type_inputs, importers)` with optional `declaration_files`, `canonical_links`, `asset_files`, `runtime_files`, `runtime_scopes` and `npm_bindings` | One record per first-party target in the closure, this one first: `label`, the string a `deps` list writes; `files`, its owned files for the [strict-deps check](ts-compile.md#deps-have-to-be-direct); `declarations`, its own alone; `type_inputs`, consumer compiler inputs including declarations and declared package scopes; `importers`, its npm importer directories. A consumer reads each record's `type_inputs`; [joining its sources](ts-test.md#the-tests-program) removes only its `declarations` from that set. Optional `runtime_files` contains immutable `(source File, runtime File)` pairs for runfiles File identity and package-scope projection. An npm package's declarations arrive through `npm_files` |
+
+An emitted library publishes source/runtime pairs for shared module placement,
+runfiles admission and package-scope projection. A source-mode consumer of a relocated dependency records its original source and staged TypeScript File in the same pairs; `sources` and compiler inputs keep their original identities. A custom producer supplies `runtime_files` as a
+tuple of pairs constructed from its actual source and output Files. An empty
+tuple states that the owner has no runtime mappings. These mappings do not
+establish which imports survive emission or whether relative imports resolve.
+
+Optional `declaration_files` is a tuple of exact `(source File, declaration File)` pairs allocated by the producer. Compiler consumers use the source origin to overlay the canonical declaration at the path the original import resolves to. Runtime consumers use `runtime_files` to place canonical dependency links when an emitted program spans source roots. See [Shared Source Layout](ts-compile.md#shared-source-layout). Older records may omit `declaration_files`; their declarations retain the existing published-path overlay behavior.
+
+Optional `canonical_links` records exact `(link File, canonical File)` pairs the producer creates for dependency placement or unchanged scope symlinks. A workspace member's npm store may copy metadata-only scope aliases backed by those identities and scope records. It rejects selected module and declaration aliases, including scopes used as JSON modules: copying their bytes would lose the canonical dependency's package scope and npm importer. Use a separately published npm dependency or include its sources in the member. Links outside the store's selected files do not restrict publication; older records may omit this field.
+
+Optional `asset_files` records immutable `(original File, logical coordinate, published File)` triples for ordinary data whose bytes are unchanged. The coordinate is the producer's package-local view: `//app` packaging `//assets:theme.css` records `app/assets/theme.css`; external producers use an `external/<repository>/` prefix. Consumers use only records whose published File is live in `transitive_data`. Multiple aliases of the same original and coordinate are valid; different originals at one coordinate fail. A consumer may link directly to that exact original File without selecting an alias by order. JSON modules and scope projections retain their separate module/scope records; a File explicitly declared as both `type_inputs` and `data` retains both roles. Older providers without asset records keep ordinary pass-through behavior; consumers do not infer origins.
+
+Previous owner records may omit `runtime_files`. The consumer preserves their
+original records and published runtime File identities at their exec paths,
+without inventing pairs or adding an empty field. Declaration-only and
+runtime-bearing custom producers need no edit to retain this contract.
+
+Optional `runtime_scopes` is a tuple of immutable `(original scope File,
+runtime File)` pairs, separate from module mappings. Consumers reuse a pair
+only while its runtime File is in `transitive_data`. Older records may omit
+the field: ordinary data passes through, but a new scope placement cannot
+reuse an unproven occupant at its destination.
+
+Optional `npm_bindings` is a tuple of immutable `(package name, importer link File, store tree File)` facts. Binaries and tests preserve these positive source-owned lookup contexts beside each admitted runtime module and its package scope. A test's selected ES twin or staged TypeScript retains the canonical module's source provenance. Consumers retain every declared binding; they do not infer an empty lookup context from emitted syntax. Older records may omit the field and retain their previous behavior without invented binding facts.
 
 A dep reached through the store -- an `@npm` package, a member's link target
 -- reaches the consumer's program and runtime there: `ts_compile` reads
@@ -82,17 +107,21 @@ names it in its own tsconfig `types` to bring its globals into scope. See
 | `packages` | `list of string` | The npm packages the runner needs in the test's npm closure, `vitest` for the vitest runner; `ts_test` fails at analysis naming the one no dep provides |
 | `hook` | `File` | The one module the runner loads into node before the tests: the node:test runner's resolver, the vitest runner's reads recorder |
 | `es_modules` | `bool` | `True` when the runner runs the program as ES modules whatever its tsconfig's `module` -- vitest -- so `ts_test` emits its srcs as such and stages a dep's ES twins; `False` for node:test, which runs the package's format ([Runners](ts-test.md#runners)) |
-| `launch` | `function` | The runner's half of one test's analysis: given the test's `ctx` and the struct `ts_test` builds from the compile, it returns the launcher config's mode and section, the env, and the runfiles the runner adds |
+| `launch` | `function` | The runner's half of one test's analysis: given the action-owning `ctx` and the struct `ts_test` builds from the compile, it returns the launcher config's mode and section, the env, and the runfiles the runner adds |
 
 A runner is a target, the way a toolchain is: `//ts/runners:vitest` and
 `//ts/runners:node_test` are the two shipped, and a rule in another ruleset
 returning this provider is a third. See [Runners](ts-test.md#runners).
 
+The callback receives the private executable producer's real `ctx`. Its `ctx.label` owns the generated Files and actions; `ctx.attr.public_name` names the public test in the same package. The public test retains its Bazel test controls, coverage and editor metadata.
+
+The test input's `runtime_files` contains live exact source/runtime pairs, with the test's own `srcs` taking precedence for those sources; `asset_files` contains live ordinary asset records. A runner may return optional `replacements`, an exact original-File-to-replacement-File dictionary. It must omit each replaced File from its ordinary inputs and bind that File's path through `symlinks`; final runfiles admission validates the replacement. Omitting this field preserves ordinary-file precedence.
+
 ## BundlerInfo
 
 | Field | Type | Description |
 |---|---|---|
-| `bundler_binary` | `File` | The bundler executable |
+| `bundler_binary` | `File` or `FilesToRunProvider` | Standalone executable, or executable target with its runfiles |
 | `config_file` | `File or None` | A static config passed as `--config`, in mode 1 only |
 | `runtime_deps` | `depset of File` | Files the bundler needs at run time |
 | `use_generated_config` | `bool` | `True` selects mode 2: `ts_binary` generates a `vite.config.mjs` and passes it with the entry, the output directory and the stylesheet. Default `False` |
@@ -314,6 +343,14 @@ With no call the lockfile is rules_typescript's own
 for a release no lockfile states, downloaded unverified;
 `package = "@typescript/native-preview"` selects the nightly, whose binary is
 `lib/tsgo`. `TsgoToolchainInfo.tsgo_binary` is that file either way.
+
+### Runtime input lifetime
+
+Native binaries and node:test runners exec the configured runtime with the launcher's PID, process group, terminal and stdio. Their runtime view is a declared build output: the launcher neither creates a temporary application tree nor removes inputs when the original process exits. Surviving children can read those inputs for the lifetime of Bazel's outputs; an action sandbox still has Bazel's own lifetime.
+
+The view preserves selected File provenance, canonical module coordinates and one internal authority for each ordinary File or npm store. It does not promise inode identity with an outside source or store. The native child receives the built view as its runfiles directory. Standard runfiles lookup and module imports therefore select the same module and npm store authority. The view carries Bazel's generated repository mapping unchanged. Package the launcher's runfiles with its generated config and complete runtime directory, retaining internal relative links; a runfiles manifest may relocate that group but cannot scatter its members independently. The configured runtime executable is resolved through its original runfiles.
+
+Vitest and dev-server retain their mutable per-run setup and post-run behavior. Their owned workspace `node_modules` link is removed nonrecursively; private temporary trees are removed recursively.
 
 ### tsgo from source
 

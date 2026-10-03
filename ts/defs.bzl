@@ -16,7 +16,7 @@ load(
     _TsInfo = "TsInfo",
     _TsTestRunnerInfo = "TsTestRunnerInfo",
 )
-load("//ts/private:ts_binary.bzl", _ts_binary = "ts_binary")
+load("//ts/private:ts_binary.bzl", _ts_binary = "ts_binary_macro")
 load("//ts/private:ts_codegen.bzl", _ts_codegen = "ts_codegen")
 load("//ts/private:ts_config.bzl", _ts_config = "ts_config")
 load("//ts/private:ts_dev_server.bzl", _ts_dev_server = "ts_dev_server")
@@ -26,7 +26,7 @@ load(
 )
 load("//ts/private/actions:format.bzl", _ts_format = "ts_format")
 load("//ts/private/rules:ts_compile.bzl", _ts_compile = "ts_compile")
-load("//ts/private/rules:ts_test.bzl", _ts_test = "ts_test")
+load("//ts/private/rules:ts_test.bzl", _ts_test = "ts_test_runnable")
 
 # Providers — exported for use in custom rules that extend this ruleset.
 TsInfo = _TsInfo

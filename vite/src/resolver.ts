@@ -12,12 +12,7 @@
  * in memory, which is what takes a Bazel analysis+action cycle out of the
  * keystroke-to-browser path. bazel-bin stays authoritative for what Vite
  * cannot produce itself: `ts_codegen` outputs (route trees, generated protos)
- * and generated assets.
- *
- * The dev decision is made per file by asking the filesystem, not by matching a
- * pattern: a module whose source is checked in is served from source, and a
- * module with no source in the workspace is by construction a build output. No
- * second list of generated paths to drift out of sync with `ts_codegen`.
+ * and published assets.
  */
 
 import fs from 'node:fs';
@@ -32,6 +27,14 @@ export type ResolverMode = 'serve' | 'build';
 
 export interface ResolverOptions {
   workspaceRoot: string;
+  declaredFiles?: Readonly<Record<string, {
+    readonly path: string;
+    readonly context: 'source' | 'asset';
+    readonly isSource?: boolean;
+    readonly directory?: boolean;
+    readonly importer?: string;
+    readonly scope?: string;
+  }>> | undefined;
   /** Absolute path to the bazel-bin output tree. */
   bazelBin: string;
   /** Optional Bazel workspace name (currently unused but reserved for
@@ -48,10 +51,13 @@ export interface ResolvedFile {
   mapPath: string | null;
 }
 
+type DeclaredFile = NonNullable<ResolverOptions['declaredFiles']>[string];
+
 /** Where an import specifier landed, and who is expected to transform it. */
 export interface Resolution {
   /** Absolute path of the file Vite should load. */
   filePath: string;
+  directoryRequest?: string;
   /**
    * True when `filePath` is a Bazel `.js` output to be served verbatim with its
    * `.js.map`; false when it is source for Vite to transform.
@@ -98,14 +104,9 @@ export function tsPathToJsPath(tsPath: string): string {
   return tsPath.replace(/\.tsx?$/, '.js');
 }
 
-/**
- * The TypeScript sources a `.js` specifier can mean. TypeScript's node16 and
- * nodenext ESM output requires `./foo.js` in the source text even though the
- * file on disk is `foo.ts`, so a dev server serving source has to invert it.
- */
 export function jsPathToTsCandidates(jsPath: string): string[] {
-  if (!jsPath.endsWith('.js')) return [];
-  const stem = jsPath.slice(0, -3);
+  if (!/\.jsx?$/.test(jsPath)) return [];
+  const stem = jsPath.replace(/\.jsx?$/, '');
   return [stem + '.ts', stem + '.tsx'];
 }
 
@@ -119,6 +120,8 @@ export class BazelResolver {
   readonly workspace: string | undefined;
   readonly mode: ResolverMode;
   private readonly realWorkspaceRoot: string;
+  private readonly declaredFiles: NonNullable<ResolverOptions['declaredFiles']>;
+  private readonly selectedFiles = new Map<string, string>();
 
   constructor(options: ResolverOptions) {
     this.workspaceRoot = options.workspaceRoot;
@@ -128,6 +131,10 @@ export class BazelResolver {
     this.bazelBin = options.bazelBin;
     this.workspace = options.workspace;
     this.mode = options.mode ?? 'build';
+    this.declaredFiles = this.mode === 'serve' ? options.declaredFiles ?? {} : {};
+    for (const [logical, file] of Object.entries(this.declaredFiles)) {
+      this.selectedFiles.set(file.path, logical);
+    }
   }
 
   /**
@@ -180,14 +187,27 @@ export class BazelResolver {
 
   /** Bare specifiers return null in both modes: the launcher's node_modules
    *  link and `resolve.alias` are Vite's to resolve. */
-  resolveId(id: string, importer?: string): Resolution | null {
+  resolveId(
+    id: string,
+    importer?: string,
+    extensions: readonly string[] = [],
+    serveRoot?: string,
+  ): Resolution | null {
     if (this.mode === 'build') {
       const built = this.resolveIdForBuild(id, importer);
       return built === null
         ? null
         : { filePath: built.jsPath, precompiled: true, mapPath: built.mapPath };
     }
-    return this.resolveIdForServe(id, importer);
+    const cut = id.search(/[?#]/);
+    const resolved = this.resolveIdForServe(cut < 0 ? id : id.slice(0, cut), importer, extensions, serveRoot);
+    if (resolved === null || cut < 0) return resolved;
+    const suffix = id.slice(cut);
+    return {
+      ...resolved,
+      filePath: resolved.filePath + suffix,
+      ...(resolved.directoryRequest === undefined ? {} : { directoryRequest: resolved.directoryRequest + suffix }),
+    };
   }
 
   /**
@@ -261,73 +281,212 @@ export class BazelResolver {
     return null;
   }
 
-  /**
-   * Dev resolution. Every candidate is expressed as a workspace-source path
-   * first — a bazel-bin importer's relative specifier included — so that a
-   * generated module and a hand-written one importing the same file end up on
-   * the same module in Vite's graph rather than two copies of it.
-   */
-  private resolveIdForServe(id: string, importer?: string): Resolution | null {
-    if (path.isAbsolute(id)) {
-      return this.classify(this.sourcePathForBinPath(id) ?? id);
-    }
-
-    if (!isRelativeImport(id) || importer == null) return null;
-
-    const importerDir = path.dirname(importer);
-    const resolveFrom = this.sourcePathForBinPath(importerDir) ?? importerDir;
-
-    for (const candidate of buildExtensionCandidates(id)) {
-      const resolution = this.classify(path.resolve(resolveFrom, candidate));
-      if (resolution !== null) return resolution;
-    }
-    return null;
+  isDeclaredFile(file: string): boolean {
+    return this.selectedCoordinate(file) !== undefined;
   }
 
-  /**
-   * Decides who owns a workspace-relative path in dev: Vite (source on disk),
-   * bazel-bin (no source — therefore generated), or nobody (null, so Vite's
-   * own resolver takes over).
-   */
-  private classify(sourcePath: string): Resolution | null {
-    if (!this.underWorkspace(sourcePath)) return null;
+  isBazelOutput(file: string): boolean {
+    const realBin = this.currentRealPath(this.bazelBin);
+    return [this.bazelBin, ...(realBin === undefined ? [] : [realBin])].some((root) => {
+      const rel = path.relative(root, file);
+      return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    });
+  }
 
-    // `./foo.js` out of TypeScript source means `foo.ts` on disk.
-    for (const candidate of jsPathToTsCandidates(sourcePath)) {
-      if (fs.existsSync(candidate)) {
-        return { filePath: candidate, precompiled: false, mapPath: null };
+  isDeclaredOutput(file: string): boolean {
+    const logical = this.selectedCoordinate(file);
+    const selected = logical === undefined ? undefined : this.declaredFile(logical)?.file;
+    return selected !== undefined && selected.isSource !== true;
+  }
+
+  declaredDirectory(file: string): string | undefined {
+    const logical = this.selectedCoordinate(file);
+    const declared = logical === undefined ? undefined : this.declaredFile(logical)?.file;
+    return declared?.directory ? declared.path : undefined;
+  }
+
+  sourcePackage(file: string): { importer: string; manifest: string } | undefined {
+    if (this.mode !== 'serve') return undefined;
+    const logical = this.selectedCoordinate(file);
+    const selected = logical === undefined ? undefined : this.declaredFile(logical)?.file;
+    if (selected?.context !== 'source' || selected.directory || selected.scope === undefined) {
+      return undefined;
+    }
+    return { importer: selected.importer ?? selected.path, manifest: selected.scope };
+  }
+
+  private selectedCoordinate(file: string): string | undefined {
+    let clean = path.normalize(file.replace(/[?#].*$/, ''));
+    if (clean.length > 1 && clean.endsWith(path.sep)) clean = clean.slice(0, -1);
+    const selected = this.selectedLogicalPath(clean);
+    if (selected !== undefined) return selected;
+    if (this.selectedFiles.size === 0) return undefined;
+
+    for (const root of [this.bazelBin, this.workspaceRoot]) {
+      const realRoot = this.currentRealPath(root);
+      if (realRoot === undefined) continue;
+      const relative = path.relative(realRoot, clean);
+      if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      const candidate = path.join(root, relative);
+      const logical = this.selectedLogicalPath(candidate);
+      if (logical !== undefined && this.currentRealPath(candidate) === clean) return logical;
+    }
+
+    for (const [declaredPath, logical] of this.selectedFiles) {
+      const realPath = this.currentRealPath(declaredPath);
+      if (realPath === clean) return logical;
+      if (realPath !== undefined && this.declaredFiles[logical]!.directory
+        && clean.startsWith(realPath + path.sep)) {
+        return path.posix.join(logical, path.relative(realPath, clean).split(path.sep).join('/'));
       }
     }
+    return undefined;
+  }
 
-    if (fs.existsSync(sourcePath)) {
-      // A checked-in asset or .d.ts is not ours: Vite serves it from source.
-      if (!isTsSourcePath(sourcePath)) return null;
-      return { filePath: sourcePath, precompiled: false, mapPath: null };
+  private selectedLogicalPath(file: string): string | undefined {
+    for (let ancestor = file; ; ancestor = path.dirname(ancestor)) {
+      const logical = this.selectedFiles.get(ancestor);
+      if (logical !== undefined && (ancestor === file || this.declaredFiles[logical]!.directory)) {
+        return path.posix.join(logical, path.relative(ancestor, file).split(path.sep).join('/'));
+      }
+      if (path.dirname(ancestor) === ancestor) return undefined;
+    }
+  }
+
+  private currentRealPath(file: string): string | undefined {
+    try {
+      return fs.realpathSync(file);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+    }
+    return undefined;
+  }
+
+  private declaredFile(logical: string): { file: DeclaredFile; suffix: string } | undefined {
+    for (let ancestor = logical; ; ancestor = path.posix.dirname(ancestor)) {
+      const file = Object.hasOwn(this.declaredFiles, ancestor) ? this.declaredFiles[ancestor] : undefined;
+      if (file !== undefined && (ancestor === logical || file.directory)) {
+        return { file, suffix: path.posix.relative(ancestor, logical) };
+      }
+      if (path.posix.dirname(ancestor) === ancestor) return undefined;
+    }
+  }
+
+  private declaredResolution(logical: string): Resolution | null {
+    const selected = this.declaredFile(logical);
+    if (selected === undefined) return null;
+    const { file, suffix } = selected;
+    const filePath = file.directory && suffix === ''
+      ? file.path + path.sep
+      : path.join(file.path, suffix);
+    const precompiled = file.context === 'source' && filePath.endsWith('.js') && this.isBazelOutput(filePath);
+    return {
+      filePath,
+      precompiled,
+      mapPath: precompiled ? this.findMapForJs(filePath) : null,
+    };
+  }
+
+  private resolveIdForServe(
+    id: string,
+    importer: string | undefined,
+    extensions: readonly string[],
+    serveRoot: string | undefined,
+  ): Resolution | null {
+    let absolute: string;
+    if (path.isAbsolute(id)) {
+      const selected = this.selectedCoordinate(id);
+      if (selected !== undefined) return this.declaredResolution(selected);
+      absolute = this.sourcePathForBinPath(id) ?? id;
+      if (serveRoot !== undefined && !this.underWorkspace(absolute)) {
+        absolute = path.join(serveRoot, id);
+      }
+    } else {
+      if (!isRelativeImport(id) || importer == null) return null;
+
+      const selected = this.selectedCoordinate(importer);
+      if (selected !== undefined && this.declaredFile(selected)!.file.context === 'asset') return null;
+
+      const importerDir = path.dirname(importer);
+      const resolveFrom = selected !== undefined
+        ? path.dirname(path.join(this.workspaceRoot, selected))
+        : this.sourcePathForBinPath(importerDir) ?? importerDir;
+      absolute = path.resolve(resolveFrom, id);
+    }
+    const logical = this.workspaceRelativePath(absolute).split(path.sep).join('/');
+    if (this.underWorkspace(absolute) && this.declaredFile(logical)?.file.directory) {
+      return this.declaredResolution(logical);
     }
 
-    // No source on disk, so whatever this is, Bazel generated it.
-    for (const candidate of this.generatedCandidates(sourcePath)) {
-      if (!fs.existsSync(candidate)) continue;
-      const precompiled = candidate.endsWith('.js');
-      return {
-        filePath: candidate,
-        precompiled,
-        mapPath: precompiled ? this.findMapForJs(candidate) : null,
-      };
+    const result = this.classify(
+      [absolute, ...extensions.map((extension) => absolute + extension)],
+      absolute,
+    );
+    const directoryRequest = result?.directoryRequest;
+    if (result !== null && directoryRequest === undefined) return result;
+    const index = this.classify(extensions.map((extension) => path.join(absolute, 'index' + extension)));
+    if (result === null || directoryRequest === undefined) return index;
+    return index === null ? result : { ...index, directoryRequest };
+  }
+
+  private classify(sourcePaths: readonly string[], request?: string): Resolution | null {
+    const tsCandidates = request === undefined ? [] : jsPathToTsCandidates(request);
+    for (const sourcePath of sourcePaths) {
+      let asset: string | undefined;
+      const aliases = sourcePath === request ? tsCandidates : [];
+      for (const candidate of [...aliases, sourcePath]) {
+        const logical = this.selectedLogicalPath(candidate) ?? (this.underWorkspace(candidate)
+          ? this.workspaceRelativePath(candidate).split(path.sep).join('/')
+          : this.selectedCoordinate(candidate));
+        if (logical === undefined) continue;
+        const declared = this.declaredFile(logical);
+        if (declared === undefined) continue;
+        if (declared.file.context === 'source') return this.declaredResolution(logical);
+        if (asset === undefined || candidate === sourcePath) asset = logical;
+      }
+      if (asset !== undefined) return this.declaredResolution(asset);
+    }
+
+    for (const sourcePath of sourcePaths) {
+      if (!this.underWorkspace(sourcePath)) continue;
+      const aliases = sourcePath === request ? tsCandidates : [];
+      for (const candidate of aliases) {
+        if (fs.existsSync(candidate)) {
+          return { filePath: candidate, precompiled: false, mapPath: null };
+        }
+      }
+
+      const stat = fs.statSync(sourcePath, { throwIfNoEntry: false });
+      if (stat !== undefined) {
+        if (stat.isDirectory()) {
+          if (sourcePath === request) {
+            return { filePath: sourcePath, precompiled: false, mapPath: null, directoryRequest: sourcePath };
+          }
+          continue;
+        }
+        if (!isTsSourcePath(sourcePath)) return null;
+        return { filePath: sourcePath, precompiled: false, mapPath: null };
+      }
+
+      const generatedPath = this.binPathForSourcePath(sourcePath);
+      if (generatedPath === null) continue;
+      for (const candidate of this.generatedCandidates(generatedPath)) {
+        if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
+        const precompiled = candidate.endsWith('.js');
+        return {
+          filePath: candidate,
+          precompiled,
+          mapPath: precompiled ? this.findMapForJs(candidate) : null,
+        };
+      }
     }
     return null;
   }
 
-  /**
-   * bazel-bin paths a missing source path can mean: the generated source
-   * itself (`ts_codegen` writes .ts, which Vite can transform) and the
-   * compiled output of it.
-   */
-  private generatedCandidates(sourcePath: string): string[] {
-    const direct = this.binPathForSourcePath(sourcePath);
-    if (direct === null) return [];
-    if (!isTsSourcePath(sourcePath)) return [direct];
-    return [direct, tsPathToJsPath(direct)];
+  private generatedCandidates(generatedPath: string): string[] {
+    if (!isTsSourcePath(generatedPath)) return [generatedPath];
+    return [generatedPath, tsPathToJsPath(generatedPath)];
   }
 
   /** Same workspace-relative path, rooted at bazel-bin instead. */

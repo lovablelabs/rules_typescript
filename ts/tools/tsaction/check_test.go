@@ -110,10 +110,10 @@ var (
 	undici    = store("undici-types@6.21.0", "undici-types")
 )
 
-const builtinsOwnership = `label	//tests/strict_deps:builtins
+var builtinsOwnership = `label	//tests/strict_deps:builtins
 own	tests/strict_deps/builtins.ts
-npm-direct	@types/node	@types+node@22.20.1
-npm	undici-types	@npm//:undici-types	undici-types@6.21.0
+npm-direct	@types/node	` + typesNode + `
+npm	undici-types	@npm//:undici-types	` + undici + `
 `
 
 func TestCheck_NodeBuiltinIntoTypesNodeDeclaredPasses(t *testing.T) {
@@ -152,13 +152,11 @@ tests/strict_deps/builtins.ts
 	}
 }
 
-// A store path names its tree by the key segment; every file under the tree
-// is that resolution's, whatever the specifier that reached it.
 func TestCheck_AStorePathIsItsTrees(t *testing.T) {
 	manifest := `label	//pkg:app
 own	pkg/app.ts
-npm-direct	zod	zod@3.24.2
-npm	@scope/util	@npm//:scope_util	@scope+util@1.0.0_zod_3_24_2_0c1d2e3f
+npm-direct	zod	` + store("zod@3.24.2", "zod") + `
+npm	@scope/util	@npm//:scope_util	` + store("@scope+util@1.0.0_zod_3_24_2_0c1d2e3f", "@scope/util") + `
 `
 	util := store("@scope+util@1.0.0_zod_3_24_2_0c1d2e3f", "@scope/util")
 	listing := util + `/index.d.ts
@@ -189,7 +187,7 @@ func TestCheck_ReferenceDirectivesAreEdgesToo(t *testing.T) {
 own	tests/strict_deps/refs.ts
 direct	//tests/strict_deps:leaf
 file	//tests/strict_deps:hidden	` + strictDepsBin + `/hidden.d.ts
-npm	@types/node	@npm//:types_node	@types+node@22.20.1
+npm	@types/node	@npm//:types_node	` + typesNode + `
 `
 	ref := "../../" + strictDepsBin + "/hidden.d.ts"
 	listing := strictDepsBin + `/hidden.d.ts
@@ -222,7 +220,7 @@ func TestCheck_AugmentationIsAnEdge(t *testing.T) {
 	vite := binDir + "/node_modules/.pnpm/" + viteKey + "/node_modules/vite"
 	manifest := `label	//augmented:augmented
 own	augmented/probe.ts
-npm	vite	@npm//:vite	` + viteKey + `
+npm	vite	@npm//:vite	` + vite + `
 `
 	listing := vite + `/dist/node/index.d.ts
    Augmented via "vite" from file 'augmented/probe.ts' with packageId` +
@@ -250,11 +248,10 @@ const aliasKey = "ansi-styles@6.2.3_ansi-regex_6_2_2_602a0566"
 
 const aliasOwnership = `label	//tests/npm:alias_consumer
 own	tests/npm/alias_consumer.ts
-npm-direct	styles-alias	` + aliasKey + `
+npm-direct	styles-alias	` + aliasTree + `
 `
 
-const aliasTree = "../../../../../../../../../../../execroot/_main/bazel-out/" +
-	"k8-fastbuild/bin/tests/npm/features/node_modules/.pnpm/" + aliasKey +
+const aliasTree = binDir + "/tests/npm/features/node_modules/.pnpm/" + aliasKey +
 	"/node_modules/ansi-styles"
 
 func TestCheck_AnAliasIsDeclaredByTheTreeItsLinkEnters(t *testing.T) {
@@ -271,7 +268,7 @@ tests/npm/alias_consumer.ts
 
 func TestCheck_AFileUnderATreeTheClosureLacksIsAnError(t *testing.T) {
 	own, err := parseOwnership("label\t//tests/npm:alias_consumer\n" +
-		"own\ttests/npm/alias_consumer.ts\nnpm-direct\tzod\tzod@3.24.2\n")
+		"own\ttests/npm/alias_consumer.ts\nnpm-direct\tzod\t" + store("zod@3.24.2", "zod") + "\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,24 +383,13 @@ which writes deps from these edges, or add the labels above by hand.
 	}
 }
 
-func TestStoreKeyOf(t *testing.T) {
-	scoped := "@scope+util@1.0.0_zod_3_24_2_0c1d2e3f"
-	libDts := "../../external/+ts+tsgo_linux_amd64/lib/lib.es2022.full.d.ts"
-	for p, want := range map[string]string{
-		store("foo@1.0.0", "foo") + "/index.d.ts":               "foo@1.0.0",
-		store(scoped, "@scope/util") + "/lib/deep.d.ts":         scoped,
-		store("ws-linked@0.0.0", "ws-linked") + "/index.d.ts":   "ws-linked@0.0.0",
-		aliasTree + "/index.d.ts":                               aliasKey,
-		"node_modules/.pnpm/foo@1.0.0/node_modules":             "",
-		"node_modules/.pnpm/node_modules/foo/index.d.ts":        "",
-		"node_modules/zod/index.d.ts":                           "",
-		"xnode_modules/.pnpm/foo@1.0.0/node_modules/foo/i.d.ts": "",
-		"tests/strict_deps/middle.ts":                           "",
-		binDir + "/tests/strict_deps/hidden.d.ts":               "",
-		libDts: "",
+func TestParseOwnership_RefusesStoreKeysWithoutFileIdentity(t *testing.T) {
+	for _, row := range []string{
+		"npm-direct\tshared\tshared@0.0.0\n",
+		"npm\tshared\t@npm//:shared\tshared@0.0.0\n",
 	} {
-		if got := storeKeyOf(p); got != want {
-			t.Errorf("storeKeyOf(%q) = %q, want %q", p, got, want)
+		if _, err := parseOwnership(row); err == nil || !strings.Contains(err.Error(), "exact npm store File path") {
+			t.Errorf("parseOwnership(%q) = %v, want unsupported key-only ownership", row, err)
 		}
 	}
 }
@@ -412,5 +398,53 @@ func TestParseOwnership_RefusesAnUnknownLine(t *testing.T) {
 	_, err := parseOwnership("label\t//pkg:app\nowner\t//pkg:x\tpkg/x.ts\n")
 	if err == nil || !strings.Contains(err.Error(), "line 2") {
 		t.Errorf("parseOwnership = %v, want an error naming line 2", err)
+	}
+}
+
+func TestCheck_SamePackageKeyDoesNotAuthorizeAnotherStore(t *testing.T) {
+	const key = "shared@0.0.0"
+	const typesKey = "@types+shared@0.0.0"
+	storeA := binDir + "/tests/npm/app_a/" + store(key, "shared")
+	storeB := binDir + "/tests/npm/app_b/" + store(key, "shared")
+	typesA := binDir + "/tests/npm/app_a/" + store(typesKey, "@types/shared")
+	manifest := "label\t//tests/npm/app_a:borrowed\n" +
+		"own\ttests/npm/app_a/input.ts\n" +
+		"own\ttests/npm/app_b/input.ts\n" +
+		"npm-direct\tshared\t" + storeA + "\n" +
+		"npm-direct\t@types/shared\t" + typesA + "\n" +
+		"npm\tshared\t@npm//:shared\t" + storeB + "\n"
+	for _, c := range []struct {
+		name, from, to, specifier string
+		allowed                   bool
+	}{
+		{"allowedA", "tests/npm/app_a/input.ts", storeA, "shared", true},
+		{"allowedATypes", "tests/npm/app_a/input.ts", typesA, "shared", true},
+		{"rejectedB", "tests/npm/app_b/input.ts", storeB, "shared", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			own, err := parseOwnership(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listing, err := explainfiles.Parse(c.to + "/index.d.ts\n" +
+				"   Imported via \"" + c.specifier + "\" from file '" + c.from + "'\n" +
+				c.from + "\n   Root file specified for compilation\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := own.check(listing)
+			if c.allowed {
+				if err != nil || len(findings) != 0 {
+					t.Fatalf("selected store input was rejected: findings=%v error=%v", findings, err)
+				}
+				return
+			}
+			if err == nil && len(findings) == 0 {
+				t.Fatal("same-key undeclared store B was accepted as a direct dependency")
+			}
+			if err != nil || len(findings) != 1 || findings[0].label != "@npm//:shared" {
+				t.Fatalf("retained store B lost its owner: findings=%v error=%v", findings, err)
+			}
+		})
 	}
 }

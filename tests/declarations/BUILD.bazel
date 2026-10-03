@@ -2,10 +2,11 @@
 dependent's compile reads them, or on request through the output group."""
 
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
-load("//ts:defs.bzl", "ts_compile")
+load("//ts:defs.bzl", "ts_compile", "ts_test")
 load(
     ":declarations_tests.bzl",
     "check_reads_the_dep_declarations_test",
+    "compiler_inputs_remain_type_only_test",
     "leaf_declares_on_demand_test",
 )
 
@@ -13,11 +14,18 @@ package(default_visibility = ["//:__pkg__"])
 
 # Two go_tests over one package, each with its own data: hand-named.
 # gazelle:exclude *_test.go
+# gazelle:exclude joined.config.json
+# gazelle:exclude compiler_scope.json
 
 ts_compile(
     name = "lib",
     srcs = ["lib.ts"],
     emit = True,  # keep
+    tsconfig = "joined.config.json",
+    type_inputs = [
+        "compiler_scope.json",
+        "generated_scope.json",
+    ],
 )
 
 ts_compile(
@@ -58,4 +66,46 @@ go_test(
     srcs = ["on_request_test.go"],
     data = [":lib_declarations"],
     deps = ["//tests/verify"],
+)
+
+compiler_inputs_remain_type_only_test(
+    name = "direct_compiler_inputs_test",
+    compiler_inputs = [
+        "compiler_scope.json",
+        "generated_scope.json",
+    ],
+    target_under_test = ":lib",
+)
+
+compiler_inputs_remain_type_only_test(
+    name = "dependency_compiler_inputs_test",
+    compiler_inputs = [
+        "compiler_scope.json",
+        "generated_scope.json",
+    ],
+    target_under_test = ":app",
+)
+
+ts_test(
+    name = "joined",
+    srcs = ["joined.test.ts"],
+    emit = True,
+    runner = "//ts/runners:node_test",
+    tsconfig = "joined.config.json",
+    deps = [":lib"],
+)
+
+compiler_inputs_remain_type_only_test(
+    name = "joined_compiler_inputs_test",
+    compiler_inputs = [
+        "compiler_scope.json",
+        "generated_scope.json",
+    ],
+    target_under_test = ":joined",
+)
+
+genrule(
+    name = "generated_scope",
+    outs = ["generated_scope.json"],
+    cmd = "echo '{\"type\":\"module\"}' > $@",
 )

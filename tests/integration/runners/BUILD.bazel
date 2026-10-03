@@ -55,7 +55,9 @@ _RUNNERS = [
     go_binary(
         name = name + "_runner",
         testonly = True,
-        srcs = ["%s/main.go" % name],
+        srcs = ["%s/main.go" % name] + ([
+            "gazelle_roundtrip/generate.go",
+        ] if name == "gazelle_roundtrip" else []),
         visibility = ["//tests/integration:__subpackages__"],
         deps = ["//tests/integration/harness"] + ([
             "@com_github_bazelbuild_buildtools//build",

@@ -67,9 +67,9 @@ is replaced unless a `# keep` holds it:
 
 | Rule | Attributes Gazelle owns |
 |------|-------------------------|
-| `ts_proto_library` | `proto`, `out_dir`, `tsconfig`, `node_modules`, `options`, `deps`, `visibility` |
-| `ts_compile` | `emit`, `srcs`, `deps`, `tsconfig`, `visibility` |
-| `ts_test` | `emit`, `srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `wrangler_config`, `coverage_provider` |
+| `ts_proto_library` | `proto`, `out_dir`, `tsconfig`, `node_modules`, `options`, `deps`, `type_inputs`, `visibility` |
+| `ts_compile` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `visibility` |
+| `ts_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
 | `ts_config` | `src`, `deps`, `visibility` |
 | `filegroup(name = "vitest_config")` | `srcs`, `visibility` |
 | `filegroup(name = "wrangler_config")` | `srcs`, `visibility` |
@@ -139,6 +139,8 @@ disk is always reported.
 
 #### Values Gazelle Cannot Merge
 
+For compiler `srcs`, automatic dependency discovery follows direct file labels, literal native `filegroup.srcs` and `alias.actual` chains, and declared output names. This also applies to extra kept roots in manifest-owned programs. Gazelle preserves the source spelling. Unknown membership (`glob`, `select`, opaque providers, non-default output groups or unobserved external targets) is not an empty source list: automatic closure stops without writing BUILD files. Use explicit source-file labels, or keep the whole rule or ignore its package and maintain both sources and deps. Literal empty filegroups remain valid.
+
 `# keep` decides what survives among plain strings and plain lists of plain
 strings, the two shapes Gazelle's merger reconciles value by value. A value in
 any other shape it cannot merge at all: a module-level variable, two lists joined
@@ -161,7 +163,7 @@ it. A "# keep" comment above the attribute makes that yours deliberately.
 Either way the attribute has stopped being maintained. Two resolutions: put
 `# keep` above the attribute and own it, or rewrite the value as a plain list of
 strings with `# keep` on the entries Gazelle cannot derive, which hands the
-attribute back to it.
+attribute back to it. For compiler `srcs`, the automatic-discovery boundary above still applies.
 
 ## `# gazelle:exclude`
 
@@ -169,9 +171,9 @@ Core Gazelle's, and the one way to keep Gazelle out of a tree.
 `# gazelle:exclude <path>` in a BUILD file prunes the walk below that path, so
 no BUILD file is written there and nothing under it is visited; `.bazelignore`
 does the same for Bazel and Gazelle alike, and `# gazelle:ignore` in a
-directory's own BUILD file leaves that file untouched. A file a program lists
-under a pruned directory belongs to no package and is named in the log with
-the programs that reached it. What a package compiles is its tsconfig's
+directory's own BUILD file leaves that file untouched while allowing imports
+from it. An imported file under a pruned directory stops generation unless
+a declared generator owns it. What a package compiles is its tsconfig's
 `include`, `files` and `exclude`; what Bazel must not enter -- `node_modules`,
 a generated directory, a fixture workspace with a `MODULE.bazel` of its own --
 is excluded here.
@@ -189,9 +191,19 @@ the repository path of the file tsgo listed as the edge's target, not the
 specifier a source wrote, because `deps` is resolved by the file; the label is
 what every edge to that file becomes, ahead of the rule whose `srcs` hold it.
 It is the escape hatch for a first-party file no generated rule owns: a
-declaration under a directory Gazelle does not walk, a file a hand-written rule
-stages under another name. The directive is inherited by the directories below
-the BUILD file that carries it, as every core directive is.
+declaration in a manually maintained package, or a file a hand-written rule
+stages under another name. It does not bypass file exclusions; an excluded
+file still needs a declared generator. For a raw generated TypeScript output,
+the override can name a compiler whose `srcs` reaches the output through a
+filegroup. Use the declared output's repository path; the same override applies
+when the compiler probes an absent output and when its checkout copy is
+excluded. A skipped missing directory has no scalar file probes; see
+[generated-output resolution](../rules/ts-codegen.md).
+An override of the compiler-resolved file also takes priority over a generated
+tree candidate. Traversal stops at a selected generated owner for ordinary and
+config imports, including when the compiler lists a lower-priority checkout fallback.
+The directive is inherited by the
+directories below the BUILD file that carries it, as every core directive is.
 
 ```python
 # BUILD.bazel (repo root)

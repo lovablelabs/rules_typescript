@@ -18,12 +18,10 @@ node_modules(
 # keep
 ts_compile(
     name = "hoisted-member",
-    srcs = [
-        "index.ts",
-        "package.json",
-    ],
+    srcs = ["index.ts"],
     emit = True,  # keep
     node_modules = ":node_modules",
+    package_scopes = ["package.json"],
     visibility = ["//visibility:public"],
     deps = ["@npm//packages/hoisted-member:zod"],
 )

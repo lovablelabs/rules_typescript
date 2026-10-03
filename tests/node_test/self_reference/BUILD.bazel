@@ -1,19 +1,11 @@
-"""A node:test inside a package imports the package by its own name. node
-resolves the self-reference through the nearest `package.json`, the src as
-written, and the runner's hook maps the source its `exports` name to the
-compiled file.
-"""
-
 load("//ts:defs.bzl", "ts_compile", "ts_test")
 
 # keep
 ts_compile(
     name = "self_reference",
-    srcs = [
-        "package.json",
-        "src/index.ts",
-    ],
+    srcs = ["src/index.ts"],
     emit = True,  # keep
+    package_scopes = ["package.json"],
 )
 
 # keep

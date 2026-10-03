@@ -10,7 +10,6 @@ load(
     "integration_test_utils",
 )
 
-# Per-test workspaces isolate nested servers; cpu:2 bounds concurrency without exclusive.
 _BASE_TAGS = [
     tag
     for tag in integration_test_utils.DEFAULT_INTEGRATION_TEST_TAGS
@@ -21,7 +20,6 @@ _BASE_TAGS = [
     # used to do both jobs, so dropping it silently pulled 18 nested Bazel
     # invocations into the unit-test job.
     "nested-bazel",
-    "cpu:2",
     "no-sandbox",
     # These point a nested Bazel at this source tree via RULES_TS_ROOT, so the
     # ruleset's .bzl files are read without being action inputs -- and glob()
@@ -34,17 +32,11 @@ SHARDS = [
     "npm",
 ]
 
-def nested_bazel_tags(shard = None):
-    """Tags for one nested-Bazel integration test.
-
-    Args:
-        shard: which CI leg runs it, or None for the default `core` leg.
-
-    Returns:
-        The tag list to pass as the test's `tags`.
-    """
+def nested_bazel_tags(shard = None, cpus = 2):
+    """Tags for one nested-Bazel integration test."""
+    tags = _BASE_TAGS + ["cpu:%d" % cpus]
     if shard == None:
-        return _BASE_TAGS
+        return tags
     if shard not in SHARDS:
         fail(
             "unknown integration shard %r. Did you mean one of %s? A new leg " % (shard, SHARDS) +
@@ -52,4 +44,4 @@ def nested_bazel_tags(shard = None):
             "config in //.bazelrc (and its exclusion from the core leg's " +
             "filter), and a matrix entry in .github/workflows/ci.yml.",
         )
-    return _BASE_TAGS + ["shard-" + shard]
+    return tags + ["shard-" + shard]

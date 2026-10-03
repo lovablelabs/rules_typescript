@@ -25,10 +25,9 @@ unconditionally rather than serving a stale PASS; use `--config=fast` (which
 filters `-nested-bazel`) for the everyday loop.
 
 None of these is `exclusive` or `manual`: a plain `bazel test //...` runs them,
-which is the only reason the negative cases below are ever checked, and `cpu:2`
-apiece is what bounds how many nested Bazel servers share one machine. Roughly
-three minutes each. Which CI leg runs a test is its shard tag; tags.bzl holds
-both.
+which is the only reason the negative cases below are ever checked. CPU
+reservations bound how many nested Bazel servers share one machine. Which CI
+leg runs a test is its shard tag; tags.bzl holds both.
 
   bazel test //tests/integration/...                 the whole suite
   bazel test //tests/integration:integration_tests   the tests in this package
@@ -64,11 +63,13 @@ these tests and //tests/integration/harness:harness_test, the harness's own go_t
 # gazelle:exclude tsgo_lockfile
 
 load("@bazel_binaries//:defs.bzl", "bazel_binaries")
+load("@gazelle//:def.bzl", "gazelle")
 load(
     "@rules_bazel_integration_test//bazel_integration_test:defs.bzl",
     "bazel_integration_test",
     "integration_test_utils",
 )
+load("//tests/integration:gazelle_roundtrip.bzl", "gazelle_roundtrip_workspace", "tsgo_source_tool")
 load("//tests/integration:tags.bzl", "nested_bazel_tags")
 
 # The combined vitest-config listing in //gazelle:typescript_test runs over it.
@@ -177,13 +178,234 @@ bazel_integration_test(
 
 # ── gazelle_roundtrip ─────────────────────────────────────────────────────────
 # Two Gazelle passes diffed, then build and test, over an installed workspace.
+# The runner's GAZELLE_ROUNDTRIP_GROUP splits checks over pass 1 across targets.
+
+# The nested workspace's //:gazelle, run by the action below as `bazel run` runs it there.
+gazelle(
+    name = "gazelle_roundtrip_gazelle",
+    testonly = True,
+    gazelle = "//gazelle:gazelle_typescript",
+    tags = ["manual"],
+)
+
+tsgo_source_tool(
+    name = "gazelle_roundtrip_gazelle_tool",
+    testonly = True,
+    actual = ":gazelle_roundtrip_gazelle",
+    tags = ["manual"],
+)
+
+# Staged, installed and through Gazelle's first pass once; every group starts from it.
+gazelle_roundtrip_workspace(
+    name = "gazelle_roundtrip_workspace",
+    testonly = True,
+    srcs = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    fixture = package_name() + "/gazelle_roundtrip",
+    gazelle = ":gazelle_roundtrip_gazelle_tool",
+    generator = "//tests/integration/runners:gazelle_roundtrip_runner",
+    pnpm = "@pnpm//:pnpm_bin",
+    registry = "@gazelle_roundtrip_tarballs//:registry",
+    tags = ["manual"],
+    workers_lock = "//tests/workers:pnpm-lock.yaml",
+)
 
 bazel_integration_test(
     name = "gazelle_roundtrip_test",
-    timeout = "eternal",
+    timeout = "long",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
-    data = ["//:MODULE.bazel"],
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_borrowed_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "borrowed"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_config_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "config"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_foreign_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "foreign"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_foreign_runtime_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "foreign_runtime"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_scope_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "scope"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_packages_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "packages"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_roots_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "roots"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_roots_identity_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "roots_identity"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_roots_runtime_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "roots_runtime"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_transitive_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "transitive"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_runtime_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "runtime"},
     tags = nested_bazel_tags(),
     test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
     workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
@@ -209,11 +431,24 @@ bazel_integration_test(
 
 test_suite(
     name = "integration_tests",
+    # Every test here has it, so it filters nothing; it keeps --config=fast from building the suite.
+    tags = ["nested-bazel"],
     tests = [
         ":codegen_test",
         ":dev_server_test",
         ":existing_project_test",
+        ":gazelle_roundtrip_borrowed_test",
+        ":gazelle_roundtrip_config_test",
+        ":gazelle_roundtrip_foreign_runtime_test",
+        ":gazelle_roundtrip_foreign_test",
+        ":gazelle_roundtrip_packages_test",
+        ":gazelle_roundtrip_roots_identity_test",
+        ":gazelle_roundtrip_roots_runtime_test",
+        ":gazelle_roundtrip_roots_test",
+        ":gazelle_roundtrip_runtime_test",
+        ":gazelle_roundtrip_scope_test",
         ":gazelle_roundtrip_test",
+        ":gazelle_roundtrip_transitive_test",
         ":lsp_test",
         ":new_project_test",
         ":npm_deps_test",

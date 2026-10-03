@@ -117,9 +117,17 @@ fields, with the values the optional Vite server returns for each, are in
 | first-party `.ts` | Bazel compiles it; the bundler reads `bazel-bin` | served as source, transformed by the server in memory |
 | `ts_codegen` output | from `bazel-bin` | from `bazel-bin` |
 | npm packages | the importer's `node_modules` | the importer's `node_modules`, linked in at the workspace root |
-| assets, data srcs, passthrough `.d.ts` | from `bazel-bin` | from `bazel-bin` |
+| imported assets, data srcs, passthrough `.d.ts` | from `bazel-bin` | from `bazel-bin` |
 
-Generated code is recognised by the absence of a checked-in source file.
+For Vite, declared asset selection applies to module imports, including
+`?raw`, `?url` and relative references from published CSS. Literal browser URLs
+such as `<img src="/logo.svg">` retain Vite's static lookup under the live
+application root. Use an asset import to obtain a URL for a declared generated
+File; declaring it does not remap literal browser URLs.
+Emitted asset URLs use Vite's native static serving and missing-file behavior.
+
+With Vite's Bazel plugin, generated modules use their declared Files even when
+a checkout copy exists.
 
 ### How a Bare npm Specifier Resolves
 

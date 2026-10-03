@@ -54,7 +54,8 @@ type SuperviseOptions struct {
 	// ibazel SIGTERMs on every rebuild and vite is meant to survive it.
 	IgnoreTerm bool
 	// ExitZeroOnInterrupt reports success after a Ctrl-C shutdown.
-	ExitZeroOnInterrupt bool
+	ExitZeroOnInterrupt  bool
+	TerminateOnInterrupt bool
 	// StdoutToStderr leaves stdout to what the launcher prints after the child.
 	StdoutToStderr bool
 	// Cleanup runs after the child exits, however it exits.
@@ -74,44 +75,40 @@ func Supervise(argv []string, env []string, opts SuperviseOptions) (int, error) 
 		cmd.Stdout = os.Stderr
 	}
 	cmd.Stderr = os.Stderr
+	forwarded := []os.Signal{
+		syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM,
+		syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGWINCH, syscall.SIGCONT,
+	}
+	sigs := make(chan os.Signal, len(forwarded))
+	signal.Notify(sigs, forwarded...)
+	defer signal.Stop(sigs)
 	if err := cmd.Start(); err != nil {
 		return 1, err
 	}
 
-	forwarded := []os.Signal{os.Interrupt, syscall.SIGHUP}
-	if !opts.IgnoreTerm {
-		forwarded = append(forwarded, syscall.SIGTERM)
-	} else {
-		signal.Ignore(syscall.SIGTERM)
-	}
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, forwarded...)
-	defer signal.Stop(sigs)
-
-	interrupted := make(chan struct{}, 1)
-	go func() {
-		for s := range sigs {
-			if s == os.Interrupt || s == syscall.SIGHUP {
-				select {
-				case interrupted <- struct{}{}:
-				default:
-				}
-				_ = cmd.Process.Signal(syscall.SIGTERM)
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	interrupted := false
+	for {
+		select {
+		case s := <-sigs:
+			if s == syscall.SIGTERM && opts.IgnoreTerm {
 				continue
 			}
+			if s == os.Interrupt || s == syscall.SIGHUP {
+				interrupted = true
+				if opts.TerminateOnInterrupt {
+					s = syscall.SIGTERM
+				}
+			}
 			_ = cmd.Process.Signal(s)
-		}
-	}()
-
-	err := cmd.Wait()
-	if opts.ExitZeroOnInterrupt {
-		select {
-		case <-interrupted:
-			return 0, nil
-		default:
+		case err := <-waited:
+			if opts.ExitZeroOnInterrupt && interrupted {
+				return 0, nil
+			}
+			return exitCode(err)
 		}
 	}
-	return exitCode(err)
 }
 
 func exitCode(err error) (int, error) {

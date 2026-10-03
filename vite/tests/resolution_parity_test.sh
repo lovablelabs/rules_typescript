@@ -19,10 +19,11 @@ fi
 NODE="${RUNFILES}/ts/toolchain/node_resolved/node"
 BUNDLE="${RUNFILES}/vite/vite_plugin_bazel.mjs"
 TEST_MJS="${RUNFILES}/vite/tests/resolution_parity_test.mjs"
+VITE_PACKAGE="${RUNFILES}/tests/npm/node_modules/vite/package.json"
 
-for f in "${NODE}" "${BUNDLE}" "${TEST_MJS}"; do
+for f in "${NODE}" "${BUNDLE}" "${TEST_MJS}" "${VITE_PACKAGE}"; do
   [[ -f "${f}" ]] || fail "missing runfile: ${f}"
 done
 
 echo "INFO: node $("${NODE}" --version)"
-exec "${NODE}" "${TEST_MJS}" "${BUNDLE}"
+exec "${NODE}" "${TEST_MJS}" "${BUNDLE}" "${VITE_PACKAGE}"

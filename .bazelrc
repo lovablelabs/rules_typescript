@@ -13,7 +13,7 @@ build --output_groups=+_validation
 # Feed the tsserver hook from every target, not just the ones a rule can name.
 # The aspect propagates along dependency edges that already exist and creates
 # none, so it reaches package-private targets with no visibility grant, and its
-# `ide_fragments` group writes one .tsconfig-fragment.json per target reached.
+# `ide_fragments` group forwards each compiler package owner's fragment.
 # `+group` is additive, so this composes with the line above and with any
 # --output_groups a command line adds. Drop both lines to opt out: the hook
 # falls back to .bazel/tsserver-hook-data.json alone.
@@ -34,6 +34,8 @@ build --experimental_convenience_symlinks=normal
 # A tag filter cannot go the other way -- nothing re-includes a `manual`
 # target -- which is why those tests carry `nested-bazel` and not `manual`.
 test:fast --test_tag_filters=-nested-bazel
+# Unbuilt too: their data includes the generated gazelle_roundtrip workspace.
+test:fast --build_tag_filters=-nested-bazel
 
 # ── CI lanes ─────────────────────────────────────────────────────────────────
 # The stages CI runs, named here rather than in a driver script, so that
@@ -67,6 +69,8 @@ test:ci-integration-npm --config=ci-integration
 test:ci-integration-npm --test_tag_filters=shard-npm
 test:ci-integration-core --config=ci-integration
 test:ci-integration-core --test_tag_filters=-shard-npm
+# Each roundtrip group runs nested Bazel builds; four at once on a 4-core runner pushes them past 900 s.
+test:ci-integration-core --local_test_jobs=2
 
 build:determinism --experimental_convenience_symlinks=ignore
 

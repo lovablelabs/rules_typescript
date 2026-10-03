@@ -576,6 +576,8 @@ The toolchain binaries an executor runs:
 
 `oxc-bazel`, and `tsgo` under `//ts/toolchain/tsgo_source`, are compiled on the executor itself, so they match whatever the worker runs. The Go action helpers are built from source for the execution platform. The launcher is built from source for the target platform. The lockfile’s `tsgo` and Node.js use downloaded binaries.
 
+Native binaries and node:test runners use a build-owned runtime view and exec the configured runtime. They need no process-exit watcher or cleanup helper. Use `tsaction` and `ts_launcher` from the same ruleset revision; older prebuilt tools do not understand the native-view action and config. See [runtime input lifetime](rules/providers.md#runtime-input-lifetime).
+
 ### BuildBuddy RBE Setup
 
 BuildBuddy offers managed RBE with a free tier. To enable:

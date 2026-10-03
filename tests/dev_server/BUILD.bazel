@@ -1,6 +1,8 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
-load("@rules_typescript//ts:defs.bzl", "ts_compile", "ts_dev_server")
+load("@rules_typescript//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile", "ts_dev_server")
+load(":configuration_fixture.bzl", "configuration_source", "transitioned_source")
 
 package(default_visibility = ["//:__pkg__"])
 
@@ -19,8 +21,227 @@ ts_compile(
 ts_compile(
     name = "dev_app",
     srcs = ["dev_app.ts"],
+    data = [
+        "settings.mjs",
+        "theme.css",
+        ":declared_missing_asset",
+        "//tests/dev_server_assets:helper.mjs",
+        "//tests/dev_server_assets:nested.css",
+        "//tests/dev_server_assets:payload.svg",
+        "//tests/dev_server_assets:style.css",
+    ],  # keep
     emit = True,  # keep
-    deps = ["//tests/dev_server/lib"],
+    deps = [
+        ":declared_generated_sources",
+        ":generated_package",
+        "//tests/codegen_tree:tree",
+        "//tests/dev_server/lib",
+    ],  # keep
+)
+
+ts_binary(
+    name = "package_generator",
+    entry_point = "generate_package.mjs",
+)
+
+ts_codegen(
+    name = "generated_package",
+    srcs = ["generate_package.mjs"],
+    args = ["{out}"],
+    generator = ":package_generator",
+    out_dir = "generated_package",
+)
+
+write_file(
+    name = "declared_generated_ts",
+    out = "declared_source/value.ts",
+    content = [
+        'import { packageName } from "../lib/index.js";',
+        'export const generated: string = "DECLARED_GENERATED_TS_V1";',
+        "export { packageName };",
+    ],
+)
+
+write_file(
+    name = "declared_generated_json",
+    out = "declared_source/value.json",
+    content = ['{"value":"DECLARED_GENERATED_JSON_V1"}'],
+)
+
+[
+    write_file(
+        name = "declared_generated_" + extension,
+        out = "declared_source/extension-" + extension + "." + extension,
+        content = ['export const marker = "DECLARED_SCALAR_' + extension.upper() + '";'],
+    )
+    for extension in [
+        "tsx",
+        "js",
+        "mjs",
+    ]
+]
+
+write_file(
+    name = "declared_missing_source",
+    out = "declared_source/missing.tsx",
+    content = ['export const marker = "DECLARED_MISSING_SOURCE";'],
+)
+
+write_file(
+    name = "declared_missing_asset",
+    out = "declared_missing.css",
+    content = [".declared-missing { color: red; }"],
+)
+
+# keep
+ts_compile(
+    name = "declared_generated_sources",
+    srcs = [
+        ":declared_generated_js",
+        ":declared_generated_json",
+        ":declared_generated_mjs",
+        ":declared_generated_ts",
+        ":declared_generated_tsx",
+        ":declared_missing_source",
+    ],
+    emit = False,
+    deps = ["//tests/dev_server/lib:source_lib"],
+)
+
+write_file(
+    name = "scoped_generated_ts",
+    out = "scoped/generated.ts",
+    content = [
+        'import { helper } from "#helper";',
+        'import { generatedHelper } from "#generated-helper";',
+        'import { selfHelper } from "@fixture/declared-scope/self-helper";',
+        'export const generated: string = "DECLARED_SCOPED_GENERATED";',
+        "export { generatedHelper, helper, selfHelper };",
+    ],
+)
+
+write_file(
+    name = "scoped_generated_helper_ts",
+    out = "scoped/generated-helper.ts",
+    content = ['export const generatedHelper: string = "DECLARED_GENERATED_SCOPE_HELPER";'],
+)
+
+write_file(
+    name = "scoped_self_helper_ts",
+    out = "scoped/self-helper.ts",
+    content = ['export const selfHelper: string = "DECLARED_SELF_REFERENCE_HELPER";'],
+)
+
+_SHARED_SCALAR_FILES = {
+    side: {
+        "value.ts": [
+            'export { relative } from "./helper.js";',
+            'export { scoped } from "#helper";',
+        ],
+        "helper.ts": ['export const relative: string = "DECLARED_RELATIVE_{}";'.format(side.upper())],
+        "scoped-helper.ts": ['export const scoped: string = "DECLARED_SCOPE_{}";'.format(side.upper())],
+        "imports.ts": ['export { relative, scoped } from "#value";'],
+        "self.ts": ['export {{ relative, scoped }} from "@fixture/shared-scalar-{}/value";'.format(side)],
+        "package.json": [json.encode({
+            "name": "@fixture/shared-scalar-" + side,
+            "type": "module",
+            "exports": {"./value": {
+                "types": "./value.ts",
+                "default": "./value.js",
+            }},
+            "imports": {
+                "#value": {
+                    "types": "./value.ts",
+                    "default": "./value.js",
+                },
+                "#helper": {
+                    "types": "./scoped-helper.ts",
+                    "default": "./scoped-helper.js",
+                },
+            },
+        })],
+    }
+    for side in [
+        "a",
+        "b",
+    ]
+}
+
+[
+    write_file(
+        name = "shared_scalar_{}_{}".format(
+            side,
+            filename.replace(".", "_"),
+        ),
+        out = "shared_scalars/{}/{}".format(side, filename),
+        content = content,
+    )
+    for side, files in _SHARED_SCALAR_FILES.items()
+    for filename, content in files.items()
+]
+
+# keep
+ts_compile(
+    name = "source_contexts",
+    srcs = [
+        "npm_context/value.ts",
+        "scoped/helper.mjs",
+        ":scoped_generated_helper_ts",
+        ":scoped_generated_ts",
+        ":scoped_self_helper_ts",
+    ] + [
+        ":shared_scalar_{}_{}".format(
+            side,
+            filename.replace(".", "_"),
+        )
+        for side, files in _SHARED_SCALAR_FILES.items()
+        for filename in files
+        if filename != "package.json"
+    ],
+    emit = False,
+    node_modules = ":node_modules",
+    package_scopes = ["scoped/package.json"] + [":shared_scalar_{}_package_json".format(side) for side in _SHARED_SCALAR_FILES],
+    deps = ["@npm//:zod"],
+)
+
+# keep
+ts_dev_server(
+    name = "dev_source_contexts",
+    entry_point = ":source_contexts",
+    node_modules = ":node_modules",
+    plugin = "//vite:vite_plugin_bazel",
+    port = 5185,
+    server = "//vite:dev_server",
+)
+
+configuration_source(name = "configuration_source")
+
+transitioned_source(
+    name = "transitioned_source",
+    producer = ":configuration_source",
+    server = ":configuration_source",
+)
+
+filegroup(
+    name = "configuration_fixture",
+    srcs = [":transitioned_source"],
+    output_group = "fixture",
+)
+
+# keep
+ts_compile(
+    name = "configuration_entry",
+    srcs = [":transitioned_source"],
+    emit = False,
+)
+
+# keep
+ts_dev_server(
+    name = "dev_configuration",
+    entry_point = ":configuration_entry",
+    node_modules = ":node_modules",
+    plugin = "//vite:vite_plugin_bazel",
+    server = "//vite:dev_server",
 )
 
 # One node_modules for every dev server here.
@@ -169,12 +390,19 @@ ts_dev_server(
             "dev_server_behaviour_test.go",
             "devserver_harness_test.go",
             "launcher_config_test.go",
+            "symlinked_tmp_test.go",
         ],
         data = [
             "read_config.mjs",
             ":{}".format(target),
             "//ts/toolchain:node_resolved",
-        ],
+        ] + ([
+            ":configuration_fixture",
+            ":dev_configuration",
+            ":dev_source_contexts",
+            "//tests/npm/dev_inherited_types:composed_apps",
+            "//tests/npm/dev_inherited_types:previous_member_dev",
+        ] if target == "dev_with_plugin" else []),
         env = {
             "DEV_BAZEL_PLUGIN": bazel_plugin,
             "DEV_IMPL": impl,

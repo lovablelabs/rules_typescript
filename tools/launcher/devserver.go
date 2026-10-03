@@ -185,7 +185,7 @@ func planDevServer(cfg *Config, r *Resolver, plan *Plan, args []string) (*Plan, 
 	plan.UseExec = false
 	// ibazel SIGTERMs the runner after every rebuild; the server has to survive
 	// that and pick the new .js up through its watcher, so only Ctrl-C stops it.
-	plan.Supervise = SuperviseOptions{IgnoreTerm: true, ExitZeroOnInterrupt: true}
+	plan.Supervise = SuperviseOptions{IgnoreTerm: true, ExitZeroOnInterrupt: true, TerminateOnInterrupt: true}
 	return plan, nil
 }
 
@@ -225,7 +225,9 @@ func anchorNodeModules(workspace, nodeModules string, plan *Plan) (string, error
 	}
 	// Supervise.IgnoreTerm swallows ibazel's per-rebuild SIGTERM, so this runs
 	// on Ctrl-C; the link only, never its target.
-	plan.Cleanup = func() { os.Remove(link) }
+	if err := plan.own(link, false); err != nil {
+		return "", err
+	}
 	return link, nil
 }
 

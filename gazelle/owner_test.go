@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"os"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -22,9 +23,16 @@ func storeOf(t *testing.T, dirs []string, listings map[string]string,
 	s := newProgramStore()
 	for _, dir := range dirs {
 		s.visit(dir, nil)
+		s.walked[dir] = true
 	}
 	for dir, text := range listings {
-		s.record(programOf(t, dir, text))
+		p := programOf(t, dir, text)
+		for _, f := range p.Files {
+			if s.walked[parentDir(f)] {
+				s.files[parentDir(f)] = append(s.files[parentDir(f)], path.Base(f))
+			}
+		}
+		s.record(p)
 	}
 	return s
 }
@@ -35,7 +43,7 @@ func programOf(t *testing.T, dir, text string) *program {
 	if err != nil {
 		t.Fatalf("%s: %v", dir, err)
 	}
-	return &program{Listing: *l, dir: dir}
+	return &program{Listing: *l, config: tsconfigIn(dir), dir: dir}
 }
 
 // A listing whose every file matched the include pattern of dir's tsconfig.
@@ -85,7 +93,13 @@ func TestOwner_SampleListingIsATestOnlyPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.record(programOf(t, sampleDir, string(data)))
+	p := programOf(t, sampleDir, string(data))
+	for _, f := range p.Files {
+		if s.walked[parentDir(f)] {
+			s.files[parentDir(f)] = append(s.files[parentDir(f)], path.Base(f))
+		}
+	}
+	s.record(p)
 
 	if got := s.packageDirs(); !slices.Equal(got, []string{sampleDir}) {
 		t.Errorf("packages = %q, want [%s]", got, sampleDir)
@@ -98,7 +112,7 @@ func TestOwner_SampleListingIsATestOnlyPackage(t *testing.T) {
 		storeNode:                             "",
 		libES5:                                "",
 	} {
-		if got := s.owner(f); got != want {
+		if got, found := s.owner(f); got != want || found != (want != "") {
 			t.Errorf("owner(%s) = %q, want %q", f, got, want)
 		}
 	}
@@ -121,7 +135,7 @@ func TestOwner_SampleListingIsATestOnlyPackage(t *testing.T) {
 		"workers/download/src/index.ts": "workers/download/src",
 		workerConfig:                    "workers/download",
 	} {
-		if got := s.owner(f); got != want {
+		if got, found := s.owner(f); got != want || found != (want != "") {
 			t.Errorf("owner(%s) = %q, want %q", f, got, want)
 		}
 	}
@@ -146,7 +160,7 @@ func TestOwner_NearestPackageThatListsTheFileOwnsIt(t *testing.T) {
 		"app/lib/deep/e.ts": "app/lib",
 		"app/lib/d.ts":      "",
 	} {
-		if got := s.owner(f); got != want {
+		if got, found := s.owner(f); got != want || found != (want != "") {
 			t.Errorf("owner(%s) = %q, want %q", f, got, want)
 		}
 	}
@@ -179,7 +193,7 @@ func TestOwner_NoInputsIsNotAPackage(t *testing.T) {
 	if got := s.packageDirs(); !slices.Equal(got, []string{"site"}) {
 		t.Errorf("packages = %q, want [site]: TS18003 names no file", got)
 	}
-	if got := s.owner("site/script/b.ts"); got != "site" {
+	if got, found := s.owner("site/script/b.ts"); !found || got != "site" {
 		t.Errorf("owner(site/script/b.ts) = %q, want site", got)
 	}
 	if got := captureLog(t, s.reportUnowned); got != "" {
@@ -202,7 +216,7 @@ func TestOwner_RefusedAndLibraryOnlyListingsAreNotPackages(t *testing.T) {
 	if got := s.packageDirs(); len(got) != 0 {
 		t.Errorf("packages = %q, want none", got)
 	}
-	if got := s.owner("vendored/node_modules/x/index.d.ts"); got != "" {
+	if got, found := s.owner("vendored/node_modules/x/index.d.ts"); found {
 		t.Errorf("owner of a node_modules path = %q, want none", got)
 	}
 }
@@ -214,13 +228,17 @@ func TestOwner_OutDirFilesAreNeverSrcs(t *testing.T) {
 		"web": listingOf("web", "web/src/a.ts", compiled+"/messages.ts",
 			compiled+"/en.ts"),
 	})
-	tc := defaultTsConfig()
-	tc.addCodegenOutDir("web", "shared/i18n/compiled")
+	c := emptyConfig()
+	c.Exts[languageName].(*tsConfig).programs = s
+	tc := getConfig(c)
+	r, f := newRule(indexedRule{kind: "ts_codegen", name: "messages", pkg: "web", outDir: "shared/i18n/compiled"})
+	f.Rules = append(f.Rules, r)
+	s.recordBuild(c, "web", f)
 	got := s.srcs("web", tc)
 	if !got.equal(srcSet{library: []string{"web/src/a.ts"}}) {
 		t.Errorf("srcs(web) = %+v, want a.ts alone: compiled/ is an out_dir", got)
 	}
-	if got := s.owner(compiled + "/messages.ts"); got != "web" {
+	if got, found := s.owner(compiled + "/messages.ts"); !found || got != "web" {
 		t.Errorf("owner of an out_dir file = %q, want web: it is web's program", got)
 	}
 }
@@ -231,7 +249,7 @@ func TestOwner_AFileUnderAnUnwalkedDirectoryIsUnowned(t *testing.T) {
 			"app/gen/deep/y.ts"),
 	})
 	for _, f := range []string{"app/gen/x.ts", "app/gen/deep/y.ts"} {
-		if got := s.owner(f); got != "" {
+		if got, found := s.owner(f); found {
 			t.Errorf("owner(%s) = %q, want none: app/gen was not walked", f, got)
 		}
 	}
@@ -260,7 +278,7 @@ func TestOwner_TheCompilersEmbeddedLibsAreItsOwn(t *testing.T) {
 	if got := s.packageDirs(); !slices.Equal(got, []string{"app"}) {
 		t.Errorf("packages = %q, want [app]", got)
 	}
-	if got := s.owner(bundledDOM); got != "" {
+	if got, found := s.owner(bundledDOM); found {
 		t.Errorf("owner(%s) = %q, want none: it is the compiler's", bundledDOM, got)
 	}
 	got := s.srcs("app", defaultTsConfig())
@@ -336,22 +354,19 @@ func TestOwner_CensusUnderVerbose(t *testing.T) {
 	}
 }
 
-// A file under a foreign project belongs to nobody, whatever program lists
-// it, and the walk records nothing of such a directory.
 func TestOwner_AFileUnderAForeignProjectIsUnowned(t *testing.T) {
 	s := newProgramStore()
 	s.foreign["app/example"] = "app/example/package.json"
 	for _, dir := range []string{"", "app"} {
 		s.visit(dir, nil)
+		s.walked[dir] = true
 	}
+	s.visit("app", []string{"main.ts"})
 	s.visit("app/example", []string{"notes.md", "x.ts"})
-	if _, ok := s.files["app/example"]; ok || len(s.visited["app/example"]) != 0 {
-		t.Errorf("the walk recorded a foreign directory's files: %v %v",
-			s.files["app/example"], s.visited["app/example"])
-	}
+	s.walked["app/example"] = true
 	s.record(programOf(t, "app",
 		listingOf("app", "app/main.ts", "app/example/x.ts")))
-	if got := s.owner("app/example/x.ts"); got != "" {
+	if got, found := s.owner("app/example/x.ts"); found {
 		t.Errorf("owner(app/example/x.ts) = %q, want none: a foreign project's",
 			got)
 	}

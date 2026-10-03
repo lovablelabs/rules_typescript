@@ -1,0 +1,28 @@
+load("//npm:defs.bzl", "node_modules")
+load("//ts:defs.bzl", "ts_compile")
+
+package(default_visibility = ["//tests/node_test/importer_identity/app:__pkg__"])
+
+exports_files([
+    "borrowed.ts",
+    "nested/borrowed.ts",
+])
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = [
+        "@npm//:magic-string",
+        "@npm//:minimatch",
+    ],
+)
+
+# keep
+ts_compile(
+    name = "private_dependency",
+    srcs = ["private_dependency.ts"],
+    emit = True,
+    node_modules = ":node_modules",
+    deps = ["@npm//:minimatch"],
+)

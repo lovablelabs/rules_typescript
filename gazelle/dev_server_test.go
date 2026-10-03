@@ -112,7 +112,9 @@ func TestAppPackageSignals(t *testing.T) {
 			if tc.html {
 				writeWorkspace(t, dir, map[string]string{"index.html": "<!doctype html>"})
 			}
-			if got := appPackage(dir, tc.sources); got != tc.want {
+			c := emptyConfig()
+			c.RepoRoot = dir
+			if got := getConfig(c).programs.appPackage(c, "", tc.sources); got != tc.want {
 				t.Fatalf("appPackage = %v, want %v", got, tc.want)
 			}
 		})
@@ -156,5 +158,38 @@ func TestDevServer_NameCollisionKeepsExistingRule(t *testing.T) {
 	text := buildFileText(t, root, "src/app")
 	if strings.Contains(text, "ts_dev_server(") || !strings.Contains(text, "filegroup(") {
 		t.Fatalf("the dev target replaced an existing rule:\n%s", text)
+	}
+}
+
+func TestDevServer_GeneratedHTMLCannotCreateAnApplication(t *testing.T) {
+	for _, producer := range []string{
+		`genrule(name = "html", outs = ["index.html"], cmd = "echo html > $@")`,
+		loadDefs + `"ts_codegen")
+ts_codegen(name = "html", outs = ["index.html"], generator = ":generator")`,
+	} {
+		root := writeTree(t, map[string]string{
+			"MODULE.bazel":      `module(name = "generated_html")`,
+			"app/BUILD.bazel":   producer,
+			"app/tsconfig.json": `{"files":["index.ts"]}`,
+			"app/index.ts":      "export const value = 1;\n",
+		})
+		var first map[string]string
+		for _, stale := range []bool{false, true} {
+			if stale {
+				writeFile(t, filepath.Join(root, "app/index.html"), "<!doctype html>")
+			}
+			output, err := protoGazelle(t, root)
+			if err != nil {
+				t.Fatalf("HTML stale=%t: %v\n%s", stale, err, output)
+			}
+			if strings.Contains(buildFileText(t, root, "app"), "ts_dev_server(") {
+				t.Fatal("generated HTML supplied an authored application signal")
+			}
+			if first == nil {
+				first = convergeSnapshot(t, root)
+			} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+				t.Fatalf("generated HTML changed the graph: %s", diff)
+			}
+		}
 	}
 }
