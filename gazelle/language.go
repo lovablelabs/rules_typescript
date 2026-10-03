@@ -513,6 +513,6 @@ func (l *tsLang) Resolve(
 		}
 	}
 	if g := getConfig(c).programs.emission; g != nil {
-		g.setRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), liveRule)
+		g.setResolvedRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), liveRule)
 	}
 }

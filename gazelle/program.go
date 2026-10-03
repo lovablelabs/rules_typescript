@@ -69,6 +69,7 @@ type programStore struct {
 	installChecked   bool
 	regularFiles     map[string]bool
 	memo             *resolutionMemo
+	protoIndex       *protoIndex
 	prefetch         *listingPrefetch
 	fullWalk         bool
 	manifests        map[string]*manifest
