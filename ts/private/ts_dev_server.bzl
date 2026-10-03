@@ -74,6 +74,7 @@ def _generate_dev_config(
         server_input_js,
         declared_files,
         npm_contexts,
+        npm_views,
         user_config_rl = ""):
     """Generates a vite.config.mjs for dev server mode.
 
@@ -172,6 +173,9 @@ def _generate_dev_config(
         "const declaredFiles = {" + ", ".join(declared_paths) + "};\n" +
         "const npmContexts = [" + ", ".join(npm_paths) + "];\n" +
         "const admittedNpmPaths = new Set();\n" +
+        "const npmViews = " + json.encode(npm_views) + ".map(view => path.join(path.dirname(nodeModulesPath), view));\n" +
+        "const memberNpmViews = new Map();\n" +
+        "const slashPath = file => path.sep === '\\\\' ? file.replace(/\\\\/g, '/') : file;\n" +
         "const npmStores = new Map();\n" +
         "const realpath = file => {\n" +
         "  try { return fs.realpathSync(file); } catch (error) {\n" +
@@ -184,7 +188,7 @@ def _generate_dev_config(
         "  const manifest = realpath(path.join(directory, 'package.json'));\n" +
         "  return manifest === undefined ? realpath(directory) : path.dirname(manifest);\n" +
         "};\n" +
-        "for (const [logical, names] of npmContexts) {\n" +
+        "for (const [logical, bindings] of npmContexts) {\n" +
         "  const file = declaredFiles[logical];\n" +
         "  const directories = new Set();\n" +
         "  for (const source of [file.path, file.importer]) {\n" +
@@ -197,21 +201,31 @@ def _generate_dev_config(
         "    const resolved = realpath(directory);\n" +
         "    if (resolved !== undefined) directories.add(resolved);\n" +
         "  }\n" +
-        "  for (const name of names) {\n" +
-        "    if (!npmStores.has(name)) npmStores.set(name, npmStore(path.join(nodeModulesPath, name)) ?? fs.realpathSync(path.join(nodeModulesPath, name)));\n" +
-        "    const expected = npmStores.get(name);\n" +
+        "  for (const [name, member] of Object.entries(bindings)) {\n" +
+        "    const view = member === null ? nodeModulesPath : npmViews[member];\n" +
+        "    const linked = path.join(view, name);\n" +
+        "    if (!npmStores.has(linked)) npmStores.set(linked, npmStore(linked) ?? fs.realpathSync(linked));\n" +
+        "    const expected = npmStores.get(linked);\n" +
+        "    if (member !== null && path.basename(file.path) !== 'package.json') {\n" +
+        "      for (const source of [file.path, file.importer, realpath(file.path)]) {\n" +
+        "        if (source === undefined) continue;\n" +
+        "        const key = slashPath(source);\n" +
+        "        if (!memberNpmViews.has(key)) memberNpmViews.set(key, new Map());\n" +
+        "        memberNpmViews.get(key).set(name, member);\n" +
+        "      }\n" +
+        "    }\n" +
         "    for (const source of directories) {\n" +
         "      for (let directory = source; ; directory = path.dirname(directory)) {\n" +
         "        if (path.basename(directory) !== 'node_modules') {\n" +
         "          const candidate = path.join(directory, 'node_modules', name);\n" +
-        "          if (admittedNpmPaths.has(candidate)) break;\n" +
+        "          if (admittedNpmPaths.has(candidate + '\\0' + expected)) break;\n" +
         "          const actual = npmStore(candidate);\n" +
         "          if (actual !== undefined && actual !== expected) {\n" +
         "            throw new Error('[ts_dev_server] conflicting npm installation for ' + name + ' from ' + source +\n" +
-        "              ': ' + candidate + ' resolves to ' + actual + ', but the declared app store is ' + expected +\n" +
+        "              ': ' + candidate + ' resolves to ' + actual + ', but the declared ' + (member === null ? 'app' : 'member importer') + ' store is ' + expected +\n" +
         "              '. Remove the conflicting installation yourself or link this package to the declared store before restarting.');\n" +
         "          }\n" +
-        "          admittedNpmPaths.add(candidate);\n" +
+        "          admittedNpmPaths.add(candidate + '\\0' + expected);\n" +
         "          if (actual !== undefined) break;\n" +
         "        }\n" +
         "        if (path.dirname(directory) === directory) break;\n" +
@@ -331,6 +345,7 @@ def _generate_dev_config(
         "// Build the list of directories Vite's dev server is allowed to serve.\n" +
         "const fsAllow = [workspaceRoot, bazelBin];\n" +
         "if (nodeModulesPath) fsAllow.push(nodeModulesPath);\n" +
+        "fsAllow.push(...npmViews);\n" +
         "\n" +
         "// Vite matches a request against the resolved path, so an allow entry that\n" +
         "// is still a symlink never matches it: on macOS /var is /private/var, and\n" +
@@ -369,7 +384,10 @@ def _generate_dev_config(
             "    }\n" +
             "    const segments = id.split('/');\n" +
             "    const pkg = id.startsWith('@') ? segments.slice(0, 2).join('/') : segments[0];\n" +
-            "    const manifest = path.join(nodeModulesPath, pkg, 'package.json');\n" +
+            "    // A member's source resolves its own importer's links, not the app's.\n" +
+            "    const member = !importer ? undefined : memberNpmViews.get(slashPath(importer.split('?')[0]))?.get(pkg);\n" +
+            "    const view = member === undefined ? nodeModulesPath : npmViews[member];\n" +
+            "    const manifest = path.join(view, pkg, 'package.json');\n" +
             "    if (!fs.existsSync(manifest)) return null;\n" +
             "    return this.resolve(id, manifest, { ...options, skipSelf: true });\n" +
             "  },\n" +
@@ -583,6 +601,7 @@ def _ts_dev_server_impl(ctx):
         _server_config_input_js(server_info, server_binary_rl),
         declared_files,
         npm_contexts.contexts,
+        npm_contexts.views,
         user_config_rl,
     )
 
@@ -642,11 +661,13 @@ def _ts_dev_server_impl(ctx):
         order = "postorder",
     )
     root_symlinks = dict(launcher.root_symlinks)
-    for name, binding in npm_contexts.links.items():
-        path = dev_server["node_modules"] + "/" + name
-        target = binding.target
+    view_entries = [("node_modules/" + name, binding.target) for name, binding in npm_contexts.links.items()]
+    for member, stores in npm_contexts.members.items():
+        view_entries.extend([(member + "/" + name, store) for name, store in stores.items()])
+    for relative, target in view_entries:
+        path = "@rules_typescript_dev/" + view_name + "/" + relative
         if target.is_symlink:
-            alias = ctx.actions.declare_symlink("_rules_typescript_dev/" + view_name + "/node_modules/" + name)
+            alias = ctx.actions.declare_symlink("_rules_typescript_dev/" + view_name + "/" + relative)
 
             # Bazel republishes unresolved link text here; private and canonical roots share no path components.
             ctx.actions.symlink(output = alias, target_path = "../" * (len(path.split("/")) - 1) + rlocation_path(ctx, target))

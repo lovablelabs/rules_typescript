@@ -47,7 +47,8 @@ func pnpmMappingKey(stripped string) string {
 	if strings.HasSuffix(stripped, ":") {
 		return strings.TrimSuffix(stripped, ":")
 	}
-	before, _, found := strings.Cut(stripped, ":")
+	// A YAML key ends at ": "; a `file:` key carries its own colon.
+	before, _, found := strings.Cut(stripped, ": ")
 	if !found {
 		return ""
 	}
@@ -66,7 +67,7 @@ func parsePnpmImporters(lines []string) map[string]*pnpmImporter {
 	dir, section, depName := "", "", ""
 	record := func(name, value string) {
 		value = strings.Trim(strings.TrimSpace(value), "'\"")
-		if name == "" || value == "" || strings.HasPrefix(value, "file:") {
+		if name == "" || value == "" || strings.HasPrefix(value, "file:") && !pnpmFileTarball(value) {
 			return
 		}
 		if target, isLink := strings.CutPrefix(value, "link:"); isLink {
@@ -184,6 +185,9 @@ func pnpmContentLine(raw string) (indent int, stripped string, ok bool) {
 // only an alias carries the package's own name, and index 0 is skipped so a
 // scope's '@' is not the one we find.
 func pnpmAliasTarget(version string) string {
+	if strings.HasPrefix(version, "file:") {
+		return ""
+	}
 	if paren := strings.Index(version, "("); paren != -1 {
 		version = version[:paren]
 	}
@@ -228,4 +232,11 @@ func parsePnpmPackageKey(key string) (name, version string) {
 		return "", ""
 	}
 	return key[:at], key[at+1:]
+}
+
+// pnpmFileTarball reports a `file:` archive, which the npm extension fetches
+// like a registry package; a `file:` directory has no package to fetch.
+func pnpmFileTarball(version string) bool {
+	return strings.HasPrefix(version, "file:") &&
+		(strings.HasSuffix(version, ".tgz") || strings.HasSuffix(version, ".tar.gz"))
 }

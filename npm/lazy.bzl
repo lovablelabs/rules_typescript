@@ -62,6 +62,7 @@ load(
 )
 load(
     "//npm/private:npm_translate_lock.bzl",
+    "local_tarball_path",
     "npm_tarball_url",
     "package_name_to_label",
     "parse_importers",
@@ -365,6 +366,9 @@ def _split_by_platform(labels_with_platforms):
             per_platform.setdefault(plat, []).append(label)
     return (_dedup(common), {plat: _dedup(labels) for plat, labels in per_platform.items()})
 
+def _semver_of(snap):
+    return semver_parts(snap.get("semver") or snap["version"])
+
 def _pick_primary(sids, snapshots, preferred):
     """The snapshot a bare (or version-only) hub label should mean.
 
@@ -381,7 +385,7 @@ def _pick_primary(sids, snapshots, preferred):
         if best == None:
             best = sid
             continue
-        if semver_gt(semver_parts(snapshots[sid]["version"]), semver_parts(snapshots[best]["version"])):
+        if semver_gt(_semver_of(snapshots[sid]), _semver_of(snapshots[best])):
             best = sid
     return best
 
@@ -410,7 +414,7 @@ def _check_integrity(packages, pnpm_lock):
         "\nBazel would fetch these bytes with nothing to check them against, so a " +
         "registry that answered with something else would be indistinguishable from " +
         "one that answered correctly.\n" +
-        "A git, `file:` or local-directory dependency has no published tarball to " +
+        "A git or local-directory dependency has no published tarball to " +
         "verify: depend on it as a workspace member (a `link:` entry, which becomes a " +
         "target in your own repository) or vendor its files. An entry that names a " +
         "`tarball:` but no integrity needs `pnpm install` re-run against a registry " +
@@ -439,6 +443,14 @@ def _store_label(pnpm_lock, key, name):
         pnpm_lock.package,
         store_target(key, name),
     )
+
+def _local_tarball_label(pnpm_lock, path):
+    """The label of a lockfile-relative `file:` tarball, or None when there is none."""
+    if not path:
+        return None
+    if path.startswith("/") or ".." in path.split("/"):
+        fail("npm: the `file:` tarball '{}' in {} must sit at or below the lockfile's directory".format(path, pnpm_lock))
+    return "@@{}//{}:{}".format(pnpm_lock.repo_name, pnpm_lock.package, path)
 
 def _snapshot_key(snap):
     peer_id = peer_suffix_dir_name(snap["peer_suffix"])
@@ -674,11 +686,11 @@ def declare_lazy_npm_repos(module_ctx, hub_name, pnpm_lock, patch_labels, npmrc)
         candidates = types_for.get(snap["name"], [])
         if not candidates:
             return None
-        runtime_major = semver_parts(snap["version"])[0]
+        runtime_major = _semver_of(snap)[0]
         matching = [
             sid
             for sid in candidates
-            if semver_parts(live[sid]["version"])[0] == runtime_major
+            if _semver_of(live[sid])[0] == runtime_major
         ]
         return _pick_primary(matching if matching else candidates, live, {})
 
@@ -712,18 +724,21 @@ def declare_lazy_npm_repos(module_ctx, hub_name, pnpm_lock, patch_labels, npmrc)
             types_sid = _types_sid_for(snap)
 
         patch = patches.get(snap["package_id"])
+        resolution = packages[snap["package_id"]].get("resolution", {})
+        local_tarball = _local_tarball_label(pnpm_lock, local_tarball_path(resolution))
         npm_import(
             name = repo_of[sid],
             package = snap["name"],
             version = snap["version"],
             peer_id = peer_suffix_dir_name(snap["peer_suffix"]),
-            url = npm_tarball_url(
+            url = "" if local_tarball else npm_tarball_url(
                 snap["name"],
                 snap["version"],
-                packages[snap["package_id"]].get("resolution", {}),
+                resolution,
                 registries,
             ),
-            integrity = packages[snap["package_id"]].get("resolution", {}).get("integrity", ""),
+            local_tarball = local_tarball,
+            integrity = resolution.get("integrity", ""),
             deps = deps,
             platform_deps = platform_deps,
             platforms = _ALL_PLATFORMS,

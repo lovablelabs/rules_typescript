@@ -113,6 +113,7 @@ def _new_pkg_entry():
     return {
         "name": "",
         "version": "",
+        "published_version": "",
         "resolution": {},
         "dependencies": {},
         "optionalDependencies": {},
@@ -195,6 +196,17 @@ def _snapshot_parts(key):
         return (key, "")
     return (key[:paren], key[paren:])
 
+_TARBALL_SUFFIXES = (".tgz", ".tar.gz")
+
+def _is_file_tarball(value):
+    """A `file:` dependency on an archive, which pnpm locks by integrity like a registry package."""
+    return value.startswith("file:") and value.endswith(_TARBALL_SUFFIXES)
+
+def _local_tarball_path(resolution):
+    """The lockfile-relative path of a `file:` tarball, or "" for any other resolution."""
+    tarball = resolution.get("tarball", "")
+    return tarball[len("file:"):] if _is_file_tarball(tarball) else ""
+
 def _dep_snapshot_id(dep_name, value):
     """The snapshots: key that a dependency value names, or "" for a non-registry dep.
 
@@ -204,8 +216,10 @@ def _dep_snapshot_id(dep_name, value):
     what makes it the whole key.
     """
     value = value.strip().strip("'\"")
-    if not value or value.startswith("link:") or value.startswith("file:"):
+    if not value or value.startswith("link:"):
         return ""
+    if value.startswith("file:"):
+        return "{}@{}".format(dep_name, value) if _is_file_tarball(value) else ""
     if _alias_target(value):
         return value
     return "{}@{}".format(dep_name, value)
@@ -266,8 +280,9 @@ def _parse_snapshots(lines, snapshots_start):
         if indent == 2:
             if stripped.endswith(":"):
                 raw_key = stripped[:-1]
-            elif ":" in stripped:
-                raw_key = stripped.partition(":")[0]
+            elif ": " in stripped:
+                # A YAML key ends at ": "; a `file:` key carries its own colon.
+                raw_key = stripped.partition(": ")[0]
             else:
                 continue
             package_id, peer_suffix = _snapshot_parts(raw_key)
@@ -429,8 +444,9 @@ def _parse_pnpm_lock(content):
                 # e.g. "os: [darwin, linux]", "cpu: [x64]", "libc: [musl]".
                 inner = kv_v.strip().strip("[]")
                 state["current_pkg"][kv_k] = [x.strip() for x in inner.split(",") if x.strip()]
-            elif kv_k not in ("dependencies", "optionalDependencies", "peerDependencies"):
-                pass
+            elif kv_k == "version":
+                # A `file:` package is keyed by its path; pnpm records its own version here.
+                state["current_pkg"]["published_version"] = kv_v
             continue
 
         # Key-value at indent 6 (inside a section).
@@ -453,6 +469,11 @@ def _parse_pnpm_lock(content):
         snapshots = _parse_snapshots(lines, snapshots_start)
     else:
         snapshots = _snapshots_from_packages(packages)
+
+    for snap in snapshots.values():
+        published = packages.get(snap["package_id"], {}).get("published_version", "")
+        if published:
+            snap["semver"] = published
 
     return {
         "lockfile_version": lockfile_version,
@@ -972,13 +993,19 @@ def _package_name_to_label(package_name):
     name = name.replace("/", "_")
     return name
 
+def _version_name(version):
+    """A version as a name component; a `file:` version also carries a path."""
+    for ch in (".", "+", "-", ":", "/"):
+        version = version.replace(ch, "_")
+    return version
+
 def _package_dir_name(package_name, version):
     """Returns the subdirectory name for an extracted package inside the @npm repo.
 
     '@types/react' + '19.0.0' → 'types_react__19_0_0'
     """
     label = _package_name_to_label(package_name)
-    version_clean = version.replace(".", "_").replace("+", "_").replace("-", "_")
+    version_clean = _version_name(version)
     return "{}__{}".format(label, version_clean)
 
 def _versioned_label_name(base_label, version):
@@ -991,8 +1018,7 @@ def _versioned_label_name(base_label, version):
     component replaces dots and hyphens with underscores to produce a valid
     Bazel label name component.
     """
-    version_suffix = version.replace(".", "_").replace("-", "_").replace("+", "_")
-    return "{}_{}".format(base_label, version_suffix)
+    return "{}_{}".format(base_label, _version_name(version))
 
 _DIGIT_VALUES = {
     "0": 0,
@@ -1167,6 +1193,7 @@ parse_pnpm_lock = _parse_pnpm_lock
 parse_importers = _parse_importers
 parse_patched_dependencies = _parse_patched_dependencies
 npm_tarball_url = _npm_tarball_url
+local_tarball_path = _local_tarball_path
 verify_integrity = _verify_integrity
 npmrc_registries = _npmrc_registries
 pnpm_workspace_registries = _pnpm_workspace_registries

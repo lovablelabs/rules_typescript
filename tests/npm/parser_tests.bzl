@@ -204,6 +204,41 @@ def _catalogs_and_overrides_are_not_packages_test(ctx):
 
 catalogs_and_overrides_are_not_packages_test = unittest.make(_catalogs_and_overrides_are_not_packages_test)
 
+_FILE_TARBALL_LOCK = """lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      '@scope/vendored':
+        specifier: file:vendor/vendored-3.2.1.tgz
+        version: file:vendor/vendored-3.2.1.tgz
+
+packages:
+
+  '@scope/vendored@file:vendor/vendored-3.2.1.tgz':
+    resolution: {integrity: sha512-aaa, tarball: file:vendor/vendored-3.2.1.tgz}
+    version: 3.2.1
+
+snapshots:
+
+  '@scope/vendored@file:vendor/vendored-3.2.1.tgz': {}
+"""
+
+# An inline `{}` snapshot key cut at the colon in `file:` dropped the package
+# from the graph, and its path ranked as version 0.0.0 against registry copies.
+def _file_tarball_snapshot_keeps_key_and_version_test(ctx):
+    env = unittest.begin(ctx)
+    key = "@scope/vendored@file:vendor/vendored-3.2.1.tgz"
+    snapshots = parse_pnpm_lock(_FILE_TARBALL_LOCK)["snapshots"]
+
+    asserts.equals(env, [key], snapshots.keys())
+    asserts.equals(env, "3.2.1", snapshots[key].get("semver"))
+
+    return unittest.end(env)
+
+file_tarball_snapshot_keeps_key_and_version_test = unittest.make(_file_tarball_snapshot_keeps_key_and_version_test)
+
 def _platform_constraints_are_read_test(ctx):
     env = unittest.begin(ctx)
     packages = parse_pnpm_lock(_LOCKFILE)["packages"]
@@ -1035,5 +1070,6 @@ def parser_test_suite(name):
         cycles_edge_between_two_cycles_survives_test,
         cycles_overlapping_peer_cycles_test,
         cycles_peer_variants_are_separate_cycles_test,
+        file_tarball_snapshot_keeps_key_and_version_test,
         *failures
     )

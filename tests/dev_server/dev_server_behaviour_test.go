@@ -314,6 +314,68 @@ func TestDevServerBehaviour(t *testing.T) {
 			module.contains(t, srv, layout.Producer)
 			module.excludes(t, layout.Server, ": string")
 		})
+		t.Run("member_owned_npm_binding_resolves_without_app_link", func(t *testing.T) {
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			app := filepath.Join(ws, "tests", "dev_server")
+			mkdir(t, filepath.Join(app, "member"))
+			write(t, filepath.Join(app, "member", "value.ts"), tree.File("tests/dev_server/member/value.ts").Text())
+			write(t, filepath.Join(app, "index.html"), "MEMBER_NPM_FIXTURE")
+			write(t, filepath.Join(app, "member_entry.js"), `export { marker } from "./member/value.ts";`)
+			srv := start(t, tree.File("tests/dev_server/dev_member_npm_launcher").Abs(), ws, tmp)
+			base := srv.awaitHTTP(t, "/index.html")
+			served := func(path string) response {
+				t.Helper()
+				got := get(t, base, path)
+				if got.status != 200 {
+					t.Fatalf("member npm fixture returned HTTP %d for %s: %s\n%s", got.status, path, got.body, srv.log(t))
+				}
+				return got
+			}
+			module := served(importURL(t, served("/member_entry.js").body, "value.ts", ""))
+			dep := depURL(module.body)
+			if dep == "" {
+				t.Fatalf("member source's `member-only` import resolved to nothing:\n%s\n%s", module.body, srv.log(t))
+			}
+			resolved := served(dep)
+			resolved.contains(t, srv, "MEMBER_IMPORTER_STORE")
+			// A pre-bundle inlines member-dep; a directly served member-only imports it beside its store tree.
+			if !strings.Contains(resolved.body, "MEMBER_TRANSITIVE_STORE") {
+				transitive := depURL(resolved.body)
+				if transitive == "" {
+					t.Fatalf("member-only's own `member-dep` import resolved to nothing:\n%s\n%s", resolved.body, srv.log(t))
+				}
+				served(transitive).contains(t, srv, "MEMBER_TRANSITIVE_STORE")
+			}
+		})
+		t.Run("checkout_install_cannot_shadow_member_npm_binding", func(t *testing.T) {
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			member := filepath.Join(ws, "tests", "dev_server", "member")
+			shadow := filepath.Join(member, "node_modules", "member-only")
+			mkdir(t, shadow)
+			write(t, filepath.Join(member, "value.ts"), tree.File("tests/dev_server/member/value.ts").Text())
+			write(t, filepath.Join(shadow, "package.json"), `{"name":"member-only","version":"0.0.0-CHECKOUT_SHADOW","type":"module","exports":"./index.js"}`)
+			write(t, filepath.Join(shadow, "index.js"), `export const marker = "CHECKOUT_SHADOW";`)
+			srv := start(t, tree.File("tests/dev_server/dev_member_npm_launcher").Abs(), ws, tmp)
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			select {
+			case err := <-srv.wait:
+				srv.wait <- err
+				if err == nil {
+					t.Fatal("checkout install shadowing a member npm binding exited successfully")
+				}
+			case <-timer.C:
+				t.Fatal("checkout install shadowing a member npm binding was not refused before the test deadline")
+			}
+			log := srv.log(t)
+			for _, want := range []string{"conflicting npm installation for member-only", shadow, "declared member importer store"} {
+				if !strings.Contains(log, want) {
+					t.Errorf("member npm startup refusal lacks %q:\n%s", want, log)
+				}
+			}
+		})
 		t.Run("inherited_companion_binding_remains_runtime_reachable", func(t *testing.T) {
 			const pkg = "tests/npm/dev_inherited_types"
 			var previous launcherConfig
