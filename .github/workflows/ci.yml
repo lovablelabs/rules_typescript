@@ -30,7 +30,8 @@ jobs:
           - os: macos-latest
             repository-cache: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 75 || 60 }}
+    # A cold Ubuntu build (Rust, protobuf, the C++ toolchain) runs past 60 min, and a cancelled run saves no cache.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
