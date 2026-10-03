@@ -2,6 +2,7 @@ load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
 load("@rules_typescript//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile", "ts_dev_server")
+load("//tests/npm:direct_version_tests.bzl", "direct_npm_identity_test")
 load(":configuration_fixture.bzl", "configuration_source", "transitioned_source")
 
 package(default_visibility = ["//:__pkg__"])
@@ -214,6 +215,66 @@ ts_dev_server(
     server = "//vite:dev_server",
 )
 
+# keep
+ts_dev_server(
+    name = "dev_member_npm",
+    entry_point = "//tests/dev_server/member",
+    node_modules = ":node_modules",
+    plugin = "//vite:vite_plugin_bazel",
+    port = 5186,
+    server = "//vite:dev_server",
+)
+
+# keep
+ts_compile(
+    name = "member_pair",
+    srcs = [],
+    emit = False,
+    node_modules = ":node_modules",
+    tags = ["manual"],  # Reached only through the rejected dev server.
+    deps = [
+        "//tests/dev_server/member",
+        "//tests/dev_server/member/other",
+    ],
+)
+
+# keep
+ts_dev_server(
+    name = "dev_member_pair",
+    entry_point = ":member_pair",
+    node_modules = ":node_modules",
+    tags = ["manual"],  # Rejected subject is reached by the analysis test.
+)
+
+direct_npm_identity_test(
+    name = "member_importers_cannot_split_one_npm_name_across_stores_test",
+    messages = [
+        "npm 'member-only' is linked only by member importers",
+        "member-only@1.0.0/node_modules/member-only",
+        "member-only@2.0.0/node_modules/member-only",
+    ],
+    target_under_test = ":dev_member_pair",
+)
+
+# keep
+ts_dev_server(
+    name = "dev_member_shadowed",
+    entry_point = "//tests/dev_server/member",
+    node_modules = "//tests/dev_server/member/other:node_modules",
+    tags = ["manual"],  # Rejected subject is reached by the analysis test.
+)
+
+direct_npm_identity_test(
+    name = "app_importer_store_cannot_shadow_member_npm_binding_test",
+    messages = [
+        "source 'tests/dev_server/member/value.ts'",
+        "member-only@1.0.0/node_modules/member-only",
+        "but app importer @@//tests/dev_server/member/other:node_modules links @@//tests/dev_server/member/other:node_modules/.pnpm/member-only@2.0.0",
+        "the app's link is what a bare specifier reaches",
+    ],
+    target_under_test = ":dev_member_shadowed",
+)
+
 configuration_source(name = "configuration_source")
 
 transitioned_source(
@@ -399,6 +460,7 @@ ts_dev_server(
         ] + ([
             ":configuration_fixture",
             ":dev_configuration",
+            ":dev_member_npm",
             ":dev_source_contexts",
             "//tests/npm/dev_inherited_types:composed_apps",
             "//tests/npm/dev_inherited_types:previous_member_dev",

@@ -1224,8 +1224,8 @@ node_modules_member(
 	web := g.results["web"]
 	wnm := mustRule(t, web, "node_modules", "node_modules")
 	wantStrings(t, "web node_modules deps", wnm.AttrStrings("deps"), []string{
-		"@npm//web:acme_lib", "@npm//web:marked", "@npm//web:react",
-		"@npm//web:tailwindcss-v3", "@npm//web:types_mdast",
+		"@npm//web:acme_lib", "@npm//web:acme_vendored", "@npm//web:marked",
+		"@npm//web:react", "@npm//web:tailwindcss-v3", "@npm//web:types_mdast",
 		"@npm//web:types_react",
 	})
 	if got := wnm.AttrString("parent"); got != "//:node_modules" {

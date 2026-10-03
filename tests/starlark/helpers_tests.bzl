@@ -141,9 +141,10 @@ def _dep_snapshot_id_test(ctx):
     # An npm alias value already carries the aliased package's own name.
     asserts.equals(env, "lodash@4.17.21", dep_snapshot_id("underscore", "lodash@4.17.21"))
 
-    # Workspace and file deps are not registry snapshots.
+    # A `file:` tarball is keyed like a package; workspace and directory deps are not.
+    asserts.equals(env, "shared@file:vendor/shared.tgz", dep_snapshot_id("shared", "file:vendor/shared.tgz"))
     asserts.equals(env, "", dep_snapshot_id("shared", "link:../shared"))
-    asserts.equals(env, "", dep_snapshot_id("shared", "file:../shared.tgz"))
+    asserts.equals(env, "", dep_snapshot_id("shared", "file:../shared"))
     asserts.equals(env, "", dep_snapshot_id("shared", ""))
 
     return unittest.end(env)

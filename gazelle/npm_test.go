@@ -53,6 +53,9 @@ importers:
       '@acme/ui':
         specifier: workspace:*
         version: link:../packages/ui
+      '@acme/vendored':
+        specifier: file:../third_party/acme-vendored-1.0.0.tgz
+        version: file:third_party/acme-vendored-1.0.0.tgz
       marked:
         specifier: ^15.0.0
         version: 15.0.12
@@ -90,6 +93,10 @@ packages:
   '@acme/lib@1.0.0':
     resolution: {integrity: sha512-lll}
 
+  '@acme/vendored@file:third_party/acme-vendored-1.0.0.tgz':
+    resolution: {integrity: sha512-vvv, tarball: file:third_party/acme-vendored-1.0.0.tgz}
+    version: 1.0.0
+
   '@types/mdast@4.0.4':
     resolution: {integrity: sha512-mmm}
 
@@ -124,6 +131,8 @@ packages:
 snapshots:
 
   '@acme/lib@1.0.0': {}
+
+  '@acme/vendored@file:third_party/acme-vendored-1.0.0.tgz': {}
 
   '@types/mdast@4.0.4': {}
 
@@ -285,8 +294,8 @@ func TestParsePnpmImporters(t *testing.T) {
 		t.Errorf("importer dirs = %v", dirs)
 	}
 	if deps := slices.Sorted(maps.Keys(got["web"].deps)); !slices.Equal(deps,
-		[]string{"@acme/lib", "@types/mdast", "@types/react", "marked",
-			"react", "tailwindcss-v3"}) {
+		[]string{"@acme/lib", "@acme/vendored", "@types/mdast", "@types/react",
+			"marked", "react", "tailwindcss-v3"}) {
 		t.Errorf("web declares %v", deps)
 	}
 	if got["web"].deps["tailwindcss-v3"] != "tailwindcss@3.4.0" {
@@ -514,6 +523,8 @@ func TestEdgeLabel_ImporterScopedAgainstRoot(t *testing.T) {
 			store + "@/typescript/5.9.2/iii/node_modules/typescript/lib/" +
 				"typescript.d.ts", "@npm//workers/download:typescript"},
 		{"web/src/x.ts", "fsevents", storeFsevents, "@npm//:fsevents"},
+		{"web/src/track.ts", "@acme/vendored", store + "@acme/vendored/1.0.0/" +
+			"lll/node_modules/@acme/vendored/index.d.ts", "@npm//web:acme_vendored"},
 	} {
 		e := importEdge(c.from, c.spec, c.to)
 		if got := l.edgeLabel(e, parentDir(c.from), fixtureManifest(root, parentDir(e.From))); got != c.want {

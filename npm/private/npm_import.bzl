@@ -281,8 +281,16 @@ def _move_package(rctx, package_root):
 
 def _npm_import_impl(rctx):
     tarball = "_pkg.tgz"
-    auth = _auth_for_fetch(rctx, rctx.attr.url)
-    rctx.download(url = rctx.attr.url, output = tarball, integrity = rctx.attr.integrity, auth = auth)
+    if rctx.attr.local_tarball:
+        local = rctx.path(rctx.attr.local_tarball)
+        rctx.watch(local)
+
+        # Unchecksummed on purpose: the repository cache would answer a checksum
+        # with the locked bytes and never read an edited file (see lazy.bzl).
+        rctx.download(url = "file://" + str(local), output = tarball)
+    else:
+        auth = _auth_for_fetch(rctx, rctx.attr.url)
+        rctx.download(url = rctx.attr.url, output = tarball, integrity = rctx.attr.integrity, auth = auth)
 
     # Extracted twice deliberately: the strip prefix is only knowable by looking
     # inside, and Starlark cannot catch the failure a wrong one would raise.
@@ -375,7 +383,11 @@ npm_import = repository_rule(
                   "it; this passes it on to the providers, which is where a node_modules " +
                   "tree can act on it.",
         ),
-        "url": attr.string(mandatory = True, doc = "Tarball URL."),
+        "url": attr.string(doc = "Tarball URL, for a package not supplied by local_tarball."),
+        "local_tarball": attr.label(
+            allow_single_file = True,
+            doc = "The workspace file a pnpm `file:` tarball dependency names.",
+        ),
         "integrity": attr.string(
             mandatory = True,
             doc = "SRI hash from the lockfile's resolution.integrity. Mandatory: an " +
