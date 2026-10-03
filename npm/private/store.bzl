@@ -41,7 +41,9 @@ HOIST_TARGET = STORE_DIR + "/node_modules"
 
 def store_key(name, version, peer_id):
     """The store directory of one resolution: name, version and peer set."""
-    key = "{}@{}".format(name.replace("/", "+"), version)
+
+    # pnpm's own spelling, which also covers the path in a `file:` version.
+    key = "{}@{}".format(name.replace("/", "+"), version.replace("/", "+").replace(":", "+"))
     return key if not peer_id else "{}_{}".format(key, peer_id)
 
 def store_target(key, name):

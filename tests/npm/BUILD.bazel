@@ -572,6 +572,16 @@ go_test(
     deps = ["//tests/verify"],
 )
 
+# A `file:` tarball committed beside the lockfile has no registry to come from,
+# so the package exists only if the lockfile's path is read from the workspace.
+go_test(
+    name = "npm_file_tarball_test",
+    size = "small",
+    srcs = ["npm_file_tarball_test.go"],
+    data = ["@npm_features//:vendored_local-pkg"],
+    deps = ["//tests/verify"],
+)
+
 # Three npm aliases, each reachable by exactly one route: the features root,
 # zod's own edge, and a catalog entry resolved against a peer set.
 go_test(
