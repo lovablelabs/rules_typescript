@@ -7,9 +7,34 @@ package typescript
 import (
 	"log"
 	"strings"
+	"sync"
 
+	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 )
+
+type parsedLabel struct {
+	label label.Label
+	err   error
+}
+
+var parsedLabels = struct {
+	sync.Mutex
+	m map[string]parsedLabel
+}{m: map[string]parsedLabel{}}
+
+// label.Parse runs regular expressions, and ownership queries reparse the same
+// labels for every rule of every ancestor package.
+func parseLabel(text string) (label.Label, error) {
+	parsedLabels.Lock()
+	defer parsedLabels.Unlock()
+	parsed, ok := parsedLabels.m[text]
+	if !ok {
+		parsed.label, parsed.err = label.Parse(text)
+		parsedLabels.m[text] = parsed
+	}
+	return parsed.label, parsed.err
+}
 
 // srcLabel is the label that names a file the generated package holds, and
 // whether Bazel can name it at all.

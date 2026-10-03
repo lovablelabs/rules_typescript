@@ -17,6 +17,7 @@ ts_test(
     srcs = ["peer_version.test.ts"],
     data = ["//vite:package.json"],
     node_modules = "//tests/npm:node_modules",
+    package_scopes = ["//vite:package.json"],
     deps = [
         "@npm//:types_node",
         "@npm//:vite",
@@ -43,6 +44,7 @@ sh_test(
     srcs = ["resolution_parity_test.sh"],
     data = [
         "resolution_parity_test.mjs",
+        "//tests/npm:node_modules",  # keep
         "//ts/toolchain:node_resolved",
         "//vite:vite_plugin_bazel",
     ],

@@ -5,13 +5,10 @@ import (
 	"os"
 )
 
-// planNodeTest names every file on the command line, so unlike the vitest plan
-// there is no staged root to keep the runner from globbing a sibling out of bin.
 func planNodeTest(
-	cfg *Config, r *Resolver, plan *Plan, args []string, shard Shard,
-) (*Plan, error) {
+	cfg *Config, original *Resolver, plan *Plan, args []string, shard Shard,
+) (_ *Plan, err error) {
 	n := cfg.NodeTest
-	plan.Dir = r.Dir()
 
 	// A coverage run asks for a report node --test cannot write, and an empty
 	// one would read as a clean run.
@@ -22,6 +19,14 @@ func planNodeTest(
 				"against this one.")
 	}
 
+	argv, err := runtimeCommand(cfg, original)
+	if err != nil {
+		return nil, err
+	}
+	r, err := nativeResolver(cfg, original, plan)
+	if err != nil {
+		return nil, err
+	}
 	listed, err := testFiles(r, n.TestFilesList)
 	if err != nil {
 		return nil, err
@@ -31,20 +36,8 @@ func planNodeTest(
 		return emptyShard(plan, shard), nil
 	}
 
-	root := r.Dir()
-	if root == "" {
-		root, err = os.MkdirTemp(os.Getenv("TEST_TMPDIR"), "ts_test_root")
-		if err != nil {
-			return nil, err
-		}
-	}
-	_, err = installNodeModules(r, plan, root, cfg.Workspace, n.NodeModules)
-	if err != nil {
-		return nil, err
-	}
-
-	argv, err := runtimeCommand(cfg, r)
-	if err != nil {
+	plan.Dir = r.Dir()
+	if err := nativeNodePath(r, plan, n.NodeModules); err != nil {
 		return nil, err
 	}
 	if n.ResolveHook != "" {
@@ -56,9 +49,6 @@ func planNodeTest(
 		// process and forwards the parent's execArgv to it.
 		argv = append(argv, "--import", hook)
 	}
-	// The entry keeps its runfiles path, so relative reads land where the
-	// checkout has them; node --test forwards execArgv to its children.
-	argv = append(argv, "--preserve-symlinks-main")
 	argv = append(argv, args...)
 	argv = append(argv, "--test")
 
@@ -69,7 +59,11 @@ func planNodeTest(
 	}
 
 	for _, f := range files {
-		argv = append(argv, f.path)
+		path, err := r.Path(f.rlocation)
+		if err != nil {
+			return nil, err
+		}
+		argv = append(argv, path)
 	}
 	plan.Argv = argv
 	return plan, nil

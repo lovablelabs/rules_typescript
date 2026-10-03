@@ -1,0 +1,23 @@
+load("//tests/node_test/analysis:analysis_tests.bzl", "runtime_scope_accepted_test")
+load("//ts:defs.bzl", "ts_test")
+
+# keep
+ts_test(
+    name = "scope_alias_test",
+    srcs = ["scope_alias.test.ts"],
+    config = "vitest.config.mts",
+    config_srcs = ["//tests/vitest/config_srcs/identity:package.json"],
+    node_modules = "//tests/npm:node_modules",
+    deps = [
+        "//tests/vitest/config_srcs/identity/components",
+        "@npm//:vitest",
+    ],
+)
+
+runtime_scope_accepted_test(
+    name = "config_preserves_producer_scope_alias_test",
+    expected_scope = "//tests/vitest/config_srcs/identity:package.json",
+    runtime_extension = ".ts",
+    scope_module = "scope_alias.test.ts",
+    target_under_test = ":scope_alias_test",
+)

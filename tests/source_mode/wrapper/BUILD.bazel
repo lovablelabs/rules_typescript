@@ -4,12 +4,10 @@ load("//ts:defs.bzl", "ts_compile")
 
 ts_compile(
     name = "wrapper",
-    srcs = [
-        "index.ts",
-        "package.json",
-    ],
+    srcs = ["index.ts"],
     emit = True,  # keep
     node_modules = "//tests/source_mode:node_modules",
+    package_scopes = ["package.json"],
     visibility = ["//tests/source_mode:__pkg__"],
     deps = ["//tests/source_mode:node_modules/native-source-fixture"],
 )

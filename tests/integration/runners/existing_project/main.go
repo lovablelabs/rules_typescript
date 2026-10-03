@@ -71,12 +71,10 @@ func main() {
 	})
 }
 
-// Srcs off two roots (the exec root and the package) fail at analysis under the
-// tsgo emit. Written here, not checked in: Gazelle runs first and has no say.
 func sharedSrc(it *harness.IT) {
 	it.Write(it.Path("shared/BUILD.bazel"), "exports_files([\"util.ts\"])\n")
 	it.Write(it.Path("shared/util.ts"), "export const util = 1;\n")
-	it.Write(it.Path("consumer/main.ts"), "export const main = 1;\n")
+	it.Write(it.Path("consumer/main.ts"), "import { util } from '../shared/util.js';\nexport function main() { return util; }\n")
 	it.Write(it.Path("consumer/BUILD.bazel"), `load("@rules_typescript//ts:defs.bzl", "ts_compile")
 
 ts_compile(
@@ -89,30 +87,22 @@ ts_compile(
 )
 `)
 
-	log, err := it.BazelLog("shared_src.log", "build", "//consumer:consumer")
-	if err == nil {
-		log.Dump()
-		it.Fail("//consumer:consumer built; a src from //shared must be rejected")
-	}
-	it.Pass("//consumer:consumer failed")
-
-	for _, want := range []string{
-		"hang off 2 different roots, and one declaration emit has one rootDir",
-		"the exec root",
-		"--//ts:declarations=oxc",
+	it.MustBazel("build", "//consumer:consumer", "--output_groups=+declarations")
+	for _, rel := range []string{
+		"consumer/consumer/main.js",
+		"consumer/consumer/main.d.ts",
+		"consumer/shared/util.js",
+		"consumer/shared/util.d.ts",
 	} {
-		if !log.Contains(want) {
-			log.Dump()
-			it.Fail("the failure does not mention %q, so it is not the one-rootDir check", want)
-		}
+		it.RequireFile(it.Bin(rel), "the common source layout lost its output: %s", rel)
 	}
-	it.Pass("the shared src is rejected at analysis, naming both roots and the flag")
+	it.RequireMatches(it.Bin("consumer/consumer/main.js"), `['"]\.\./shared/util\.js['"]`,
+		"the emitted consumer changed its relative import to the borrowed source")
+	it.RequireMatches(it.Bin("consumer/consumer/main.d.ts"), `declare function main\(\): number`,
+		"the borrowed source lost its inferred return type in the consumer declaration")
+	it.Pass("borrowed sources retain relative imports and declarations in the consumer's common layout")
 }
 
-// The four srcs shapes that are not the mix and build on origin/main: a
-// descendant package's src, which hangs off this package like the target's own;
-// a select; a canonical `@@//` label in this very package; and the top-level
-// package, which IS the exec root a src from anywhere else hangs off.
 func srcsShapesStillBuild(it *harness.IT) {
 	it.Write(it.Path("holder/a.ts"), "export const a = 1;\n")
 	it.Write(it.Path("holder/sub/x.ts"), "export const x = 1;\n")
@@ -180,7 +170,7 @@ ts_compile(
 		"toplevel.d.ts",
 		"shared/util.d.ts",
 	} {
-		it.RequireFile(it.Bin(rel), "a srcs shape that is not the mix lost its output: %s", rel)
+		it.RequireFile(it.Bin(rel), "a supported srcs shape lost its output: %s", rel)
 	}
 	it.Pass("a descendant src, a select, a canonical self-label and a top-level foreign src all still emit")
 }

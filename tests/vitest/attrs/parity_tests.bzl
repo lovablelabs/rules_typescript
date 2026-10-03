@@ -6,16 +6,7 @@ name are put aside, the vitest test's TsEmit is the compile's ES-modules emit
 the compile's TsgoDeclare has no counterpart (§ The Test's Program)."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-
-_ActionsInfo = provider(
-    "The actions a target registered.",
-    fields = ["actions"],
-)
-
-def _actions_aspect_impl(target, _ctx):
-    return [_ActionsInfo(actions = target.actions)]
-
-_actions_aspect = aspect(implementation = _actions_aspect_impl)
+load("//tests:runnable_actions.bzl", "RunnableActionOwnerInfo", "runnable_action_aspect")
 
 _COMPILE_MNEMONICS = ["TsConfig", "TsEmit", "TsgoDeclare", "TsgoCheck"]
 
@@ -25,6 +16,7 @@ _TSGO_INPUTS = (
     "-tsconfig=",
     "-source=",
     "-node_modules=",
+    "-inherit_node_modules=",
     "-scratch=",
     "-tsgo=",
 )
@@ -41,13 +33,14 @@ def _es_modules_emit(argv):
 
 def _compile_argv(target):
     """Each compile action's argv, the target's package and name abstracted."""
+    owner = target[RunnableActionOwnerInfo]
     out = {}
-    for action in target[_ActionsInfo].actions:
+    for action in owner.actions:
         if action.mnemonic not in _COMPILE_MNEMONICS:
             continue
         out[action.mnemonic] = [
-            arg.replace(target.label.package, "<package>").replace(
-                target.label.name,
+            arg.replace(owner.label.package, "<package>").replace(
+                owner.label.name,
                 "<name>",
             )
             for arg in action.argv
@@ -80,7 +73,7 @@ def _compile_parity_impl(ctx):
 compile_parity_test = unittest.make(
     _compile_parity_impl,
     attrs = {
-        "compile": attr.label(aspects = [_actions_aspect]),
-        "test": attr.label(aspects = [_actions_aspect]),
+        "compile": attr.label(aspects = [runnable_action_aspect]),
+        "test": attr.label(aspects = [runnable_action_aspect]),
     },
 )

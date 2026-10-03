@@ -1,0 +1,4 @@
+{
+  "extends": "../foreign_json/tsconfig.json",
+  "include": ["*.ts"]
+}

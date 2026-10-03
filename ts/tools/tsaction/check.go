@@ -16,12 +16,15 @@ import (
 // ownership is the manifest the rule writes beside the tsgo action: which
 // label owns each file the program can resolve an edge to.
 type ownership struct {
-	label        string
-	own          map[string]bool
-	direct       map[string]bool
-	files        map[string][]string
-	directStores map[string]bool
-	stores       map[string]string
+	label  string
+	own    map[string]bool
+	direct map[string]bool
+	files  map[string][]fileOwner
+}
+
+type fileOwner struct {
+	label  string
+	direct bool
 }
 
 func readOwnership(name string) (*ownership, error) {
@@ -38,11 +41,9 @@ func readOwnership(name string) (*ownership, error) {
 
 func parseOwnership(text string) (*ownership, error) {
 	o := &ownership{
-		own:          map[string]bool{},
-		direct:       map[string]bool{},
-		files:        map[string][]string{},
-		directStores: map[string]bool{},
-		stores:       map[string]string{},
+		own:    map[string]bool{},
+		direct: map[string]bool{},
+		files:  map[string][]fileOwner{},
 	}
 	for i, line := range strings.Split(text, "\n") {
 		if line == "" {
@@ -57,11 +58,17 @@ func parseOwnership(text string) (*ownership, error) {
 		case f[0] == "direct" && len(f) == 2:
 			o.direct[f[1]] = true
 		case f[0] == "file" && len(f) == 3:
-			o.files[f[2]] = append(o.files[f[2]], f[1])
-		case f[0] == "npm-direct" && len(f) == 3:
-			o.directStores[f[2]] = true
-		case f[0] == "npm" && len(f) == 4:
-			o.stores[f[3]] = f[2]
+			o.files[f[2]] = append(o.files[f[2]], fileOwner{label: f[1]})
+		case (f[0] == "npm-direct" && len(f) == 3) || (f[0] == "npm" && len(f) == 4):
+			tree := f[len(f)-1]
+			if path.IsAbs(tree) || path.Clean(tree) != tree || !strings.Contains(tree, "/.pnpm/") || npmPackageRoot(tree) != tree {
+				return nil, fmt.Errorf("ownership manifest line %d needs an exact npm store File path; use tsaction from the same rules_typescript source", i+1)
+			}
+			owner := fileOwner{direct: f[0] == "npm-direct"}
+			if !owner.direct {
+				owner.label = f[2]
+			}
+			o.files[tree] = append(o.files[tree], owner)
 		default:
 			return nil, fmt.Errorf("ownership manifest line %d: %q", i+1, line)
 		}
@@ -135,45 +142,23 @@ func (o *ownership) owner(to string) (label string, declared bool, err error) {
 	if o.own[to] {
 		return o.label, true, nil
 	}
-	if key := storeKeyOf(to); key != "" {
-		if o.directStores[key] {
-			return "", true, nil
-		}
-		if label, ok := o.stores[key]; ok {
-			return label, false, nil
-		}
-		return "", false, fmt.Errorf("resolves to %s, under a package the "+
-			"npm closure does not hold", to)
-	}
 	for p := to; p != "." && p != "/" && p != ""; p = path.Dir(p) {
 		owners, ok := o.files[p]
 		if !ok {
 			continue
 		}
-		for _, l := range owners {
-			if o.direct[l] {
-				return l, true, nil
+		for _, owner := range owners {
+			if owner.direct || o.direct[owner.label] {
+				return owner.label, true, nil
 			}
 		}
-		return owners[0], false, nil
+		return owners[0].label, false, nil
+	}
+	if underNodeModules(to) {
+		return "", false, fmt.Errorf("resolves to %s, under a package the npm closure does not hold", to)
 	}
 	return "", false, fmt.Errorf("resolves to %s, which no src, dep or npm "+
 		"package of this target owns", to)
-}
-
-// storeKeyOf names the store tree a path is under, the <key> of
-// node_modules/.pnpm/<key>/node_modules/<name>/..., or "" outside the store.
-func storeKeyOf(p string) string {
-	const marker = "node_modules/.pnpm/"
-	i := strings.Index(p, marker)
-	if i < 0 || (i > 0 && p[i-1] != '/') {
-		return ""
-	}
-	rest := strings.SplitN(p[i+len(marker):], "/", 3)
-	if len(rest) < 3 || rest[1] != "node_modules" {
-		return ""
-	}
-	return rest[0]
 }
 
 // report is the failing action's message: each edge with the file it resolved

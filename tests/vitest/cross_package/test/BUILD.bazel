@@ -1,6 +1,6 @@
 """A test imports a file of another package by relative path: the file is a
-src, exported where it lives, compiled into this package's output tree and
-held in the runfiles at its own path, where the import reaches it."""
+src, exported where it lives, and compiles into this package's output tree
+under the program's shared source layout, where the import reaches it."""
 
 load("//ts:defs.bzl", "ts_test")
 load(":cross_package_tests.bzl", "cross_package_program_test")

@@ -99,6 +99,8 @@ target's `NpmHoistInfo` on every importer of the chain), and a
 view's `TsInfo` and `NpmPackageInfo`, so a target names it in `deps` where it
 named the view ([Providers](providers.md#nodemodulesinfo)).
 
+Native executables derive a build-owned runtime view from these same declared Files. Each selected store has one copied authority per view; importer aliases use relative links to it, preserving the package's peer graph and singleton identity. Package the complete view with its generated config. Copy cost is not measured; runtime wrappers are resolved from their original tool runfiles.
+
 ## One Link per Name
 
 Two resolutions of one name in `deps` is one link name twice, and fails:
@@ -242,8 +244,9 @@ twin an importer on the chain links, the member links `deps` name, every store
 tree and edge link their closures hold, the hoist links whose names the
 closure holds with the trees they enter ([The Store](#the-store)), and each
 first-party dep's (`TsInfo.npm_files`). tsaction lays a program root out
-under the target's output directory, the action's sources at their paths,
-with each importer's `node_modules` at the importer's directory -- the
+under the target's output directory, linking declared Files at logical
+compiler paths, with each importer's `node_modules` at the importer's
+directory -- the
 lockfile's root importer's at the program root's `node_modules` -- so a source
 at `web/src/a.ts` walks up through
 `web/node_modules` to the root's, and a dep's declaration under

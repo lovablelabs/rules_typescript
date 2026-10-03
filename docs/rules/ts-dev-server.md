@@ -72,7 +72,8 @@ output paths and npm resolution remain relative to the workspace.
 
 ## npm Resolution
 
-The following resolution details describe the Vite implementation.
+The common launcher exposes one app importer to every server implementation.
+Vite adds the resolution fallback described below.
 
 Starting the server links the importer's `node_modules` in at the workspace
 root and removes the link on Ctrl-C, so a bare specifier resolves by the
@@ -80,9 +81,13 @@ ordinary walk up from the importer, and a package's own imports from its
 realpath in the store. SSR externalisation and `optimizeDeps.include` resolve
 without going through the plugin container, so they need the link. A generated
 `bazel:npm-resolve` plugin at `enforce: 'post'` covers importers the walk cannot
-reach. Exports maps, conditions and subpaths stay Vite's. A package the importer
-does not link produces Vite's `Failed to resolve import`; the fix is adding it
-to the `node_modules` target's `deps`.
+reach. Exports maps, conditions and subpaths stay Vite's. For imports without a recorded compiler binding, a package the importer does not link produces Vite's `Failed to resolve import`; the fix is adding it to the `node_modules` target's `deps`.
+
+`ts_dev_server` rejects a live executable source whose declared npm binding selects a different store File from the nearest link for that npm name on the dev app's complete `node_modules` importer chain. A missing link on that chain is also rejected. Equal package versions do not establish store identity, while labels aliasing the same store File are accepted. The check runs before starting any selected server, including default oj, Vite and custom `DevServerInfo` providers. The error names the source, npm name and both owners. Align the stores or serve the sources in separate dev applications.
+
+Source edits are served without rerunning Bazel, so a currently unused or type-only declared binding can become a runtime request, including a request for package metadata. Declared but unused or type-only differences, and differences a custom resolver could handle, can still be rejected. Ordinary same-store resolution stays with the selected server.
+
+At Vite startup, the generated config checks declared source and asset paths for closer installations of their npm bindings. It rejects a different store directory, accepts links to the declared store, and preserves user files. This check runs when the config is evaluated: restart after changing an installation. It does not guarantee refusal in oj, which can continue after a plugin-host config error.
 
 An existing `node_modules` is never replaced: a real directory or a link to
 another one is an error naming both. In `.gitignore`, `node_modules` without a
@@ -104,6 +109,40 @@ package as the dev server. A relative import resolves only if the module is decl
 ## Restarts
 
 The plugin-driven restart behavior below describes the Vite implementation.
+
+Vite owns authored source edits. The Bazel watcher subscribes to generated and
+published Files, using the selected File's `is_source` provenance. Handwritten
+`declaredFiles` entries can set `isSource: true` to leave watching to Vite;
+omitting it preserves their existing Bazel watcher behavior.
+
+Generated TypeScript and JSON modules use their declared originals in
+`bazel-bin`, even when checkout contains a file at the same workspace-relative
+path. Their relative imports use source coordinates, and rebuilds update them
+without requiring emitted JavaScript. For individually declared authored or
+generated source Files, `ts_dev_server` records the nearest declared package
+scope from the same repository. The Bazel plugin selects `#imports` targets
+from that scope before filesystem lookup, maps first-party targets to their
+declared Files, and delegates the resulting request to Vite.
+
+Compiled `ts_codegen(out_dir)` trees retain the same declared authority over
+their members. Imports select generated JavaScript instead of checkout twins,
+and a missing member fails during module transformation instead of loading a
+checkout copy. These trees contain compiled JavaScript and declarations, not
+raw TypeScript sources.
+Private imports in tree members and Files without a recorded scope use native
+package resolution. Borrowing an outer authored scope for a tree member is
+unsupported.
+
+Vite resolves declared asset imports to their published Files in `bazel-bin`,
+including relative references from published CSS and `?raw` and `?url` imports.
+Source asset edits reach the server after their owning Bazel action rebuilds
+those Files; the plugin watches the published outputs for updates.
+
+Literal browser asset URLs such as `<img src="/logo.svg">` keep Vite's native
+static lookup under the live application root. Declaring a Bazel File does not
+remap those URLs. To use a declared generated image, import its URL with
+`import logoUrl from "./logo.svg?url"` and use `logoUrl` as the image source.
+Emitted asset URLs use Vite's native static serving and missing-file behavior.
 
 One server process lives across every rebuild: `ibazel` SIGTERMs the launcher
 and the launcher survives it. With `plugin` set, the restart decision is made

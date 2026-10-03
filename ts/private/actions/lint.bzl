@@ -125,24 +125,27 @@ lint_config_repo = repository_rule(
           "configured.",
 )
 
-def lint_action(ctx, lint, srcs, tsconfig, inputs, chain, dep_dts, npm_files, importers, overlays, manifests):
+def lint_action(ctx, lint, srcs, tsconfig, inputs, chain, dep_dts, npm_files, importers, overlays, manifests, generated_srcs = [], inherited_importers = []):
     """Registers TsLint in the same program layout as tsgo's validation."""
     stamp = ctx.actions.declare_file("{}.tslint".format(ctx.label.name))
     config_files = [lint.config] if lint.config else []
-    merged_importers = {directory: True for directory in lint.importers + importers}
-    if importers or lint.importers:
-        root_importer = (importers or lint.importers)[-1]
-        merged_importers.pop(root_importer)
-        merged_importers[root_importer] = True
+    own_importers = importers or lint.importers
+    inherited = {
+        directory: True
+        for directory in inherited_importers + lint.importers
+        if directory not in own_importers
+    }
     args = program_args(
         ctx,
         "{}/{}.lint".format(stamp.dirname, ctx.label.name),
         inputs,
         chain,
         dep_dts,
-        merged_importers.keys(),
+        own_importers,
         overlays,
         manifests,
+        generated_srcs,
+        inherited.keys(),
     )
     args.add_all(depset(config_files, transitive = [lint.data]), map_each = source_path, format_each = "-copy=%s", expand_directories = False)
     if tsconfig:

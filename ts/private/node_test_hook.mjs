@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import module from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,8 +11,7 @@ if (typeof module.registerHooks !== "function") {
   );
 }
 
-// The launcher names the importer chain in NODE_PATH, which ESM resolution
-// ignores; a bare specifier resolves from each importer's directory in turn.
+// ESM ignores NODE_PATH; the launcher's declared chain supplies absent native packages.
 const trees = (process.env.NODE_PATH ?? "")
   .split(path.delimiter)
   .filter(Boolean)
@@ -74,16 +73,13 @@ function isBare(specifier) {
   );
 }
 
-// The nearest package.json above the importer, at its runfiles path and at
-// the source path node realpaths a self-reference into.
 function packageScope(parentURL) {
   let dir = path.dirname(fileURLToPath(parentURL));
   for (;;) {
     const manifest = path.join(dir, "package.json");
     if (isFile(pathToFileURL(manifest))) {
       const { name, exports } = JSON.parse(readFileSync(manifest, "utf8"));
-      const real = path.dirname(realpathSync(manifest));
-      return { dir, real, name, exports };
+      return { dir, name, exports };
     }
     const parent = path.dirname(dir);
     if (parent === dir) return null;
@@ -103,61 +99,72 @@ function isSelfReference(specifier, scope) {
 
 // The manifest as written names a source; the compiled sibling at the source's
 // runfiles path runs.
-function compiledSibling(resolved, scope) {
-  const real = fileURLToPath(resolved.url);
-  if (!real.startsWith(scope.real + path.sep)) return resolved;
-  const held = path.join(scope.dir, real.slice(scope.real.length + 1));
+function compiledSibling(resolved, scope, asWritten) {
+  if (!resolved.url.startsWith("file:") || scope === null) return resolved;
+  const resolvedURL = new URL(resolved.url);
+  const held = fileURLToPath(resolvedURL);
+  if (!held.startsWith(scope.dir + path.sep)) return resolved;
   for (const form of compiledExtensionForms(held)) {
     const url = pathToFileURL(form);
-    if (isFile(url)) return { url: url.href, shortCircuit: true };
+    if (isFile(url)) {
+      url.search = resolvedURL.search;
+      url.hash = resolvedURL.hash;
+      return { ...resolved, ...asWritten(url.href) };
+    }
   }
   return resolved;
 }
 
-function fromTheTrees(specifier, context, next) {
+function resolvePackage(specifier, context, next) {
   let notFound;
-  for (const tree of trees) {
+  for (const { parentURL } of [context, ...trees]) {
     try {
-      return next(specifier, { ...context, parentURL: tree.parentURL });
+      return next(specifier, { ...context, parentURL });
     } catch (error) {
       if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
-      notFound = error;
+      try {
+        module.findPackageJSON(specifier, parentURL);
+      } catch (lookupError) {
+        if (lookupError?.code === "ERR_MODULE_NOT_FOUND") {
+          notFound ??= error;
+          continue;
+        }
+        throw lookupError;
+      }
+      throw error;
     }
   }
   throw notFound;
 }
 
-module.registerHooks({
-  resolve(specifier, context, next) {
-    const { parentURL } = context;
-    const asWritten = (form) => next(form, context);
-    if (!parentURL?.startsWith("file:") || insideATree(parentURL)) {
-      return (
-        firstResolved(compiledExtensionForms(specifier), asWritten) ??
-        asWritten(specifier)
-      );
-    }
-    if (specifier.startsWith("./") || specifier.startsWith("../")) {
-      for (const form of [...compiledForms(specifier), specifier]) {
-        const url = new URL(form, parentURL);
-        if (isFile(url)) return { url: url.href, shortCircuit: true };
-      }
-      return asWritten(specifier);
-    }
-    const scope = isBare(specifier) ? packageScope(parentURL) : null;
-    if (isSelfReference(specifier, scope)) {
-      return compiledSibling(asWritten(specifier), scope);
-    }
-    // require() reads NODE_PATH itself and ignores a swapped parentURL.
-    const imported = !context.conditions.includes("require");
-    if (trees.length > 0 && isBare(specifier)) {
-      const fromTrees = (form) => fromTheTrees(form, context, next);
-      const attempt = imported ? fromTrees : asWritten;
-      return (
-        firstResolved(compiledExtensionForms(specifier), attempt) ??
-        attempt(specifier)
-      );
+function resolve(specifier, sharedContext, next) {
+  // Node merges next() overrides into the context object supplied to this hook.
+  const context = { ...sharedContext };
+  const { parentURL } = context;
+  // Node leaves importAttributes undefined for require, including under custom conditions.
+  const imported = context.importAttributes !== undefined;
+  const asWritten = (form) => next(form, context);
+  if (!parentURL?.startsWith("file:") || insideATree(parentURL)) {
+    return firstResolved(compiledExtensionForms(specifier), asWritten) ?? asWritten(specifier);
+  }
+  if (specifier.startsWith("./") || specifier.startsWith("../")) {
+    for (const form of [...compiledForms(specifier), specifier]) {
+      const url = new URL(form, parentURL);
+      if (isFile(url)) return asWritten(form);
     }
     return asWritten(specifier);
-  },
-});
+  }
+  const privateImport = specifier.startsWith("#");
+  const scope = privateImport || isBare(specifier) ? packageScope(parentURL) : null;
+  if (privateImport || isSelfReference(specifier, scope)) {
+    return compiledSibling(asWritten(specifier), scope, asWritten);
+  }
+  // require() reads NODE_PATH itself and ignores a swapped parentURL.
+  if (trees.length > 0 && isBare(specifier)) {
+    const attempt = imported ? (form) => resolvePackage(form, context, next) : asWritten;
+    return firstResolved(compiledExtensionForms(specifier), attempt) ?? attempt(specifier);
+  }
+  return asWritten(specifier);
+}
+
+module.registerHooks({ resolve });

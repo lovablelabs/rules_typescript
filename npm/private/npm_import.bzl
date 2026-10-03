@@ -311,7 +311,7 @@ def _npm_import_impl(rctx):
     lines = [_NPM_BUILD_HEADER]
     bins = _bin_entries(pkg_json)
     if bins:
-        lines.append('load("@rules_typescript//npm/private:npm_bin.bzl", "npm_bin")\n')
+        lines.append('load("@rules_typescript//npm/private:npm_bin.bzl", npm_bin = "npm_bin_macro")\n')
     lines.append('package(default_visibility = ["//visibility:public"])\n')
     lines.append('exports_files(["{}/package.json"])\n'.format(package_root))
     lines.append(_files_stanza(package_root))

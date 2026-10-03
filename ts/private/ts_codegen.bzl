@@ -199,17 +199,18 @@ def _ts_codegen_impl(ctx):
         progress_message = "TsCodegen %{label}",
     )
 
-    # A tree is compiled output whole; among declared outs a .d.ts and a .js are
-    # a dep's, while a .ts out is a source for a consumer's srcs.
+    # A tree is compiled output whole; scalar .d.ts, .js and .json are a dep's,
+    # while a .ts out is a source for a consumer's srcs.
     files = depset(outs)
     if has_out_dir:
         js, declarations = files, files
     else:
         js = depset([f for f in outs if f.extension in _JS_EXTENSIONS])
         declarations = depset([f for f in outs if f.basename.endswith(_DECLARATION_SUFFIXES)])
+    data = depset([f for f in ctx.outputs.outs if f.extension == "json"], order = "postorder")
     return [
         DefaultInfo(files = files),
-        ts_info(js = js, declarations = declarations, label = ctx.label),
+        ts_info(js = js, declarations = declarations, data = data, label = ctx.label),
     ]
 
 # ─── Rule declaration ──────────────────────────────────────────────────────────

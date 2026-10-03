@@ -7,6 +7,47 @@ import (
 	"testing"
 )
 
+func TestBazelStdout(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		exit string
+	}{
+		{name: "failed_command_retains_stdout_diagnostics", exit: "7"},
+		{name: "successful_command_preserves_stdout_exactly", exit: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bazel := filepath.Join(dir, "bazel")
+			script := "#!/bin/sh\nprintf '  diagnostic 100%% complete\\nnext line\\t \\n'\nexit " + tc.exit + "\n"
+			if err := os.WriteFile(bazel, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Close every executable writer before a sibling fork can inherit it.
+			t.Parallel()
+			it := &IT{bazel: bazel, WorkspaceDir: dir}
+			var output string
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				output = it.BazelStdout("run", "//:probe")
+			}()
+			want := "  diagnostic 100% complete\nnext line\t \n"
+			if tc.exit != "0" {
+				got, ok := caught.(failure)
+				if !ok {
+					t.Fatalf("panic = %#v, want harness failure", caught)
+				}
+				if !strings.Contains(got.msg, "exit status "+tc.exit) || !strings.Contains(got.msg, want) {
+					t.Fatalf("failure lost exit status or stdout: %q", got.msg)
+				}
+			} else if caught != nil || output != want {
+				t.Fatalf("stdout = %q, panic = %#v; want %q without panic", output, caught, want)
+			}
+		})
+	}
+}
+
 // Ambient Bazel variables would otherwise mask missing fallback behavior.
 func setEnv(t *testing.T, env map[string]string) {
 	t.Helper()

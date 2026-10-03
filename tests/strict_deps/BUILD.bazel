@@ -120,10 +120,8 @@ tsgo_check_test(
 tsgo_check_test(
     name = "tsgo_check_npm_test",
     size = "small",
-    lines = [
-        "npm-direct\t@types/node\t@types+node@22.20.1",
-        "npm\tundici-types\t@npm//:undici-types\tundici-types@6.21.0",
-    ],
+    npm_direct = ["@npm//:types_node"],
+    npm_reachable = {"@npm//:undici-types": "@npm//:undici-types"},
     target_under_test = ":builtins",
 )
 

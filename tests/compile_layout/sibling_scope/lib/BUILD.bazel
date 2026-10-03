@@ -1,0 +1,17 @@
+# gazelle:ignore
+
+load("//ts:defs.bzl", "ts_compile")
+
+ts_compile(
+    name = "lib",
+    srcs = [
+        "api.d.ts",
+        "contract.d.ts",
+        "index.ts",
+        "internal.ts",
+    ],
+    emit = True,
+    package_scopes = ["package.json"],
+    tsconfig = "tsconfig.json",
+    visibility = ["//tests/compile_layout/sibling_scope/app:__pkg__"],
+)

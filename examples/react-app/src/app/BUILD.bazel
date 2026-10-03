@@ -11,6 +11,7 @@ ts_compile(
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
     deps = [
+        "//:root",
         "//src/components",
         "//src/validation",
         "@npm//:react",

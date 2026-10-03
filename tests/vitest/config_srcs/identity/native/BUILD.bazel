@@ -1,0 +1,46 @@
+load("//tests/node_test/analysis:analysis_tests.bzl", "private_module_alias_conflict_test", "private_module_aliases", "private_scope_alias_test")
+load("//ts:defs.bzl", "ts_binary", "ts_compile", "ts_test")
+
+# keep
+ts_test(
+    name = "native_scope_alias_test",
+    srcs = ["native_scope.test.mjs"],
+    runner = "//ts/runners:node_test",
+    deps = ["//tests/vitest/config_srcs/identity/components"],
+)
+
+# keep
+ts_compile(
+    name = "entry",
+    srcs = ["native_scope.test.mjs"],
+    deps = ["//tests/vitest/config_srcs/identity/components"],
+)
+
+ts_binary(
+    name = "native_scope_alias_binary",
+    entry_point = ":entry",
+)
+
+[
+    private_scope_alias_test(
+        name = name,
+        producer = "//tests/vitest/config_srcs/identity:scope",
+        scope = "//tests/vitest/config_srcs/identity:package.json",
+        target_under_test = target,
+    )
+    for name, target in [
+        ("node_cannot_drop_private_canonical_scope_test", ":native_scope_alias_test"),
+        ("binary_cannot_drop_private_canonical_scope_test", ":native_scope_alias_binary"),
+    ]
+]
+
+private_module_aliases(
+    name = "private_canonical_module_aliases",
+    source = "native_scope.test.mjs",
+    tags = ["manual"],
+)
+
+private_module_alias_conflict_test(
+    name = "native_cannot_publish_private_canonical_module_twice_test",
+    target_under_test = ":private_canonical_module_aliases",
+)

@@ -122,19 +122,7 @@ def _generate_vite_config(ctx, bundle_filename, transitive_js_files):
         "});\n"
     )
 
-def create_bundle_action(ctx, entry, bundle_filename):
-    """Runs ctx.attr.bundler over the entry point's .js graph.
-
-    Args:
-        ctx: The rule context. Carries entry_point, bundler, format, sourcemap,
-             external and define.
-        entry: TsInfo from the entry_point target.
-        bundle_filename: Filename stem (without .js extension) for the bundle.
-
-    Returns:
-        struct(bundle_out = File, outputs = list of File): the bundle and every
-        declared output beside it.
-    """
+def create_bundle_action(ctx, entry, entry_js_file, bundle_filename):
     all_js = entry.transitive_js
     all_js_maps = entry.transitive_js_maps
 
@@ -144,27 +132,7 @@ def create_bundle_action(ctx, entry, bundle_filename):
 
     bundler_info = ctx.attr.bundler[BundlerInfo]
 
-    entry_js_files = entry.js.to_list()
-    if not entry_js_files:
-        fail(
-            ("ts_binary: entry_point '{}' provides TsInfo but has no direct " +
-             ".js outputs.\nEnsure the ts_compile target at entry_point has " +
-             "at least one .ts source file in srcs.").format(
-                ctx.attr.entry_point.label,
-            ),
-        )
-    if len(entry_js_files) != 1:
-        fail(
-            "ts_binary: with a bundler, entry_point '{ep}' must produce exactly 1 .js file (the entry), but it produces {n}.\n".format(
-                ep = ctx.attr.entry_point.label,
-                n = len(entry_js_files),
-            ) +
-            "Use a ts_compile target with a single source file as the entry point, " +
-            "e.g. srcs = [\"index.ts\"].",
-        )
-    entry_js_file = entry_js_files[0]
-
-    out_dir_rel = "{}_bundle".format(ctx.label.name)
+    out_dir_rel = "{}_bundle".format(getattr(ctx.attr, "public_name", ctx.label.name))
 
     if getattr(bundler_info, "use_generated_config", False):
         vite_js_name = "{}.{}.js".format(bundle_filename, _VITE_FORMAT_SUFFIX.get(ctx.attr.format, "es"))

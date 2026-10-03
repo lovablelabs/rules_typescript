@@ -33,14 +33,7 @@ func resolverForExecutable(argv0 string) (*Resolver, error) {
 			if !isRegular(manifest) {
 				continue
 			}
-			r, err := newResolver(runfiles.ManifestFile(manifest))
-			if err != nil {
-				return nil, err
-			}
-			if st, err := os.Stat(directory); err == nil && st.IsDir() {
-				r.dir = directory
-			}
-			return r, nil
+			return newResolver(runfiles.ManifestFile(manifest))
 		}
 		if st, err := os.Stat(directory); err == nil && st.IsDir() {
 			return directoryResolver(directory)
@@ -100,10 +93,64 @@ func runfilesEnv(env []string, name string) string {
 // Dir is the absolute runfiles directory, or "" in manifest-only mode.
 func (r *Resolver) Dir() string { return r.dir }
 
+func (r *Resolver) Stage(root string, modules []string) (*Resolver, error) {
+	manifest := runfilesEnv(r.Env(), "RUNFILES_MANIFEST_FILE")
+	if manifest != "" || r.dir == "" {
+		if err := stageManifest(root, manifest, func(string) bool { return true }, modules); err != nil {
+			return nil, err
+		}
+	} else {
+		sourceRoot, err := filepath.EvalSymlinks(r.dir)
+		if err != nil {
+			return nil, err
+		}
+		entries := map[string]string{}
+		err = filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			relative, err := filepath.Rel(sourceRoot, path)
+			if err != nil {
+				return err
+			}
+			target := path
+			if entry.Type()&os.ModeSymlink != 0 {
+				target, err = os.Readlink(path)
+				if err != nil {
+					return err
+				}
+				if !filepath.IsAbs(target) {
+					original := filepath.Join(filepath.Dir(path), target)
+					relativeTarget, err := filepath.Rel(sourceRoot, original)
+					if err != nil {
+						return err
+					}
+					if !filepath.IsLocal(relativeTarget) {
+						target = original
+					}
+				}
+			}
+			entries[filepath.ToSlash(relative)] = target
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := stageEntries(root, entries, modules); err != nil {
+			return nil, err
+		}
+	}
+	return directoryResolver(root)
+}
+
 // Env returns the runfiles variables to hand to child processes.
 func (r *Resolver) Env() []string {
 	if r.rf == nil {
-		return []string{"RUNFILES_DIR=" + r.dir, "JAVA_RUNFILES=" + r.dir, "RUNFILES_MANIFEST_FILE="}
+		env := []string{"RUNFILES_DIR=" + r.dir, "JAVA_RUNFILES=" + r.dir, "RUNFILES_MANIFEST_FILE=", "RUNFILES_MANIFEST_ONLY="}
+		if os.Getenv("TEST_SRCDIR") != "" {
+			env = append(env, "TEST_SRCDIR="+r.dir)
+		}
+		return env
 	}
 	return r.rf.Env()
 }

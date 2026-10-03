@@ -1,0 +1,4 @@
+exports_files(
+    ["marker.ts"],
+    visibility = ["//tests/vitest/ancestor_scope/roots/owned:__pkg__"],
+)

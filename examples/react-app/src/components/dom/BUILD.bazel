@@ -7,6 +7,7 @@ ts_test(
     node_modules = "//:node_modules",
     tsconfig = ":tsconfig",
     deps = [
+        "//:root",
         "//src/components",
         "@npm//:happy-dom",
         "@npm//:react",

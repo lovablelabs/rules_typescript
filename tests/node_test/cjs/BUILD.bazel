@@ -24,11 +24,11 @@ ts_test(
     srcs = [
         "cjs.test.ts",
         "helper.ts",
-        "package.json",
     ],
     data = ["fixtures/note.txt"],
     emit = True,  # keep
     node_modules = "//tests/npm:node_modules",
+    package_scopes = ["package.json"],
     runner = "//ts/runners:node_test",
     tsconfig = ":cjs_tsconfig",
     deps = [

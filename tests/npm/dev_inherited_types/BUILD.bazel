@@ -1,0 +1,349 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("//npm:defs.bzl", "node_modules", "node_modules_member")
+load("//npm/private:store.bzl", "npm_store")
+load("//tests/npm:direct_version_tests.bzl", "TEST_RUNFILES_REPOSITORY", "inherited_dev_npm_test", "member_dev_npm_test", "previous_dev_npm_owner", "previous_dev_npm_test")
+load("//ts:defs.bzl", "ts_compile", "ts_dev_server")
+load("//ts/private:ts_npm_package.bzl", "ts_npm_package")
+
+package(default_visibility = ["//tests/dev_server:__pkg__"])
+
+exports_files(
+    ["scope_imports/package.json"],
+    visibility = ["//tests/npm/dev_inherited_types/scope_imports/nested:__pkg__"],
+)
+
+[
+    write_file(
+        name = "scope_store_" + identity + "_" + kind,
+        out = "scope_store_" + identity + "/" + filename,
+        content = [
+            content,
+            "",
+        ],
+    )
+    for identity, version in [
+        ("A", "1.0.0"),
+        ("B", "2.0.0"),
+    ]
+    for kind, filename, content in [
+        (
+            "manifest",
+            "package.json",
+            '{"name":"scope-store","version":"' + version + '","type":"module","exports":{".":{"types":"./index.d.ts","default":"./index.js"}}}',
+        ),
+        (
+            "runtime",
+            "index.js",
+            'export const store = "' + identity + '";',
+        ),
+        (
+            "types",
+            "index.d.ts",
+            'export declare const store: "' + identity + '";',
+        ),
+    ]
+]
+
+[
+    filegroup(
+        name = "scope_store_" + identity + "_files",
+        srcs = [":scope_store_" + identity + "_" + kind for kind in [
+            "manifest",
+            "runtime",
+            "types",
+        ]],
+    )
+    for identity in [
+        "A",
+        "B",
+    ]
+]
+
+[
+    npm_store(
+        name = "node_modules/.pnpm/scope-store@" + version + "/node_modules/scope-store",
+        files = ":scope_store_" + identity + "_files",
+        package_dir = ":scope_store_" + identity + "_manifest",
+    )
+    for identity, version in [
+        ("A", "1.0.0"),
+        ("B", "2.0.0"),
+    ]
+]
+
+[
+    ts_npm_package(
+        name = "scope_store_" + identity,
+        package_name = "scope-store",
+        package_dir = ":scope_store_" + identity + "_manifest",
+        package_files = [":scope_store_" + identity + "_files"],
+        package_version = version,
+        store = ":node_modules/.pnpm/scope-store@" + version + "/node_modules/scope-store",
+        visibility = ["//tests/npm/dev_inherited_types/scope_imports/nested:__pkg__"],
+    )
+    for identity, version in [
+        ("A", "1.0.0"),
+        ("B", "2.0.0"),
+    ]
+]
+
+# keep
+node_modules(
+    name = "scope_node_modules",
+    parent = "//tests/npm:node_modules",
+    visibility = ["//tests/npm/dev_inherited_types/scope_imports/nested:__pkg__"],
+    deps = [":scope_store_A"],
+)
+
+# keep
+ts_compile(
+    name = "scope_metadata",
+    srcs = [],
+    package_scopes = ["scope_imports/package.json"],
+    visibility = ["//tests/npm/dev_inherited_types/scope_imports/nested:__pkg__"],
+)
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = [
+        "@npm//:culori",
+        "@npm//:vite",
+    ],
+)
+
+# keep
+ts_compile(
+    name = "entry",
+    srcs = ["entry.ts"],
+    emit = False,
+    node_modules = ":node_modules",
+    deps = ["@npm//:culori"],
+)
+
+# keep
+ts_dev_server(
+    name = "dev",
+    entry_point = ":entry",
+    node_modules = ":node_modules",
+    server = "//vite:dev_server",
+    vite_config = "vite.config.ts",
+)
+
+# keep
+ts_dev_server(
+    name = "default_dev",
+    entry_point = ":entry",
+    node_modules = ":node_modules",
+)
+
+write_file(
+    name = "other_source",
+    out = "other.ts",
+    content = ['export { z } from "zod";'],
+)
+
+# keep
+ts_compile(
+    name = "other_entry",
+    srcs = [":other_source"],
+    emit = False,
+    node_modules = ":node_modules",
+    deps = ["@npm//:zod"],
+)
+
+# keep
+ts_dev_server(
+    name = "other_dev",
+    entry_point = ":other_entry",
+    node_modules = ":node_modules",
+    server = "//vite:dev_server",
+)
+
+# keep
+ts_dev_server(
+    name = "dev_dev/node_modules/culori/slash_child",
+    entry_point = ":other_entry",
+    node_modules = ":node_modules",
+    server = "//vite:dev_server",
+)
+
+inherited_dev_npm_test(
+    name = "slash_named_apps_cannot_nest_their_npm_views_test",
+    size = "small",
+    entry = ":entry",
+    importer = ":node_modules",
+    other = ":dev_dev/node_modules/culori/slash_child",
+    other_entry = ":other_entry",
+    other_package = "@npm//:zod",
+    package = "@npm//:types_culori",
+    target_under_test = ":dev",
+)
+
+[
+    inherited_dev_npm_test(
+        name = name,
+        size = "small",
+        entry = ":entry",
+        importer = ":node_modules",
+        other = ":other_dev" if target == ":dev" else None,
+        other_entry = ":other_entry" if target == ":dev" else None,
+        other_package = "@npm//:zod" if target == ":dev" else None,
+        package = "@npm//:types_culori",
+        target_under_test = target,
+    )
+    for name, target in [
+        ("inherited_companion_and_disjoint_apps_keep_exact_stores_test", ":dev"),
+        ("default_server_retains_inherited_companion_test", ":default_dev"),
+    ]
+]
+
+# keep
+node_modules(
+    name = "member_node_modules",
+    parent = "//tests/npm/app_a:node_modules",
+)
+
+# keep
+node_modules_member(
+    name = "node_modules/shared",
+    member = "@npm//:shared",
+)
+
+[
+    write_file(
+        name = name + "_source",
+        out = name + ".ts",
+        content = ['export { greet } from "shared";'],
+    )
+    for name in [
+        "member",
+        "parent_member",
+        "registry",
+    ]
+]
+
+# keep
+ts_compile(
+    name = "parent_member_entry",
+    srcs = [":parent_member_source"],
+    emit = False,
+    node_modules = "//tests/npm:node_modules",
+    deps = ["//tests/npm:node_modules/shared"],
+)
+
+# keep
+ts_compile(
+    name = "member_entry",
+    srcs = [":member_source"],
+    emit = False,
+    node_modules = ":member_node_modules",
+    deps = [
+        ":node_modules/shared",
+        ":parent_member_entry",
+    ],
+)
+
+# keep
+ts_dev_server(
+    name = "member_dev",
+    entry_point = ":member_entry",
+    node_modules = ":member_node_modules",
+)
+
+previous_dev_npm_owner(
+    name = "previous_member_entry",
+    dep = ":member_entry",
+)
+
+# keep
+ts_dev_server(
+    name = "previous_member_dev",
+    entry_point = ":previous_member_entry",
+    node_modules = ":member_node_modules",
+)
+
+previous_dev_npm_test(
+    name = "prior_member_files_cannot_be_replaced_by_parent_registry_test",
+    size = "small",
+    entry = ":previous_member_entry",
+    importer = ":member_node_modules",
+    member = ":node_modules/shared",
+    target_under_test = ":previous_member_dev",
+)
+
+# keep
+ts_compile(
+    name = "registry_entry",
+    srcs = [":registry_source"],
+    emit = False,
+    node_modules = ":member_node_modules",
+    deps = ["//tests/npm/app_a:registry_shared"],
+)
+
+# keep
+ts_dev_server(
+    name = "registry_dev",
+    entry_point = ":registry_entry",
+    node_modules = ":member_node_modules",
+)
+
+member_dev_npm_test(
+    name = "merged_apps_preserve_member_and_parent_store_identities_test",
+    size = "small",
+    entry = ":member_entry",
+    importer = ":member_node_modules",
+    member = ":node_modules/shared",
+    other = ":registry_dev",
+    other_entry = ":registry_entry",
+    parent_member = "//tests/npm:node_modules/shared",
+    target_under_test = ":member_dev",
+)
+
+write_file(
+    name = "ordinary_data",
+    out = "ordinary/part/" + TEST_RUNFILES_REPOSITORY + "/part/tests/part/npm/part/dev_inherited_types/part/dev_dev/part/vite.config.mjs/node_modules/@types/culori",
+    content = ["DECLARED_ORDINARY_DATA"],
+)
+
+[
+    filegroup(
+        name = name,
+        srcs = [":ordinary_data"],
+        data = apps,
+    )
+    for name, apps in [
+        (
+            "composed_apps",
+            [
+                ":dev",
+                ":other_dev",
+            ],
+        ),
+        (
+            "reversed_apps",
+            [
+                ":other_dev",
+                ":dev",
+            ],
+        ),
+    ]
+]
+
+inherited_dev_npm_test(
+    name = "composed_apps_cannot_hide_repository_files_test",
+    size = "small",
+    consumers = [
+        ":composed_apps",
+        ":reversed_apps",
+    ],
+    entry = ":entry",
+    importer = ":node_modules",
+    ordinary_data = ":ordinary_data",
+    other = ":other_dev",
+    other_entry = ":other_entry",
+    other_package = "@npm//:zod",
+    package = "@npm//:types_culori",
+    target_under_test = ":dev",
+)
