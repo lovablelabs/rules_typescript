@@ -4,9 +4,7 @@ load("//ts:defs.bzl", "ts_compile")
 
 ts_compile(
     name = "library",
-    srcs = [
-        "library.ts",
-        "package.json",
-    ],
+    srcs = ["library.ts"],
+    package_scopes = ["package.json"],
     visibility = ["//tests/source_mode:__subpackages__"],
 )

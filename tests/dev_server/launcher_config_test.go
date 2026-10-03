@@ -2,7 +2,7 @@ package dev_server_test
 
 import (
 	"os"
-	"strings"
+	"path/filepath"
 	"testing"
 
 	"github.com/mikn/rules_typescript/tests/verify"
@@ -44,11 +44,8 @@ func (c launcherConfig) env(tree *verify.Tree, workspace string) []string {
 	return env
 }
 
-// inTree resolves an rlocation path, whose first segment is the repository that
-// verify.Tree.Path prepends itself.
 func inTree(tree *verify.Tree, rlocation string) string {
-	_, rel, _ := strings.Cut(rlocation, "/")
-	return tree.Path(rel)
+	return filepath.Join(filepath.Dir(tree.Path(".")), filepath.FromSlash(rlocation))
 }
 
 func runfilesDir(t *testing.T) string {

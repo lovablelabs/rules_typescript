@@ -319,7 +319,7 @@ func TestTsconfigStep_WritesTheChainShapedConfig(t *testing.T) {
     "types": ["node", "@cloudflare/workers-types"]
   },
   "include": ["../../../../pkg/src", "../../../../pkg/globals.d.ts",
-    "./generated.d.ts"],
+    "../../../../pkg/generated.d.ts"],
   "exclude": [],
   "references": []
 }`)
@@ -345,7 +345,7 @@ func TestTsconfigStep_RootsAreTheChainsPatterns(t *testing.T) {
 			inheritedRootsLeaf, "showconfig-chain.json",
 			`null`,
 			`["../../../../pkg/src", "../../../../pkg/globals.d.ts",
-			  "../../../../other/c.ts", "./generated.d.ts"]`,
+			  "../../../../other/c.ts", "../../../../pkg/generated.d.ts"]`,
 			`["../../../../base/**/*.test.ts"]`,
 		},
 		"files": {

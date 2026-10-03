@@ -13,10 +13,8 @@ load("@rules_typescript//ts:defs.bzl", "ts_compile")
 # keep
 ts_compile(
     name = "ws-linked",
-    srcs = [
-        "index.ts",
-        "package.json",
-    ],
+    srcs = ["index.ts"],
     emit = True,  # keep
+    package_scopes = ["package.json"],
     visibility = ["//visibility:public"],
 )

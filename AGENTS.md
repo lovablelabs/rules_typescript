@@ -75,9 +75,12 @@ ts_compile → TsConfig action (<name>.tsconfig.json + <name>.options.json from
              manifest names the owner)
            → TsgoDeclare action (.d.ts, the `declarations` output group and
              TsInfo.declarations; under --//ts:declarations=tsgo) when a
-             dependent's compile reads them or the group is requested
-           the tsgo runs are from a program root holding the action's
-           sources at their paths and bazel-out whole, with each importer's
+             dependent's compile reads them or the group is requested;
+             tsaction emit -declarations_only checks the full program and
+             projects scratch declarations through the shared source layout
+           the tsgo runs link declared Files at logical source paths in a
+           program root, with generated roots in their original package
+           scopes and bazel-out linked whole, each importer's
            node_modules at the importer's directory, the chain
            `node_modules` names; each run's emit shape is its command line
            → TsLint validation action (.tslint stamp in _validation) when the
@@ -94,8 +97,9 @@ Change implementation without changing .d.ts → no downstream recompilation.
 The strict-deps check is the tsgo action's: tests/strict_deps pins the manifest
 it reads, and //tests/integration:new_project_test the failing build.
 
-The rule takes srcs, deps, tsconfig, node_modules and emit. Every compiler option is
-the tsconfig's, read by tsaction; the emit knobs are the flags in ts/BUILD.bazel
+The rule takes srcs, data, deps, tsconfig, node_modules and emit. Every compiler
+option is the tsconfig's, read by tsaction; the emit knobs are the flags in
+ts/BUILD.bazel
 (//ts:declarations, //ts:source_map, //ts:declaration_map, //ts:lib_check);
 //ts:checkers sizes tsgo's threads and the cpus its two actions declare.
 ```
@@ -241,6 +245,23 @@ A data src of a `ts_compile` -- a `.css`, an image, a `.json` -- travels in
 `TsInfo.transitive_data`, which `ts_test`, `ts_binary` and
 `ts_dev_server` stage beside the `.js`; a `*.module.css` is Vite's own CSS
 modules wherever Vite runs it.
+`ts_compile.data` stages explicit standalone assets at package-relative paths
+through the same provider. Emitted modules, imported JSON and scopes use one
+logical source layout in the target's output namespace. A source-mode consumer
+of a relocated dependency stages unchanged TypeScript in that layout while
+compiler inputs retain their original identities; all-source closures keep
+original runtime paths. Owner `runtime_files` and optional `declaration_files` record
+exact source/output File pairs. Consumers link canonical dependency outputs
+and overlay declarations at their source-origin paths, including when a
+single-package consumer imports a relocated producer. Runnable consumers
+validate exact runtime File and package-scope identity. Optional owner
+`canonical_links` records exact `(link File, canonical File)` pairs for dependency
+links and scope symlinks the producer creates without rewriting. npm member stores
+may copy metadata-only scope aliases; they reject module and declaration aliases
+because copying them loses canonical scope and importer identity.
+`type_inputs` retains compiler-only metadata without runtime or source-root ownership.
+Move foreign standalone JSON assets to `data` for package-local placement.
+`ts_test.data` remains extra runfiles.
 
 ## npm Internals
 
@@ -285,9 +306,9 @@ A resolution is name, version and peer set: pnpm resolves a package once per
 distinct peer set and the outcomes have different dependency edges, so
 `NpmPackageInfo.peer_id` carries pnpm's peer suffix (the same token the
 snapshot's repository name is built from) and everything keys on it. Two
-resolutions of one name on one target (two versions, or two peer sets of one
-version) is an error: `node_modules/<name>` is one directory and Node resolves
-the bare name to it.
+store Files for one name at the same importer link location are an error;
+different importer locations can retain different versions or peer sets in
+one target.
 
 A package's `exports`, `types`, `typings`, `main` and the `/// <reference
 types>` headers of its declarations are read by nothing here: tsgo and node read

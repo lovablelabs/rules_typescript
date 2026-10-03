@@ -1,5 +1,6 @@
 # Default owner for everything
 * @mikn
+/formal/runfiles_identity/ @mikn
 
 # Gazelle extension (Go)
 /gazelle/ @mikn

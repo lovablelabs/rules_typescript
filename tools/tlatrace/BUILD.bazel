@@ -1,0 +1,21 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tlatrace",
+    testonly = True,
+    srcs = [
+        "run.go",
+        "trace.go",
+    ],
+    importpath = "github.com/mikn/rules_typescript/tools/tlatrace",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "tlatrace_test",
+    srcs = [
+        "run_test.go",
+        "trace_test.go",
+    ],
+    embed = [":tlatrace"],
+)

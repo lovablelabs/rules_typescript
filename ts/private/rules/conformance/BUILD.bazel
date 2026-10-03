@@ -1,0 +1,20 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_binary")
+
+go_binary(
+    name = "export_producer_traces",
+    testonly = True,
+    srcs = [
+        "export.go",
+        "main.go",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["//tools/tlatrace"],
+)
+
+exports_files(
+    [
+        "inputs.bzl",
+        "replay_assertions.bzl",
+    ],
+    visibility = ["//visibility:public"],
+)

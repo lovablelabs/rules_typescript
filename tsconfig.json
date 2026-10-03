@@ -365,7 +365,6 @@
     "eslint-plugin/README.md",
     "eslint-plugin/docs/rules/require-explicit-types.md",
     "eslint-plugin/package-lock.json",
-    "eslint-plugin/package.json",
     "eslint-plugin/src/index.ts",
     "eslint-plugin/src/rules/__tests__/require-explicit-types.test.ts",
     "eslint-plugin/src/rules/require-explicit-types.ts",

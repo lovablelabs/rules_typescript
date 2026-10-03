@@ -1,0 +1,10 @@
+load("//ts:defs.bzl", "ts_compile")
+
+# keep
+ts_compile(
+    name = "components",
+    srcs = ["value.ts"],
+    emit = True,
+    visibility = ["//tests/vitest/config_srcs/identity:__subpackages__"],
+    deps = ["//tests/vitest/config_srcs/identity:scope"],
+)

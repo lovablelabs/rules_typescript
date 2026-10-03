@@ -37,29 +37,34 @@ doc="$(sed -n '/^TsTestRunnerInfo = provider($/,/^)$/p' "${PROVIDERS}" \
   | tr -d '\n')"
 [[ -n "${doc}" ]] || fail "no \"launch\" field in TsTestRunnerInfo"
 
-printf '%s\n' chain entry_extensions entry_points es_twins inline_members \
-  package_sources placed runner runtime_data_sets runtime_sources test_files_list \
-  transitive_js \
+printf '%s\n' asset_files canonical_links chain entry_extensions entry_points \
+  es_twins inline_members package_sources placed runner runtime_data_sets \
+  runtime_files runtime_inputs runtime_sources test_files_list transitive_js \
   > "${want}"
 printf '%s\n' "${doc}" \
   | sed -n 's/.*builds from the compile (\([^)]*\)).*/\1/p' \
   | tr ', ' '\n\n' | awk 'NF' | LC_ALL=C sort > "${got}"
 check "the test members launch's doc names"
-sed -n '/^    launched = runner.launch(ctx, struct($/,/^    ))$/p' "${CORE}" \
+grep -q '^    launched = runner.launch(ctx, test)$' "${CORE}" \
+  || fail "the core does not launch the runner with its test struct"
+sed -n '/^    test = struct($/,/^    )$/p' "${CORE}" \
   | sed -n 's/^        \([a-z_]*\) = .*/\1/p' | LC_ALL=C sort > "${got}"
 check "the test members the core builds"
 
-printf '%s\n' env files mode output_groups section symlinks transitive_files \
-  > "${want}"
-printf '%s\n' "${doc}" | sed 's/.*the result carries//' \
-  | grep -o '`[a-z_]*`' | tr -d '`' | LC_ALL=C sort > "${got}"
+printf '%s\n' env files mode output_groups replacements section symlinks \
+  transitive_files > "${want}"
+printf '%s\n' "${doc}" | sed 's/.*[Tt]he result carries//' \
+  | grep -o '`[a-z_]*`' | tr -d '`' | LC_ALL=C sort -u > "${got}"
 check "the result members launch's doc names"
-grep -o 'launched\.[a-z_]*' "${CORE}" | sed 's/launched\.//' \
-  | LC_ALL=C sort -u > "${got}"
+{
+  grep -o 'launched\.[a-z_]*' "${CORE}" | sed 's/launched\.//'
+  grep -o 'getattr(launched, "[a-z_]*"' "${CORE}" | sed 's/.*"\([a-z_]*\)"/\1/'
+} | LC_ALL=C sort -u > "${got}"
 check "the result members the core reads"
 
-awk '/^def _[a-z_]*_launch\(/ { name = $2; sub(/\(.*/, "", name) }
-     /^    return struct\($/ { open = 1; next }
+awk '/^def / { name = "" }
+     /^def _[a-z_]*_launch\(/ { name = $2; sub(/\(.*/, "", name) }
+     name != "" && /^    return struct\($/ { open = 1; next }
      open && /^    \)$/ { open = 0 }
      open && match($0, /^        [a-z_]+ = /) {
        print name, substr($0, 9, RLENGTH - 11)
@@ -67,10 +72,15 @@ awk '/^def _[a-z_]*_launch\(/ { name = $2; sub(/\(.*/, "", name) }
 launches="$(cut -d' ' -f1 "${TEST_TMPDIR}/returned" | LC_ALL=C sort -u)"
 [[ "${launches}" == $'_node_test_launch\n_vitest_launch' ]] \
   || fail "the launch functions returning a struct: ${launches//$'\n'/ }"
+optional="replacements"
 for launch in ${launches}; do
-  awk -v n="${launch}" '$1 == n { print $2 }' "${TEST_TMPDIR}/returned" \
-    | LC_ALL=C sort > "${got}"
-  check "the result members ${launch} returns"
+  grep -vx "${optional}" "${want}" > "${TEST_TMPDIR}/required"
+  awk -v n="${launch}" -v o="${optional}" '$1 == n && $2 != o { print $2 }' \
+    "${TEST_TMPDIR}/returned" | LC_ALL=C sort > "${got}"
+  LC_ALL=C diff -u "${TEST_TMPDIR}/required" "${got}" > "${TEST_TMPDIR}/diff" \
+    || { cat "${TEST_TMPDIR}/diff" >&2; fail "the result members ${launch} returns differ from the required set"; }
 done
-echo "TsTestRunnerInfo.launch: 12 test members and 7 result members," \
-  "named by the doc, returned by both runners, read by the core"
+cut -d' ' -f2 "${TEST_TMPDIR}/returned" | LC_ALL=C sort -u > "${got}"
+check "the result members the runners return together"
+echo "TsTestRunnerInfo.launch: 16 test members and 8 result members," \
+  "named by the doc, returned by the runners, read by the core"

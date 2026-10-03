@@ -1,0 +1,19 @@
+load("//tests/node_test/analysis:analysis_tests.bzl", "module_alias_inputs")
+
+[
+    module_alias_inputs(
+        name = placement,
+        src = placement + "/selected.test.ts",
+        shadow = placement + "/selected.test.js",
+        visibility = ["//tests/node_test/analysis:__pkg__"],
+    )
+    for placement in [
+        "direct",
+        "files",
+        "root_symlink",
+        "tree",
+        "opaque_link",
+        "root_ancestor",
+        "same_file",
+    ]
+]

@@ -6,7 +6,10 @@ load("@npm//:defs.bzl", "npm_virtual_store")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_typescript//ts:defs.bzl", "ts_pnpm")
 
-# gazelle:exclude foreign_fixtures
+exports_files(
+    ["package.json"],
+    visibility = ["//visibility:public"],
+)
 
 gazelle(
     name = "gazelle",

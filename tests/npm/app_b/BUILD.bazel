@@ -1,4 +1,8 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("//npm:defs.bzl", "node_modules")
+load("//npm/private:store.bzl", "npm_store")
+load("//ts:defs.bzl", "ts_compile")
+load("//ts/private:ts_npm_package.bzl", "ts_npm_package")
 
 package(default_visibility = ["//tests/npm:__pkg__"])
 
@@ -7,8 +11,73 @@ package(default_visibility = ["//tests/npm:__pkg__"])
 node_modules(
     name = "node_modules",
     parent = "//tests/npm/features:node_modules",
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/app_a:__pkg__",
+    ],
     deps = [
+        ":registry_shared",
         "@npm_features//app-b:ansi-regex",
         "@npm_features//app-b:ansi-styles",
     ],
 )
+
+npm_store(
+    name = "node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+    files = "//tests/npm/app_a:registry_shared_files",
+    package_dir = "//tests/npm/app_a:registry_shared_manifest",
+)
+
+ts_npm_package(
+    name = "registry_shared",
+    package_name = "shared",
+    package_dir = "//tests/npm/app_a:registry_shared_manifest",
+    package_files = ["//tests/npm/app_a:registry_shared_files"],
+    package_version = "0.0.0",
+    store = ":node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/app_a:__pkg__",
+    ],
+)
+
+write_file(
+    name = "borrowed_shared_source",
+    out = "borrowed_shared.ts",
+    content = [
+        'import { greet } from "shared";',
+        'export const borrowed = greet("World");',
+        "",
+    ],
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/app_a:__pkg__",
+    ],
+)
+
+ts_compile(
+    name = "shared_owner",
+    srcs = [":borrowed_shared_source"],
+    emit = True,
+    node_modules = ":node_modules",
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/app_a:__pkg__",
+    ],
+    deps = [":registry_shared"],
+)
+
+[
+    ts_compile(
+        name = name,
+        data = [asset],
+        emit = True,
+        node_modules = ":node_modules",
+        visibility = ["//tests/npm/app_a:__pkg__"],
+        deps = [":registry_shared"],
+    )
+    for name, asset in [
+        ("shared_asset_owner", "helper.mjs"),
+        ("shared_ordinary_data_owner", "context.txt"),
+    ]
+]

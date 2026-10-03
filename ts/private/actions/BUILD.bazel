@@ -63,7 +63,10 @@ bzl_library(
 bzl_library(
     name = "workers_pool",
     srcs = ["workers_pool.bzl"],
-    deps = ["//ts/private:runtime"],
+    deps = [
+        "//ts/private:providers",
+        "//ts/private:runtime",
+    ],
 )
 
 bzl_library(

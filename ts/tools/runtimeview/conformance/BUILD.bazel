@@ -1,0 +1,15 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_binary")
+
+go_binary(
+    name = "conformance",
+    testonly = True,
+    srcs = [
+        "main.go",
+        "replay.go",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/tlatrace",
+        "//ts/tools/runtimeview",
+    ],
+)

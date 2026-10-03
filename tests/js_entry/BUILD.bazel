@@ -1,19 +1,15 @@
-"""ts_binary over a plain JavaScript source, run directly and as a generator.
+"""ts_binary source entries preserve sibling modules, fixture links and codegen."""
 
-The same target answers both questions the source entry_point raises: that
-`bazel run` reaches a sibling module through runfiles, and that ts_codegen can
-drive it from the exec configuration with the runtime and node_modules the
-rule documents.
-"""
-
-load("@io_bazel_rules_go//go:def.bzl", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_test")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
-load("//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile")
-load(":entry_point_tests.bzl", "typescript_entry_point_test", "unusable_entry_point_test")
+load("//tests/node_test/analysis:analysis_tests.bzl", "data_symlink_inputs", "native_runfiles_mapping_test")
+load("//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile", "ts_test")
+load(":entry_point_tests.bzl", "analysis_bundler", "bundle_borrowed_source_entry_test", "data_links_test", "generated_data_entry", "native_runfiles_fixture", "runfiles_runner", "typescript_entry_point_test", "unusable_entry_point_test")
 
 package(default_visibility = ["//:__pkg__"])
 
 # gazelle:exclude *_test.go
+# gazelle:exclude helper
 
 ts_binary(
     name = "main",
@@ -51,10 +47,212 @@ go_test(
     size = "small",
     srcs = ["js_entry_test.go"],
     data = [
+        ":file_data_entry",
         ":generated_ts",
-        ":main",
+        ":node_runfiles_fixture",
+        ":node_test_runfiles_fixture",
+        ":runfiles_identity_binary",
+        ":runfiles_identity_node_test",
+        ":runfiles_lookup",
+        ":source_data_links",
+        ":tsinfo_data_entry",
     ],
-    deps = ["//tests/verify"],
+    deps = [
+        "//tests/verify",
+        "//ts/tools/runtimeview",
+        "@io_bazel_rules_go//go/runfiles:go_default_library",
+    ],
+)
+
+# keep
+go_binary(
+    name = "runfiles_lookup",
+    srcs = ["helper/main.go"],
+    deps = ["@io_bazel_rules_go//go/runfiles:go_default_library"],
+)
+
+# keep
+node_modules(
+    name = "runfiles_node_modules",
+    hoist = "//tests/npm:node_modules/.pnpm/node_modules",
+    deps = ["@npm//:culori"],
+)
+
+ts_binary(
+    name = "runfiles_identity_binary",
+    data = [
+        "runfiles_state.cjs",
+        "schema.txt",
+    ],
+    entry_point = "runfiles_identity.cjs",
+    node_modules = ":runfiles_node_modules",
+)
+
+runfiles_runner(
+    name = "runfiles_runner",
+    testonly = True,
+    data = ":data-payload.json",
+)
+
+# keep
+ts_test(
+    name = "runfiles_identity_node_test",
+    srcs = [
+        "runfiles_identity.cjs",
+        "runfiles_state.cjs",
+    ],
+    data = ["schema.txt"],
+    emit = False,
+    node_modules = ":runfiles_node_modules",
+    runner = ":runfiles_runner",
+    tags = ["manual"],  # This subject needs the lookup helper and inputs supplied by js_entry_test.
+    test_srcs = ["runfiles_identity.cjs"],
+    deps = ["@npm//:culori"],
+)
+
+[
+    native_runfiles_fixture(
+        name = mode + "_runfiles_fixture",
+        testonly = True,
+        data = ":data-payload.json" if mode == "node_test" else "schema.txt",
+        helper = ":runfiles_lookup",
+        module = "runfiles_state.cjs",
+        package = "@npm//:culori",
+        runner = ":runfiles_runner" if mode == "node_test" else None,
+        target = target,
+    )
+    for mode, target in [
+        ("node", ":runfiles_identity_binary"),
+        ("node_test", ":runfiles_identity_node_test"),
+    ]
+]
+
+[
+    native_runfiles_mapping_test(
+        name = mode + "_runfiles_mapping_test",
+        entry = "runfiles_identity.cjs",
+        module = "runfiles_state.cjs",
+        target_under_test = target,
+    )
+    for mode, target in [
+        ("node", ":runfiles_identity_binary"),
+        ("node_test", ":runfiles_identity_node_test"),
+    ]
+]
+
+generated_data_entry(
+    name = "data_entry",
+    entry = "data-entry.mjs",
+    payload = "data-payload.json",
+)
+
+ts_binary(
+    name = "file_data_entry",
+    data = [
+        "data-helper.mjs",
+        ":data-payload.json",
+    ],
+    entry_point = ":data-entry.mjs",
+)
+
+ts_binary(
+    name = "tsinfo_data_entry",
+    data = [
+        "data-helper.mjs",
+        ":data-payload.json",
+    ],
+    entry_point = ":data_entry",
+)
+
+data_symlink_inputs(name = "binary_data_links")
+
+analysis_bundler(name = "analysis_bundler")
+
+ts_compile(
+    name = "borrowed_source_compile",
+    srcs = [
+        "source.ts",
+        "//tests/compiler_options/subtree:nested/deep/leaf.ts",
+    ],
+    data = ["schema.txt"],
+    emit = True,  # keep
+)
+
+[
+    ts_binary(
+        name = name,
+        bundler = ":analysis_bundler",
+        entry_file = entry_file,
+        entry_point = ":borrowed_source_compile",
+        tags = ["manual"],  # The analysis-only bundler cannot execute a bundle action.
+    )
+    for name, entry_file in [
+        ("bundle_explicit_borrowed_entry", "leaf.ts"),
+        ("bundle_sole_local_entry", ""),
+    ]
+]
+
+[
+    bundle_borrowed_source_entry_test(
+        name = name + "_survives_retained_helper_test",
+        entry_point = ":borrowed_source_compile",
+        source = source,
+        target_under_test = ":" + name,
+    )
+    for name, source in [
+        ("bundle_explicit_borrowed_entry", "//tests/compiler_options/subtree:nested/deep/leaf.ts"),
+        ("bundle_sole_local_entry", "source.ts"),
+    ]
+]
+
+ts_binary(
+    name = "compiler_data_links",
+    data = [
+        "greet.mjs",
+        ":binary_data_links",
+    ],
+    entry_point = ":generated_compile",
+)
+
+data_links_test(
+    name = "compiler_data_links_cannot_become_modules_test",
+    fixtures = ":binary_data_links",
+    javascript_data = "greet.mjs",
+    target_under_test = ":compiler_data_links",
+)
+
+ts_binary(
+    name = "bundle_data_links",
+    bundler = ":analysis_bundler",
+    data = [
+        "greet.mjs",
+        ":binary_data_links",
+    ],
+    entry_point = ":generated_compile",
+    tags = ["manual"],  # The provider stub exists only to inspect analysis and cannot bundle.
+)
+
+data_links_test(
+    name = "bundle_data_links_cannot_become_modules_test",
+    fixtures = ":binary_data_links",
+    javascript_data = "greet.mjs",
+    target_under_test = ":bundle_data_links",
+)
+
+ts_binary(
+    name = "source_data_links",
+    data = [
+        "greet.mjs",
+        ":binary_data_links",
+    ],
+    entry_point = "main.mjs",
+)
+
+data_links_test(
+    name = "source_data_links_cannot_hide_sibling_modules_test",
+    fixtures = ":binary_data_links",
+    javascript_data = "greet.mjs",
+    target_under_test = ":source_data_links",
 )
 
 # ── The entry_point shapes the rule refuses ───────────────────────────────────

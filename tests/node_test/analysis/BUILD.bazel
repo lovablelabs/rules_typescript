@@ -4,8 +4,12 @@ The ts_test is `manual`: it is asserted to fail, so a wildcard that built it
 would fail with it.
 """
 
-load("//ts:defs.bzl", "ts_test")
-load(":analysis_tests.bzl", "vitest_attr_test")
+# gazelle:exclude runtime_sources
+# gazelle:exclude node_retains_unrelated_runtime_manifest/package.json
+
+load("//tests/compiler_options/analysis:analysis_tests.bzl", "previous_shape_provider")
+load("//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile", "ts_test")
+load(":analysis_tests.bzl", "binary_module_identity_test", "canonical_alias_data", "empty_test_root_test", "runfiles_module_projection_test", "runtime_module_alias_case", "runtime_module_collision_test", "runtime_scope_accepted_test", "runtime_scope_case", "runtime_source_identity_test", "selected_runtime_roots_test", "undeclared_test_root_test", "vitest_attr_test", "vitest_canonical_alias_test")
 
 ts_test(
     name = "vitest_attrs",
@@ -23,4 +27,513 @@ ts_test(
 vitest_attr_test(
     name = "vitest_attr_test",
     target_under_test = ":vitest_attrs",
+)
+
+ts_test(
+    name = "undeclared_test_root",
+    srcs = ["undeclared.test.ts"],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    tags = ["manual"],
+    test_srcs = ["empty.d.ts"],
+    deps = ["@npm//:types_node"],
+)
+
+undeclared_test_root_test(
+    name = "undeclared_test_root_test",
+    target_under_test = ":undeclared_test_root",
+)
+
+ts_test(
+    name = "empty_test_root",
+    srcs = [
+        "empty.d.ts",
+        "empty.test.ts",
+    ],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    tags = ["manual"],
+    test_srcs = ["empty.d.ts"],
+    deps = ["@npm//:types_node"],
+)
+
+empty_test_root_test(
+    name = "empty_test_root_test",
+    target_under_test = ":empty_test_root",
+)
+
+# keep
+ts_test(
+    name = "external_sole_test",
+    srcs = [
+        "@node_test_sources//tests/node_test/analysis:external_sole.test.js",
+        "@node_test_sources//tests/node_test/analysis:external_value.json",
+    ],
+    emit = False,
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    test_srcs = ["@node_test_sources//tests/node_test/analysis:external_sole.test.js"],
+    deps = ["@npm//:types_node"],
+)
+
+selected_runtime_roots_test(
+    name = "external_sole_root_cannot_be_dropped_test",
+    expected_source_entries = ["@node_test_sources//tests/node_test/analysis:external_sole.test.js"],
+    runtime_companions = ["@node_test_sources//tests/node_test/analysis:external_value.json"],
+    target_under_test = ":external_sole_test",
+)
+
+# keep
+ts_test(
+    name = "external_mixed_test",
+    srcs = [
+        "attrs.test.ts",
+        "//tests/node_test:collect.test.ts",
+        "@node_test_sources//tests/node_test/analysis:external_mixed.test.js",
+        "@node_test_sources//tests/node_test/analysis:external_value.json",
+    ],
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    test_srcs = [
+        "attrs.test.ts",
+        "//tests/node_test:collect.test.ts",
+        "@node_test_sources//tests/node_test/analysis:external_mixed.test.js",
+    ],
+    deps = ["@npm//:types_node"],
+)
+
+selected_runtime_roots_test(
+    name = "external_root_cannot_disappear_beside_local_root_test",
+    emitted_external = True,
+    expected_entries = [
+        "tests/node_test/analysis/tests/node_test/analysis/attrs.test.js",
+        "tests/node_test/analysis/tests/node_test/collect.test.js",
+    ],
+    expected_source_entries = ["@node_test_sources//tests/node_test/analysis:external_mixed.test.js"],
+    runtime_companions = ["@node_test_sources//tests/node_test/analysis:external_value.json"],
+    target_under_test = ":external_mixed_test",
+)
+
+# PR #235: forwarded runtime Files remain selected beside an ordinary local root.
+ts_codegen(
+    name = "generated_node_root",
+    srcs = ["attrs.test.ts"],
+    outs = ["generated.test.js"],
+    args = [
+        "stage",
+        "-out={outs_dir}",
+        "{srcs}",
+        "generated.test.js",
+    ],
+    generator = "//ts/tools/tsaction:tsaction",
+)
+
+ts_compile(
+    name = "emitted_node_root",
+    srcs = ["//tests/node_test:collect.test.ts"],
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    deps = ["@npm//:types_node"],
+)
+
+# keep
+ts_test(
+    name = "published_roots_beside_local_root_test",
+    srcs = [
+        "attrs.test.ts",
+        ":emitted_node_root",
+        ":generated_node_root",
+    ],
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    test_srcs = [
+        "attrs.test.ts",
+        ":emitted_node_root",
+        ":generated_node_root",
+    ],
+    deps = [
+        ":emitted_node_root",
+        ":generated_node_root",
+        "@npm//:types_node",
+    ],
+)
+
+selected_runtime_roots_test(
+    name = "published_roots_cannot_disappear_beside_local_root_test",
+    expected_entries = ["tests/node_test/analysis/analysis/attrs.test.js"],
+    published_entries = [
+        ":emitted_node_root",
+        ":generated_node_root",
+    ],
+    target_under_test = ":published_roots_beside_local_root_test",
+)
+
+ts_codegen(
+    name = "generated_vitest_root",
+    srcs = ["runtime_sources/copies.test.js"],
+    outs = ["runtime_sources/generated.test.js"],
+    args = [
+        "stage",
+        "-out={outs_dir}",
+        "{srcs}",
+        "generated.test.js",
+    ],
+    generator = "//ts/tools/tsaction:tsaction",
+)
+
+previous_shape_provider(
+    name = "runtime_sources/previous_shape.test",
+    runtime = True,
+    runtime_src = "runtime_sources/copies.test.js",
+)
+
+# keep
+ts_test(
+    name = "published_identity_pair_vitest_test",
+    srcs = [
+        "runtime_sources/copies.test.js",
+        ":generated_vitest_root",
+        ":runtime_sources/previous_shape.test",
+    ],
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    test_srcs = [
+        "runtime_sources/copies.test.js",
+        ":generated_vitest_root",
+        ":runtime_sources/previous_shape.test",
+    ],
+    deps = [
+        ":generated_vitest_root",
+        ":runtime_source_helper",
+        ":runtime_sources/previous_shape.test",
+        "@npm//:vitest",
+    ],
+)
+
+selected_runtime_roots_test(
+    name = "published_identity_pair_cannot_lose_vitest_discovery_test",
+    expected_entries = ["tests/node_test/analysis/runtime_sources/copies.test.js"],
+    published_entries = [
+        ":generated_vitest_root",
+        ":runtime_sources/previous_shape.test",
+    ],
+    target_under_test = ":published_identity_pair_vitest_test",
+    vitest_discovery = True,
+)
+
+[
+    runtime_scope_case(
+        name = "node_rejects_" + placement + "_scope_shadow",
+        placement = placement,
+    )
+    for placement in [
+        "direct",
+        "files",
+        "symlink",
+        "root_symlink",
+        "runner",
+        "direct_runner",
+        "preserving_runner",
+        "tree",
+        "opaque_link",
+    ]
+]
+
+runtime_scope_case(
+    name = "node_retains_unrelated_runtime_manifest",
+    emit = False,
+    placement = "runner",
+    shadowed = False,
+    source_scope = "node_retains_unrelated_runtime_manifest/package.json",
+)
+
+[
+    runtime_scope_case(
+        name = "vitest_" + mode + "_" + case,
+        dependency = mode == "emitted_dependency",
+        emit = mode == "emitted",
+        placement = placement,
+        scoped = scoped,
+        shadowed = shadowed,
+        vitest = True,
+    )
+    for mode in [
+        "source",
+        "emitted",
+        "emitted_dependency",
+    ]
+    for case, placement, scoped, shadowed in [
+        ("rejects_nearer_data_scope", "direct", True, True),
+        ("rejects_injected_data_scope", "direct", False, True),
+        ("rejects_runfiles_scope_shadow", "root_symlink", True, True),
+        ("retains_same_scope_file", "same_file", True, False),
+        ("retains_absent_source_scope", "none", False, False),
+        ("retains_unrelated_data_scope", "direct", True, False),
+    ]
+]
+
+runtime_scope_case(
+    name = "node_retains_unrelated_runtime_tree",
+    placement = "tree",
+    shadowed = False,
+)
+
+runtime_scope_case(
+    name = "node_retains_workspace_root_scope_alias",
+    placement = "workspace_root",
+    shadowed = False,
+)
+
+runtime_scope_case(
+    name = "binary_rejects_data_scope_shadow",
+    binary = True,
+    placement = "direct",
+)
+
+runtime_scope_case(
+    name = "binary_retains_unrelated_runtime_manifest",
+    binary = True,
+    placement = "direct",
+    shadowed = False,
+)
+
+[
+    runtime_scope_case(
+        name = name,
+        binary = binary,
+        json_module = placement == "files" and not shadowed,
+        placement = placement,
+        scoped = False,
+        shadowed = shadowed,
+    )
+    for name, binary, placement, shadowed in [
+        ("node_rejects_runtime_manifest_without_source_scope", False, "direct", True),
+        ("binary_rejects_runtime_manifest_without_source_scope", True, "direct", True),
+        ("node_rejects_opaque_parent_without_source_scope", False, "tree", True),
+        ("node_retains_absent_source_and_runtime_scope", False, "none", False),
+        ("node_retains_json_under_runtime_only_manifest", False, "files", False),
+        ("node_retains_unrelated_tree_without_source_scope", False, "tree", False),
+    ]
+]
+
+previous_shape_provider(
+    name = "previous_shape_runtime/entry",
+    data_path = "previous_shape_runtime/package.json",
+    runtime = True,
+)
+
+ts_binary(
+    name = "previous_shape_runtime_binary",
+    entry_point = ":previous_shape_runtime/entry",
+)
+
+runtime_scope_accepted_test(
+    name = "binary_retains_previous_shape_runtime_scope_test",
+    manifests = ["previous_shape_runtime/package.json"],
+    target_under_test = ":previous_shape_runtime_binary",
+)
+
+[
+    runtime_module_alias_case(
+        name = "selected_root_retains_canonical_output_with_" + placement + "_data" if placement in [
+            "direct",
+            "files",
+        ] else "selected_root_rejects_" + placement + "_replacement",
+        placement = placement,
+    )
+    for placement in [
+        "direct",
+        "files",
+        "root_symlink",
+        "tree",
+        "opaque_link",
+        "root_ancestor",
+    ]
+]
+
+[
+    runtime_module_alias_case(
+        name = "selected_root_retains_same_file_" + placement,
+        placement = placement,
+        same_file = True,
+    )
+    for placement in [
+        "direct",
+        "root_symlink",
+    ]
+]
+
+runfiles_module_projection_test(
+    name = "module_projection_retains_carrier_and_ancestor_identity_test",
+    expected = "//tests/node_test/foreign_alias:same_file/selected.test.js",
+    other = "//tests/node_test/foreign_alias:direct/selected.test.js",
+    target_under_test = "//tests/node_test/foreign_alias:same_file",
+)
+
+ts_compile(
+    name = "runtime_source_helper",
+    srcs = ["runtime_sources/value.cjs"],
+    emit = False,  # keep
+)
+
+ts_compile(
+    name = "runtime_source_typescript",
+    srcs = ["runtime_sources/source_value.ts"],
+    emit = False,
+)
+
+canonical_alias_data(
+    name = "canonical_alias_equal_data",
+    source = ":runtime_source_helper",
+)
+
+# keep
+ts_test(
+    name = "vitest_canonical_alias_subject",
+    srcs = ["runtime_sources/copies.test.js"],
+    data = [":canonical_alias_equal_data"],
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    test_srcs = ["runtime_sources/copies.test.js"],
+    deps = [
+        ":emitted_node_root",
+        ":runtime_source_helper",
+        "@npm//:vitest",
+    ],
+)
+
+vitest_canonical_alias_test(
+    name = "vitest_ordinary_alias_cannot_lose_canonical_identity_test",
+    canonical = ":runtime_source_helper",
+    data_copy = ":canonical_alias_equal_data",
+    target_under_test = ":vitest_canonical_alias_subject",
+)
+
+[
+    ts_test(
+        name = "local_javascript_" + mode + "_target",
+        srcs = ["runtime_sources/" + mode + "/copy.test." + extension for extension in [
+            "js",
+            "mjs",
+            "cjs",
+        ]],
+        emit = mode == "emitted",
+        runner = "//ts/runners:node_test",
+        deps = [":runtime_source_helper"],
+    )
+    for mode in [
+        "source",
+        "emitted",
+    ]
+]
+
+[
+    runtime_source_identity_test(
+        name = "local_javascript_" + mode + "_retains_compiler_identity_test",
+        copied_sources = ["runtime_sources/" + mode + "/copy.test." + extension for extension in [
+            "js",
+            "mjs",
+            "cjs",
+        ]] if mode == "emitted" else [],
+        dep = ":runtime_source_helper",
+        entries = ["runtime_sources/" + mode + "/copy.test." + extension for extension in [
+            "js",
+            "mjs",
+            "cjs",
+        ]],
+        retained_sources = ["runtime_sources/value.cjs"] + (["runtime_sources/" + mode + "/copy.test." + extension for extension in [
+            "js",
+            "mjs",
+            "cjs",
+        ]] if mode == "source" else []),
+        target_under_test = ":local_javascript_" + mode + "_target",
+    )
+    for mode in [
+        "source",
+        "emitted",
+    ]
+]
+
+[
+    ts_test(
+        name = "vitest_runtime_" + mode + "_target",
+        srcs = ["runtime_sources/" + mode + ".test.js"],
+        emit = mode == "copies",
+        node_modules = "//tests/npm:node_modules",
+        deps = [
+            ":runtime_source_helper" if mode == "copies" else ":runtime_source_typescript",
+            "@npm//:vitest",
+        ],
+    )
+    for mode in [
+        "copies",
+        "sources",
+    ]
+]
+
+[
+    runtime_source_identity_test(
+        name = "vitest_runtime_" + mode + "_retains_probe_identity_test",
+        copied_sources = ["runtime_sources/" + mode + ".test.js"] if mode == "copies" else [],
+        dep = ":runtime_source_helper" if mode == "copies" else ":runtime_source_typescript",
+        entries = ["runtime_sources/" + mode + ".test.js"],
+        retained_sources = [
+            "runtime_sources/sources.test.js",
+            "runtime_sources/source_value.ts",
+        ] if mode == "sources" else ["runtime_sources/value.cjs"],
+        target_under_test = ":vitest_runtime_" + mode + "_target",
+        vitest = True,
+    )
+    for mode in [
+        "copies",
+        "sources",
+    ]
+]
+
+ts_test(
+    name = "local_source_reintroduced_by_data",
+    srcs = ["runtime_sources/source/copy.test.js"],
+    data = ["runtime_sources/source/copy.test.js"],
+    emit = False,  # keep
+    runner = "//ts/runners:node_test",
+    deps = [":runtime_source_helper"],
+)
+
+runtime_source_identity_test(
+    name = "local_source_data_cannot_replace_runtime_test",
+    dep = ":runtime_source_helper",
+    entries = ["runtime_sources/source/copy.test.js"],
+    retained_sources = [
+        "runtime_sources/source/copy.test.js",
+        "runtime_sources/value.cjs",
+    ],
+    target_under_test = ":local_source_reintroduced_by_data",
+)
+
+ts_binary(
+    name = "binary_source_reintroduced_by_data",
+    data = ["runtime_sources/value.cjs"],
+    entry_point = ":runtime_source_helper",
+)
+
+binary_module_identity_test(
+    name = "binary_data_cannot_replace_published_module_test",
+    source = "runtime_sources/value.cjs",
+    target_under_test = ":binary_source_reintroduced_by_data",
+)
+
+ts_binary(
+    name = "binary_repeated_runtime_file",
+    data = [":runtime_source_helper"],
+    entry_point = ":runtime_source_helper",
+)
+
+binary_module_identity_test(
+    name = "binary_same_file_data_retains_published_module_test",
+    source = "runtime_sources/value.cjs",
+    target_under_test = ":binary_repeated_runtime_file",
 )

@@ -52,7 +52,10 @@ bzl_library(
 node_modules(
     name = "node_modules",
     hoist = "//vite/esbuild:node_modules/.pnpm/node_modules",
-    deps = ["@npm_esbuild//:esbuild"],
+    deps = [
+        "@npm_esbuild//:esbuild",
+        "@npm_esbuild//:resolve.exports",
+    ],
 )
 
 # Build the vite-plugin-bazel TypeScript source into a single bundled ESM file.
@@ -66,8 +69,6 @@ esbuild_bundle(
     ],
     out = "vite_plugin_bazel.mjs",
     entry_point = "src/index.ts",
-    # vite alone: anything else the plugin imports must be a node builtin, so
-    # esbuild fails the build rather than shipping an unresolvable import.
     external = ["vite"],
     node_modules = ":node_modules",
 )
@@ -78,10 +79,13 @@ ts_compile(
     name = "plugin_typecheck",
     srcs = glob(["src/*.ts"]),
     node_modules = "//tests/npm:node_modules",
+    # keep
+    source_node_modules = [":node_modules"],
     tsconfig = "vite.tsconfig.json",
     deps = [
         "@npm//:types_node",
         "@npm//:vite",
+        "@npm_esbuild//:resolve.exports",  # keep
     ],
 )
 

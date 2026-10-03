@@ -1,0 +1,10 @@
+"""A scope above an emitted test's shared source root keeps its distance from the relocated modules."""
+
+load("//ts:defs.bzl", "ts_compile")
+
+ts_compile(
+    name = "scope",
+    srcs = [],
+    package_scopes = ["package.json"],
+    visibility = ["//tests/vitest/ancestor_scope:__subpackages__"],
+)

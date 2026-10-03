@@ -1,0 +1,310 @@
+[
+  {
+    "module": "ProducerPublication",
+    "config": "producer_publication.cfg",
+    "initial": 27,
+    "distinct": 54,
+    "generated": 81
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_reinterpreted_origin.cfg",
+    "violations": [
+      "ProducerOriginSurvives"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_dropped_asset.cfg",
+    "violations": [
+      "ExplicitCoordinatesSurvive"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_duplicate_placement.cfg",
+    "violations": [
+      "ValidPublicationAccepted"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_accepted_origin_conflict.cfg",
+    "violations": [
+      "InvalidFactsReject"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_accepted_alias_conflict.cfg",
+    "violations": [
+      "InvalidFactsReject"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_accepted_alias_cycle.cfg",
+    "violations": [
+      "InvalidFactsReject"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_accepted_scope_shadow.cfg",
+    "violations": [
+      "InvalidFactsReject"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_inferred_opaque_origin.cfg",
+    "violations": [
+      "OpaqueFactsRemainOpaque"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_rebound_owner.cfg",
+    "violations": [
+      "ProducerOwnerSurvives"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_promoted_dependency.cfg",
+    "violations": [
+      "DirectPublicationMembership"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_restricted_member_asset.cfg",
+    "violations": [
+      "OrdinaryMemberAssetRemainsCopyable"
+    ]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_dropped_forwarded_root.cfg",
+    "violations": ["RequestedRootsRemainSelected"]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_dropped_identity_discovery.cfg",
+    "violations": ["DiscoveryUsesRequestedInputs"]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_invented_opaque_root_origin.cfg",
+    "violations": ["RunnerOriginsStayProducing"]
+  },
+  {
+    "module": "ProducerPublication",
+    "config": "producer_unselected_alias_discovered.cfg",
+    "violations": ["DiscoveryUsesRequestedInputs"]
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_alias_root_subset_vitest.cfg",
+    "violations": ["TracePending"],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_opaque_root_vitest.cfg",
+    "violations": ["TracePending"],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_identity_root_node.cfg",
+    "violations": ["TracePending"],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_emitted_root_node.cfg",
+    "violations": ["TracePending"],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_identity_root_vitest.cfg",
+    "violations": ["TracePending"],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_emitted_root_vitest.cfg",
+    "violations": ["TracePending"],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_module_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_module_data_moved.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_source_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_json_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_json_srcs.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_asset_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_asset_data_moved.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_asset_member.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_js_srcs.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_asset_js_srcs.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_alias_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_composed_alias_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_alias_conflict.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_alias_cycle.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_origin_conflict.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_repeated_origin.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_opaque_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_opaque_data_moved.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_scoped_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_shadowed_data.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "ProducerPublicationTrace",
+    "config": "producer_trace_shared_source_owners.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  }
+]

@@ -1,20 +1,17 @@
-"""The TsManifest action: a package.json src written as built.
-
-tsc, node and Vite read the nearest package.json for the module's format and
-the package's own name, and resolve a self-reference through its `exports`; a
-manifest names sources, and the two readers that hold the emit -- a dependent's
-program root and the member's store tree -- read this copy, each source-file
-target rewritten to the emitted file (docs/guides/npm.md § What a Workspace
-Member Is Imported As). The src stays staged as written beside it.
-"""
+"""Writes workspace publication manifests or scopes projected from runtime File pairs."""
 
 load("//ts/private:toolchain.bzl", "get_tools_toolchain")
 
-def manifest_action(ctx, src, out, tsx_extension):
-    """Writes `src`, a package.json, to `out` as built; `tsx_extension` is
-    what a .tsx emits under the target's tsconfig, ".js" or ".jsx"."""
+def manifest_action(ctx, src, out, tsx_extension = None, runtime_targets = None, declaration_targets = None):
     args = ctx.actions.args()
-    args.add("-tsx=" + tsx_extension)
+    args.use_param_file("@%s", use_always = False)
+    args.set_param_file_format("multiline")
+    if tsx_extension != None:
+        args.add("-tsx=" + tsx_extension)
+    if runtime_targets != None:
+        args.add("-runtime_targets=" + json.encode(runtime_targets))
+    if declaration_targets != None:
+        args.add("-declaration_targets=" + json.encode(declaration_targets))
     args.add(src)
     args.add(out)
     ctx.actions.run(
@@ -25,3 +22,10 @@ def manifest_action(ctx, src, out, tsx_extension):
         mnemonic = "TsManifest",
         progress_message = "TsManifest %{label}",
     )
+
+def runtime_scope_inputs(args, scopes):
+    inputs = []
+    for scope in scopes:
+        args.add("-runtime_scope=" + json.encode({"source": scope.source.path, "runtime": scope.runtime.path, "targets": scope.targets}))
+        inputs.extend([scope.source, scope.runtime])
+    return inputs

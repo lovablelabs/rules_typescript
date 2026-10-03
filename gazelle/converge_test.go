@@ -4,9 +4,8 @@ package typescript
 // byte-identical rerun and fails this, since the repairing run emits nothing.
 
 import (
-	"bytes"
-	"context"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,135 +15,107 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bazelbuild/bazel-gazelle/config"
-	"github.com/bazelbuild/bazel-gazelle/label"
-	"github.com/bazelbuild/bazel-gazelle/language"
-	"github.com/bazelbuild/bazel-gazelle/merger"
-	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	bzl "github.com/bazelbuild/buildtools/build"
 )
 
 // ---- one gazelle invocation -------------------------------------------------
 
-// Post-order walk, pre-merge in memory, resolve, then the writes -- as
-// cmd/gazelle does, so no directory sees a BUILD file this pass wrote.
+// The native command owns walking, merging, indexing, resolution and writes.
 func convergeGazelle(t *testing.T, repoRoot string) {
 	t.Helper()
-
-	lang := &tsLang{}
-	kinds := lang.Kinds()
-	ix := resolve.NewRuleIndex(func(*rule.Rule, string) resolve.Resolver { return lang })
-
-	type dirVisit struct {
-		rel     string
-		c       *config.Config
-		file    *rule.File
-		gen     []*rule.Rule
-		empty   []*rule.Rule
-		imports []any
+	output, err := protoGazelle(t, repoRoot)
+	if err != nil {
+		t.Fatalf("gazelle: %v\n%s", err, output)
 	}
-	var visits []dirVisit
+	if output != "" {
+		log.Print(strings.TrimSuffix(output, "\n"))
+	}
+}
 
-	var walk func(parent *config.Config, rel string)
-	walk = func(parent *config.Config, rel string) {
-		dir := filepath.Join(repoRoot, filepath.FromSlash(rel))
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var subdirs, regular []string
-		for _, e := range entries {
-			name := e.Name()
-			switch {
-			case strings.HasPrefix(name, "."), strings.HasPrefix(name, "bazel-"):
-			case e.IsDir():
-				subdirs = append(subdirs, name)
-			case name == "BUILD.bazel", name == "BUILD":
-			default:
-				regular = append(regular, name)
+func TestRootPackageScopesRemainVisibleAfterUnusedPublisherIsRemoved(t *testing.T) {
+	requireTsgo(t)
+	var unclaimed map[string]string
+	for _, initial := range []string{"absent", "empty", "claimed"} {
+		t.Run(initial, func(t *testing.T) {
+			tree := map[string]string{
+				"MODULE.bazel":      "module(name = \"root_scope\")\n",
+				"package.json":      `{"type":"module"}`,
+				"app/tsconfig.json": `{"files":["index.ts"]}`,
+				"app/index.ts":      "export const value = 1;\n",
 			}
-		}
-		sort.Strings(subdirs)
-		sort.Strings(regular)
-
-		buildPath := filepath.Join(dir, "BUILD.bazel")
-		var f *rule.File
-		if _, err := os.Stat(buildPath); err == nil {
-			// nil rather than an empty file when absent: several generators branch
-			// on args.File == nil, and so does the plugin that edits it in place.
-			loaded, err := rule.LoadFile(buildPath, rel)
-			if err != nil {
-				t.Fatal(err)
+			if initial == "empty" {
+				tree["BUILD.bazel"] = ""
 			}
-			f = loaded
-		}
-
-		c := parent.Clone()
-		// Core's resolve config carries # gazelle:resolve, which the edge
-		// resolver reads first, as cmd/gazelle registers it.
-		(&resolve.Configurer{}).Configure(c, rel, f)
-		lang.Configure(c, rel, f)
-
-		for _, sub := range subdirs {
-			walk(c, path.Join(rel, sub))
-		}
-
-		res := generateRules(language.GenerateArgs{
-			Config:       c,
-			Dir:          dir,
-			Rel:          rel,
-			File:         f,
-			Subdirs:      subdirs,
-			RegularFiles: regular,
+			if initial == "claimed" {
+				tree["metadata/BUILD.bazel"] = loadDefs + `"ts_compile")
+# keep
+ts_compile(name = "scope", srcs = ["//:package.json"], visibility = ["//visibility:public"])
+`
+			}
+			root := writeTree(t, tree)
+			for _, step := range []string{"cold", "new consumer", "new scope", "rerun"} {
+				if step == "new consumer" {
+					writeFile(t, filepath.Join(root, "sibling/tsconfig.json"), `{"files":["index.ts"]}`)
+					writeFile(t, filepath.Join(root, "sibling/index.ts"), "export const sibling = 2;\n")
+				}
+				if step == "new scope" {
+					writeFile(t, filepath.Join(root, "nested/package.json"), `{"type":"module"}`)
+					writeFile(t, filepath.Join(root, "nested/app/tsconfig.json"), `{"files":["index.ts"]}`)
+					writeFile(t, filepath.Join(root, "nested/app/index.ts"), "export const nested = 3;\n")
+					before := buildFileBytes(t, root)
+					output, err := protoGazelle(t, root, "-index=false", "-r=false", "nested/app")
+					if err == nil || !strings.Contains(output, "not selected for publication") || !strings.Contains(output, "nested/package.json") {
+						t.Fatalf("partial generation did not require the scope's owner: %v\n%s", err, output)
+					}
+					if diff := snapshotDiff(before, buildFileBytes(t, root)); diff != "" {
+						t.Fatalf("refused partial generation changed BUILD files: %s", diff)
+					}
+				}
+				before := convergeSnapshot(t, root)
+				convergeGazelle(t, root)
+				assertNoDanglingLabels(t, root)
+				if r := ruleNamed(loadRules(t, root, ""), "ts_compile", "root"); r != nil {
+					t.Fatal("unused scope publisher remains in the root package")
+				}
+				exported := map[string]int{}
+				for _, r := range loadRules(t, root, "") {
+					if r.Kind() != "exports_files" {
+						continue
+					}
+					list, err := exportSourceMembership(r)
+					if err != nil || len(list.List) != 1 {
+						t.Fatalf("invalid scope export: %v", err)
+					}
+					file, literal := list.List[0].(*bzl.StringExpr)
+					if literal {
+						exported[file.Value]++
+						wantStrings(t, "root scope source access", r.AttrStrings("visibility"), []string{"//:__subpackages__"})
+					}
+				}
+				if exported["package.json"] != 1 {
+					t.Fatalf("root package scope has %d exports, want one", exported["package.json"])
+				}
+				if step == "new scope" || step == "rerun" {
+					if exported["nested/package.json"] != 1 {
+						t.Fatalf("new package scope has %d exports, want one", exported["nested/package.json"])
+					}
+					wantLabels(t, "new consumer's nearest scope", onDiskRule(t, root, "nested/app", "ts_compile", "app").AttrStrings("package_scopes"), []string{"//:nested/package.json"})
+				}
+				if step == "rerun" {
+					if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+						t.Fatalf("scope publication changed on rerun: %s", diff)
+					}
+				}
+			}
+			if initial == "absent" {
+				unclaimed = convergeSnapshot(t, root)
+			} else if initial == "empty" {
+				if diff := snapshotDiff(unclaimed, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("an initially empty BUILD changed publication: %s", diff)
+				}
+			}
 		})
-		if f == nil {
-			f = rule.EmptyFile(buildPath, rel)
-			for _, r := range res.Gen {
-				r.Insert(f)
-			}
-		} else {
-			merger.MergeFile(f, res.Empty, res.Gen, merger.PreResolve, kinds, nil)
-		}
-		for _, r := range f.Rules {
-			ix.AddRule(c, r, f)
-		}
-		visits = append(visits, dirVisit{rel, c, f, res.Gen, res.Empty, res.Imports})
-	}
-	root := &config.Config{
-		RepoRoot:            repoRoot,
-		RepoName:            "converge_repo_root",
-		ValidBuildFileNames: []string{"BUILD.bazel", "BUILD"},
-		Exts:                map[string]any{},
-	}
-	(&resolve.Configurer{}).RegisterFlags(nil, "", root)
-	walk(root, "")
-	ix.Finish()
-
-	for _, v := range visits {
-		for i, r := range v.gen {
-			if i >= len(v.imports) {
-				break
-			}
-			lang.Resolve(v.c, ix, nil, r, v.imports[i],
-				label.New(v.c.RepoName, v.rel, r.Name()))
-		}
-		merger.MergeFile(v.file, v.empty, v.gen, merger.PostResolve, kinds, nil)
-	}
-	// cmd/gazelle calls this after the last Resolve and before the writes, and
-	// a check over the whole target graph has nowhere else to run.
-	var asLanguage language.Language = lang
-	if life, ok := asLanguage.(language.LifecycleManager); ok {
-		life.AfterResolvingDeps(context.Background())
-	}
-	for _, v := range visits {
-		merger.FixLoads(v.file, lang.Loads())
-		content := v.file.Format()
-		if bytes.Equal(v.file.Content, content) {
-			continue
-		}
-		if err := os.WriteFile(v.file.Path, content, 0o644); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 
@@ -376,6 +347,9 @@ func danglingLabels(t *testing.T, repoRoot string) []string {
 					}
 					abs := absLabel(dir, v)
 					pkg, name := splitLabel(abs)
+					if attr == "visibility" && (name == "__pkg__" || name == "__subpackages__") {
+						continue
+					}
 					if pkg == "visibility" || pkg == "conditions" {
 						continue
 					}
@@ -390,6 +364,24 @@ func danglingLabels(t *testing.T, repoRoot string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func TestDanglingLabelsRejectsVisibilityPseudoTargetsUsedAsSources(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"BUILD.bazel": `filegroup(
+    name = "files",
+    srcs = ["//other:__pkg__", "//other:__subpackages__", "//other:missing"],
+    visibility = ["//other:__pkg__", "//other:__subpackages__", "//other:missing_group"],
+)
+`,
+		"other/BUILD.bazel": "",
+	})
+	wantStrings(t, "visibility grants are not source or package-group targets", danglingLabels(t, root), []string{
+		"//other:__pkg__ named by filegroup(files) in BUILD.bazel",
+		"//other:__subpackages__ named by filegroup(files) in BUILD.bazel",
+		"//other:missing named by filegroup(files) in BUILD.bazel",
+		"//other:missing_group named by filegroup(files) in BUILD.bazel",
+	})
 }
 
 // A label resolves to a rule in that package, or to a source file that package
@@ -607,22 +599,136 @@ func TestForeignJSONImportRemovalPreservesOnlyExplicitKeep(t *testing.T) {
 	}
 }
 
+func TestForeignSourceClosureSurvivesRerunsAndDisappearsAfterImportRemoval(t *testing.T) {
+	requireTsgo(t)
+	const source = "import { answer } from '../fixtures/a'; export { answer };\n"
+	const exports = `exports_files(
+    [
+        "a.ts",
+        "nested/b.ts",
+        "package.json",
+        "value.json",
+    ],
+    visibility = ["//app:__pkg__"],
+)
+`
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":               "module(name = \"source_closure\")\n",
+		pnpmLockfileName:             "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+		"node_modules/.modules.yaml": "",
+		"app/tsconfig.json":          `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","resolveJsonModule":true},"files":["index.ts"]}`,
+		"app/index.ts":               source,
+		"fixtures/BUILD.bazel":       exports,
+		"fixtures/package.json":      `{"name":"foreign-project"}`,
+		"fixtures/a.ts":              "export { answer } from './nested/b';\n",
+		"fixtures/nested/b.ts":       "import data from '../value.json'; export const answer = data.answer;\n",
+		"fixtures/value.json":        `{"answer":42}`,
+		"fixtures/unused.ts":         "import 'does-not-exist';\n",
+	})
+	convergeGazelle(t, root)
+	initial := buildFileText(t, root, "app")
+	wantSources := []string{"//fixtures:a.ts", "//fixtures:nested/b.ts", "//fixtures:value.json", "index.ts"}
+	wantScopes := []string{"//fixtures:package.json"}
+	assertInputs := func(stage string, sources, scopes []string) {
+		t.Helper()
+		for _, r := range loadRules(t, root, "app") {
+			if r.Kind() == "ts_compile" {
+				wantLabels(t, stage+" srcs", r.AttrStrings("srcs"), sources)
+				wantLabels(t, stage+" package_scopes", r.AttrStrings("package_scopes"), scopes)
+				return
+			}
+		}
+		t.Fatal("missing compile rule")
+	}
+	assertInputs("initial", wantSources, wantScopes)
+	logged := captureLog(t, func() { convergeGazelle(t, root) })
+	if strings.Contains(logged, "is no longer declared") || buildFileText(t, root, "app") != initial {
+		t.Fatalf("retained source closure did not converge: %s", logged)
+	}
+	assertInputs("repeated", wantSources, wantScopes)
+	buildPath := filepath.Join(root, "app/BUILD.bazel")
+	writeFile(t, buildPath, strings.ReplaceAll(initial, "//fixtures:", "@//fixtures:"))
+	logged = captureLog(t, func() { convergeGazelle(t, root) })
+	if strings.Contains(logged, "is no longer declared") {
+		t.Fatalf("equivalent source labels reported dropped: %s", logged)
+	}
+	assertInputs("equivalent labels", wantSources, wantScopes)
+	writeFile(t, filepath.Join(root, "app/index.ts"), "export const answer = 42;\n")
+	logged = captureLog(t, func() { convergeGazelle(t, root) })
+	assertInputs("removed import", []string{"index.ts"}, nil)
+	if !strings.Contains(logged, "is no longer declared") {
+		t.Fatalf("removed source imports were not reported: %s", logged)
+	}
+	writeFile(t, filepath.Join(root, "app/index.ts"), source)
+	convergeGazelle(t, root)
+	assertInputs("restored import", wantSources, wantScopes)
+	actual, err := os.ReadFile(filepath.Join(root, "fixtures/BUILD.bazel"))
+	if err != nil || string(actual) != exports {
+		t.Fatalf("foreign source owner changed: %s, %v", actual, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "fixtures/nested/BUILD.bazel")); !os.IsNotExist(err) {
+		t.Fatalf("foreign source directory became a Bazel package: %v", err)
+	}
+}
+
+// gazelle_roundtrip's emitted binary hit ERR_MODULE_NOT_FOUND for the sibling helper.mjs.
+func TestRetainedForeignDeclarationKeepsItsJavaScriptTwin(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":               "module(name = \"declaration_twin\")\n",
+		pnpmLockfileName:             "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  app: {}\n",
+		"pnpm-workspace.yaml":        "packages:\n  - app\n",
+		"node_modules/.modules.yaml": "",
+		"package.json":               `{"private":true}`,
+		"BUILD.bazel":                "exports_files([\"package.json\"], visibility = [\"//visibility:public\"])\n",
+		"app/package.json":           `{"type":"module"}`,
+		"app/tsconfig.json":          `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","allowJs":true,"types":[]},"files":["index.ts"]}`,
+		"app/index.ts":               "import { offset } from '../fixtures/helper.mjs';\nimport data from '../fixtures/value.json' with { type: 'json' };\nconsole.log(data.value + offset);\n",
+		"app/BUILD.bazel":            "load(\"@rules_typescript//ts:defs.bzl\", \"ts_binary\")\n\nts_binary(name = \"run\", entry_point = \":app\")\n",
+		"fixtures/BUILD.bazel":       "exports_files([\"helper.d.mts\", \"helper.mjs\", \"value.json\"], visibility = [\"//app:__pkg__\"])\n",
+		"fixtures/helper.d.mts":      "export declare const offset: number;\n",
+		"fixtures/helper.mjs":        "export const offset = 2;\n",
+		"fixtures/value.json":        `{"value":40}`,
+	})
+	convergeGazelle(t, root)
+	compile := ruleNamed(loadRules(t, root, "app"), "ts_compile", "app")
+	if compile == nil {
+		t.Fatal("missing compile rule")
+	}
+	wantLabels(t, "srcs", compile.AttrStrings("srcs"), []string{"//fixtures:helper.d.mts", "//fixtures:helper.mjs", "//fixtures:value.json", "index.ts"})
+	if !slices.Contains(compile.AttrStrings("deps"), "//:root") {
+		t.Fatalf("the twin's runtime scope has no publisher in deps: %q", compile.AttrStrings("deps"))
+	}
+}
+
 func TestGeneratedTreeImportRetainsDirectOwnerWithoutOutputFiles(t *testing.T) {
 	requireTsgo(t)
 	cases := []struct {
 		name, paths, specifier string
+		treeManifest           string
+		kind, directives       string
 		wantGenerator          bool
 	}{
-		{"inherited alias", `{"#shared/*":["./shared/*"]}`, "#shared/generated/runtime", true},
-		{"generated first fallback", `{"#shared/value":["./shared/value"],"#module":["./shared/generated/runtime","./shared/fallback"]}`, "#module", true},
-		{"authored first fallback", `{"#shared/value":["./shared/value"],"#module":["./shared/fallback","./shared/generated/runtime"]}`, "#module", false},
-		{"exact alias overrides wildcard", `{"#shared/*":["./shared/*"],"#shared/generated/runtime":["./shared/fallback"]}`, "#shared/generated/runtime", false},
-		{"tree root candidate", `{"#shared/*":["./shared/*"],"#module":["./shared/generated"]}`, "#module", true},
-		{"unowned missing import", `{"#shared/*":["./shared/*"]}`, "#shared/missing/runtime", false},
+		{name: "inherited alias", paths: `{"#shared/*":["./shared/*"]}`, specifier: "#shared/generated/runtime", wantGenerator: true},
+		{name: "generated first fallback", paths: `{"#shared/value":["./shared/value"],"#module":["./shared/generated/runtime","./shared/fallback"]}`, specifier: "#module", wantGenerator: true},
+		{name: "authored first fallback", paths: `{"#shared/value":["./shared/value"],"#module":["./shared/fallback","./shared/generated/runtime"]}`, specifier: "#module"},
+		{name: "exact alias overrides wildcard", paths: `{"#shared/*":["./shared/*"],"#shared/generated/runtime":["./shared/fallback"]}`, specifier: "#shared/generated/runtime"},
+		{name: "tree root candidate", paths: `{"#shared/*":["./shared/*"],"#module":["./shared/generated"]}`, specifier: "#module", wantGenerator: true},
+		{name: "stale redirect cannot change tree owner", paths: `{"#shared/*":["./shared/*"],"#module":["./shared/generated"]}`, specifier: "#module", treeManifest: `{"types":"../../../redirect/value.d.ts"}`, wantGenerator: true},
+		{name: "unowned missing import", paths: `{"#shared/*":["./shared/*"]}`, specifier: "#shared/missing/runtime"},
+		{name: "aliased producer", paths: `{"#shared/value":["./shared/value"],"#generated":["../producer/tree/runtime"]}`, specifier: "#generated", kind: "wrapped_codegen", directives: "# gazelle:alias_kind wrapped_codegen ts_codegen\n", wantGenerator: true},
+		{name: "mapped indexed producer", paths: `{"#shared/value":["./shared/value"],"#generated":["../producer/tree/runtime"]}`, specifier: "#generated", kind: "wrapped_codegen", directives: "# gazelle:ignore\n# gazelle:map_kind ts_codegen wrapped_codegen //:codegen.bzl\n", wantGenerator: true},
+		{name: "mapped aliased producer", paths: `{"#shared/value":["./shared/value"],"#generated":["../producer/tree/runtime"]}`, specifier: "#generated", kind: "wrapped_codegen", directives: "# gazelle:map_kind ts_codegen wrapped_codegen //:codegen.bzl\n# gazelle:alias_kind wrapped_codegen ts_codegen\n", wantGenerator: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
+			kind, load := tc.kind, "//:codegen.bzl"
+			producerPkg, outDir := "producer", "tree"
+			if kind == "" {
+				kind, load = "ts_codegen", "@rules_typescript//ts:defs.bzl"
+				producerPkg, outDir = "app", "shared/generated"
+			}
 			writeWorkspace(t, root, map[string]string{
 				"package.json":              `{"name":"fixture"}`,
 				"app/tsconfig.json":         `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","paths":` + tc.paths + `},"include":["shared/**/*.ts"]}`,
@@ -630,41 +736,70 @@ func TestGeneratedTreeImportRetainsDirectOwnerWithoutOutputFiles(t *testing.T) {
 				"app/shared/fallback.ts":    "export const generated = 'authored';\n",
 				"app/plugins/tsconfig.json": `{"extends":"../tsconfig.json","include":["*.ts"]}`,
 				"app/plugins/consumer.ts":   "import { value } from '#shared/value';\nimport { generated } from '" + tc.specifier + "';\nexport const result = [value, generated];\n",
-				"app/BUILD.bazel": `load("@rules_typescript//ts:defs.bzl", "ts_codegen")
-ts_codegen(
+			})
+			writeFile(t, filepath.Join(root, producerPkg, "BUILD.bazel"), tc.directives+fmt.Sprintf(`load(%q, %q)
+%s(
     name = "generated",
     generator = "//:generator",
-    out_dir = "shared/generated",
+    out_dir = %q,
     visibility = ["//visibility:public"],
 )
-`,
-			})
+`, load, kind, kind, outDir))
+			consumers := map[string]string{"app/plugins": "ts_compile"}
+			if tc.kind != "" {
+				writeFile(t, filepath.Join(root, "app/config-consumer/tsconfig.json"), `{"extends":"../tsconfig.json","include":["*.ts"]}`)
+				writeFile(t, filepath.Join(root, "app/config-consumer/consumer.test.ts"), "import { value } from '#shared/value';\nexport const result = value;\n")
+				writeFile(t, filepath.Join(root, "app/config-consumer/vitest.config.mts"), "import { generated } from '../../producer/tree/runtime';\nexport default { generated };\n")
+				consumers["app/config-consumer"] = "ts_test"
+			}
+			if tc.treeManifest != "" {
+				writeFile(t, filepath.Join(root, "redirect/tsconfig.json"), `{"files":["value.d.ts"]}`)
+				writeFile(t, filepath.Join(root, "redirect/value.d.ts"), "export declare const generated: string;\n")
+			}
+			wantDeps := []string{"//app"}
+			if tc.wantGenerator {
+				wantDeps = append(wantDeps, "//"+producerPkg+":generated")
+			}
+			var cold map[string]string
 			for _, state := range []string{"cold", "materialized", "deleted"} {
 				switch state {
 				case "materialized":
 					for _, name := range []string{"runtime", "index"} {
-						writeFile(t, filepath.Join(root, "app/shared/generated/"+name+".d.ts"), "export declare const generated: string;\n")
+						writeFile(t, filepath.Join(root, producerPkg, outDir, name+".d.ts"), "export declare const generated: string;\n")
+					}
+					if tc.treeManifest != "" {
+						writeFile(t, filepath.Join(root, producerPkg, outDir, "package.json"), tc.treeManifest)
 					}
 				case "deleted":
-					if err := os.RemoveAll(filepath.Join(root, "app/shared/generated")); err != nil {
+					if err := os.RemoveAll(filepath.Join(root, producerPkg, outDir)); err != nil {
 						t.Fatal(err)
 					}
 				}
 				for pass := 1; pass <= 2; pass++ {
 					captureLog(t, func() { convergeGazelle(t, root) })
-					found := false
-					for _, r := range loadRules(t, root, "app/plugins") {
-						if r.Kind() != "ts_compile" {
-							continue
+					for pkg, kind := range consumers {
+						found := false
+						for _, r := range loadRules(t, root, pkg) {
+							if r.Kind() != kind {
+								continue
+							}
+							found = true
+							what := fmt.Sprintf("%s pass %d %s", state, pass, pkg)
+							wantLabels(t, what+" deps", r.AttrStrings("deps"), wantDeps)
+							var configScopes []string
+							if kind == "ts_test" {
+								configScopes = []string{"//:package.json"}
+							}
+							wantLabels(t, what+" config_srcs", r.AttrStrings("config_srcs"), configScopes)
 						}
-						found = true
-						deps := r.AttrStrings("deps")
-						if !slices.Contains(deps, "//app") || slices.Contains(deps, "//app:generated") != tc.wantGenerator {
-							t.Errorf("%s pass %d: deps = %v, want //app and generator=%t", state, pass, deps, tc.wantGenerator)
+						if !found {
+							t.Fatalf("%s: nested consumer has no %s owner", pkg, kind)
 						}
 					}
-					if !found {
-						t.Fatal("nested consumer has no ts_compile owner")
+					if cold == nil {
+						cold = convergeSnapshot(t, root)
+					} else if diff := snapshotDiff(cold, convergeSnapshot(t, root)); diff != "" {
+						t.Errorf("%s pass %d changed cold-tree BUILD files:%s", state, pass, diff)
 					}
 				}
 			}

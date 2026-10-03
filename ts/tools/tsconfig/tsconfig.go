@@ -71,6 +71,8 @@ func Read(path string) (*File, error) {
 // Resolved is an extends chain flattened leaf-wins. A compilerOption keeps its
 // writer's directory because a relative value resolves against that file, not the leaf.
 type Resolved struct {
+	// Extends belongs to the leaf and is not inherited.
+	Extends         Extends
 	BaseURL         string
 	BaseURLDir      string
 	Paths           map[string][]string
@@ -94,10 +96,17 @@ func (r *Resolved) Inputs() bool {
 // Resolve reads path and, depth first, the configs it extends; the leaf wins.
 // tsc replaces inherited compilerOptions keys whole: paths comes from one file.
 func Resolve(path string) (*Resolved, error) {
-	return resolve(path, map[string]bool{})
+	return ResolveWithAdmission(path, nil)
 }
 
-func resolve(path string, ancestors map[string]bool) (*Resolved, error) {
+var ErrAdmission = errors.New("tsconfig admission rejected")
+
+// ResolveWithAdmission checks every path before reading; admission errors abort the whole chain.
+func ResolveWithAdmission(path string, admit func(string) error) (*Resolved, error) {
+	return resolve(path, map[string]bool{}, admit)
+}
+
+func resolve(path string, ancestors map[string]bool, admit func(string) error) (*Resolved, error) {
 	path = filepath.Clean(path)
 	// Only an ancestor repeat is a cycle. A config reached twice down two
 	// branches is read twice, because merge order decides which one wins.
@@ -107,18 +116,26 @@ func resolve(path string, ancestors map[string]bool) (*Resolved, error) {
 	ancestors[path] = true
 	defer delete(ancestors, path)
 
+	if admit != nil {
+		if err := admit(path); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrAdmission, err)
+		}
+	}
 	f, err := Read(path)
 	if err != nil {
 		return nil, err
 	}
 	dir := filepath.Dir(path)
-	resolved := &Resolved{}
+	resolved := &Resolved{Extends: f.Extends}
 	for _, spec := range f.Extends {
 		basePath, ok := ResolveExtends(dir, spec)
 		if !ok {
 			continue
 		}
-		base, err := resolve(basePath, ancestors)
+		base, err := resolve(basePath, ancestors, admit)
+		if errors.Is(err, ErrAdmission) {
+			return nil, err
+		}
 		if err != nil {
 			log.Printf("tsconfig: %s extends %q, which is skipped: %v", path, spec, err)
 			continue

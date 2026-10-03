@@ -86,13 +86,10 @@ jobs:
       # drops the nested-Bazel targets: those run once per push, spread over the
       # legs of the integration-tests job. Unfiltered they would run three times
       # per push — twice here across the OS matrix, once there.
+      # Also the type check: .bazelrc builds +_validation for every command.
       - name: Run all tests
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bazel test --config=ci //...
-
-      - name: Type checking (validation)
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: bazel build --config=ci //... --output_groups=+_validation
 
       # The suite never runs `bazel coverage`, and a coverage run whose report
       # is empty passes; the fixture runs under it here and its report is read.

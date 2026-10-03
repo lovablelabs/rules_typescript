@@ -39,6 +39,7 @@ fragments_reach_private_test = analysistest.make(
     # The same application `--aspects=...%tsconfig_aspect` makes on a target
     # pattern, which is how .bazelrc turns this on for every build.
     extra_target_under_test_aspects = [tsconfig_aspect],
+    attrs = {"member": attr.label(mandatory = True)},
 )
 
 def _fragment_files_impl(ctx):

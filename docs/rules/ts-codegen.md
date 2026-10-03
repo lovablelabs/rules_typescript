@@ -39,38 +39,49 @@ additionally takes `node_modules`, and one that resolves a workspace member
 names the member's link target in `deps`; see
 [The environment the generator gets](#the-environment-the-generator-gets).
 
-The generated sources are their own `ts_compile` target; see
+The example gives generated sources an explicit compiler owner; see
 [Compiling the output](#compiling-the-output).
 
-A `ts_codegen` is hand-written. Gazelle reads every one in the BUILD files it
-walks and never writes or rewrites one: a `ts_codegen` in a package's BUILD
-file is a dep of every target Gazelle writes there, and the files its `outs`
-declare and everything under a declared `out_dir` are the target's output
-whether or not a local run of the generator left a copy on disk, so none is a
-src, a program reaching an out depends on the target, and an import into the
-tree resolves to it. A checked-in `*.gen.ts` no rule declares is an ordinary
-source, listed by its program like any other; one the program's `exclude`
-names is not.
+A `ts_codegen` is hand-written. Gazelle reads its declared outputs without
+rewriting the rule and makes it a dependency of the package's generated targets.
+Its outputs stay out of ordinary compiler membership, even when a checkout copy
+exists. A checked-in `*.gen.ts` that no rule declares remains an ordinary
+compiler-listed source.
+
+Gazelle matches the compiler's file probes to declared outputs in probe order,
+separately for each resolution mode. An existing compiler owner remains a
+dependency: its `srcs` identifies the output, even in another package. Relative,
+absolute and same-repository qualified source labels identify the same file. A
+compiler can also name its generator in the same BUILD file. Gazelle expands
+literal native `filegroup.srcs` and `alias.actual` chains to identify an output's
+compiler owner automatically.
+
+Without a compiler owner, an imported `.ts`, `.tsx`, `.js`, `.mjs` or `.cjs`
+output becomes a direct `srcs` file. The consumer can compile a self-contained
+output; raw `.mts`, `.cts` and `.jsx` remain unsupported by `ts_compile`. JSON,
+declarations and `out_dir` trees from `ts_codegen` resolve to the codegen, which
+supplies its runtime and declaration outputs together. Direct TypeScript and
+JavaScript inputs retain that codegen dependency too. Other generators' declared
+JavaScript, JSON and `.d.ts`/`.d.mts`/`.d.cts` files can enter `srcs` directly.
+
+A selected generated output replaces the compiler's lower-priority checkout
+fallback. Gazelle does not traverse imports from stale copies of generated
+files. Relative `compilerOptions.types` entries naming declared outputs use the
+same File-or-owner resolution, including before the outputs exist.
+
+An absent scalar output can resolve when the compiler reports its file probes,
+including `moduleSuffixes`. A skipped missing directory supplies no scalar file
+identity: Gazelle retains the compiler's successful fallback. If the import
+remains unresolved, or the skipped candidate itself names a declared output,
+Gazelle reports that it could not select a scalar output. Tree resolution uses
+the compiler's directory candidate and works before the tree exists. Package
+manifest probes do not select modules; an explicit JSON module import still can.
 
 ## Compiling the Output
 
-A generated file lives in the output tree, and one tsgo declaration emit has one
-`rootDir`. A target holding generated sources alone hangs off one root, the
-package's directory in `bazel-bin`, and builds under either emitter. Checked-in
-and generated sources in one target hang off two, and fail at analysis under the
-default emit:
+Generated scalar implementation files and checked-in sources can share an emitted `ts_compile`, including checked tsgo declaration emission. Their source-relative coordinates determine the [shared source layout](ts-compile.md#shared-source-layout); the generated files' physical `bazel-out` prefix does not introduce another logical root. The compiler publishes exact source/declaration associations for downstream imports.
 
-```
-ts_compile: srcs on @@//src/app:app hang off 2 different roots, and one
-declaration emit has one rootDir:
-  bazel-out/k8-fastbuild/bin/src/app
-  src/app
-```
-
-Put the generated sources in their own target and depend on it, as above.
-`--//ts:declarations=oxc` lifts the error for the whole build: oxc groups its
-sources by root and runs once per group, and the check is a validation action
-that reads any layout.
+Source mode (`emit = False`) checks the declared generated implementation Files without emission; runtime placement follows the same dependency layout as other source inputs. A generator's directory output still belongs in `deps`, rather than `srcs`; it supplies its already-produced tree without enumerating compiler outputs.
 
 ## Attributes
 
@@ -145,9 +156,7 @@ Gazelle writes the `deps` entry for either spelling. An `out_dir` target is
 indexed by the workspace-relative `out_dir` path a relative or aliased
 specifier reaches it by; a specifier under that root resolves to the target. The
 root is matched as a prefix, after every indexed source has failed to claim the
-specifier. An `outs` target is indexed under no root: its `TsInfo.js` is
-empty, so nothing depends on it for a module, and its outputs are importable
-through the `ts_compile` that names it in `srcs`.
+specifier.
 
 ## Cloudflare Worker Bindings
 

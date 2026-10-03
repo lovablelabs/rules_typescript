@@ -1,0 +1,16 @@
+load("//ts:defs.bzl", "ts_test")
+
+# Failed analysis in gazelle_roundtrip_roots_test: no package.json at the distance the relocated modules need.
+ts_test(
+    name = "app_test",
+    srcs = [
+        "app.test.ts",
+        "//tests/vitest/ancestor_scope/roots/support:helper.ts",  # keep
+    ],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    deps = [
+        "//tests/vitest/ancestor_scope:scope",
+        "@npm//:vitest",
+    ],
+)

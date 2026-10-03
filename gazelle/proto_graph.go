@@ -40,7 +40,7 @@ func loadProtoGraph(file string) (*protoGraph, error) {
 	g.labels = map[string]label.Label{}
 	for i := range g.Nodes {
 		node := &g.Nodes[i]
-		l, err := label.Parse(node.Label)
+		l, err := parseLabel(node.Label)
 		if err != nil || !l.Canonical || l.Repo == "" {
 			return nil, fmt.Errorf("typescript proto graph: expected canonical external label, got %q", node.Label)
 		}
@@ -61,7 +61,7 @@ func loadProtoGraph(file string) (*protoGraph, error) {
 		}
 	}
 	for spelling, native := range g.Roots {
-		l, err := label.Parse(spelling)
+		l, err := parseLabel(spelling)
 		if err != nil {
 			return nil, err
 		}

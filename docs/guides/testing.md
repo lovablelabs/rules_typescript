@@ -38,8 +38,8 @@ names the nearest lockfile importer's target, each npm dep resolves to that
 chain's link into the store, and every `ts_compile` dep's store files come
 along, so the production code under test runs against the packages it
 declared. `deps` lists what the tests
-import, the npm imports of the package's production sources, the vitest
-config's imports and the nearest `package.json`'s dependencies;
+import, the npm imports of the package's production sources and the nearest
+`package.json`'s dependencies;
 `bazel run //:gazelle` writes that list from tsgo's listing of the package.
 An import only some dep's own deps provide fails the build with the label to
 add ([Deps have to be direct](../rules/ts-compile.md#deps-have-to-be-direct));
@@ -81,7 +81,7 @@ export default {
 
 `test.environment` takes any value vitest accepts (`node`, `jsdom`, `happy-dom`,
 `edge-runtime`, or a custom environment package), and the matching package has
-to be in `deps`; Gazelle writes it from the config's imports and the nearest
+to be in `deps`; Gazelle writes it from the test program and the nearest
 `package.json`. A file's `// @vitest-environment` docblock names that file's
 environment over the config's, as under plain vitest; the compiled file keeps
 the docblock ([Comments](../rules/ts-compile.md#comments)). Scoped npm names
@@ -108,8 +108,12 @@ in the nearest directory above holding a `package.json`, or the repository
 root, as the label `//pkg:vitest_config` of a public `filegroup` it writes over
 the file in that package. Vite's root is the config's package either way, so a
 relative path in the config resolves against the directory it sits in;
-`//tests/config_at_root` is the example. Every import of the config is a dep of
-the test ([what Gazelle writes](../gazelle/overview.md#what-gazelle-writes)).
+`//tests/config_at_root` is the example. Gazelle writes the importers declaring
+the config's npm packages into `config_node_modules`, which uses the same
+runfiles staging as `data` while preserving the test's own npm resolution.
+Existing authored `data` remains unchanged; first-party runtime owners of
+config modules remain in `deps`
+([what Gazelle writes](../gazelle/overview.md#what-gazelle-writes)).
 
 ## CSS Modules
 

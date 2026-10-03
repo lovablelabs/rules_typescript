@@ -50,6 +50,7 @@ go_library(
         "@gazelle//repo",
         "@gazelle//resolve",
         "@gazelle//rule",
+        "@gazelle//walk",
         "@io_bazel_rules_go//go/runfiles",
     ],
 )
@@ -86,11 +87,12 @@ go_test(
     ],
     embed = [":typescript"],
     env = {"PROTO_GAZELLE": "$(rlocationpath :gazelle_proto_test)"},
+    # The fixtures run Gazelle end to end; one shard alone approaches the medium timeout.
+    shard_count = 6,
     deps = [
         "@com_github_bazelbuild_buildtools//build",
         "@gazelle//config",
         "@gazelle//label",
-        "@gazelle//merger",
         "@gazelle//resolve",
         "@gazelle//rule",
         "@io_bazel_rules_go//go/runfiles",

@@ -1,14 +1,23 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/bazelbuild/rules_go/go/runfiles"
+	"github.com/mikn/rules_typescript/ts/tools/runtimeview"
 )
 
 func TestPlanNodeExecsTheToolchainRuntime(t *testing.T) {
@@ -23,29 +32,86 @@ func TestPlanNodeExecsTheToolchainRuntime(t *testing.T) {
 		RunArgs: []string{"--experimental-vm-modules"},
 		Node:    &NodeConfig{Entry: "_main/tests/app/main.js"},
 	}
-	plan, err := MakePlan(cfg, r, []string{"--flag", "a b"}, Shard{Total: 1})
+	plan, err := fixturePlan(t, cfg, r, real, []string{"--flag", "a b"}, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		real["+node+/bin/node"], "--experimental-vm-modules",
-		real["_main/tests/app/main.js"], "--flag", "a b",
+		filepath.Join(fixtureRuntimeRoot(t, cfg, r, plan), cfg.Node.Entry), "--flag", "a b",
 	}
 	if strings.Join(plan.Argv, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("argv = %q, want %q", plan.Argv, want)
 	}
 	if !plan.UseExec {
-		t.Error("a plain binary should exec, leaving no launcher in the process tree")
+		t.Error("an npm CLI without temporary resources should exec")
 	}
 	if plan.Dir != "" {
 		t.Errorf("npm CLI changed the caller working directory to %q", plan.Dir)
 	}
 }
 
+func TestNativePlansKeepStandardLookupInTheBuiltView(t *testing.T) {
+	for _, mode := range []string{ModeNode, ModeNodeTest} {
+		for _, layout := range []string{"directory", "manifest"} {
+			t.Run(mode+"/"+layout, func(t *testing.T) {
+				const entry = "_main/app/main.js"
+				r, real := fakeRunfiles(t, map[string]string{
+					entry:                  "export {};",
+					"_main/test_files.txt": entry + "\n",
+					"_repo_mapping":        ",fixtures,fixtures+\n",
+					"fixtures+/value.txt":  "external fixture",
+				})
+				if layout == "directory" {
+					r, _ = withRunfilesDir(t, real[entry], entry)
+				}
+				cfg := &Config{
+					Mode:           mode,
+					Workspace:      "_main",
+					RuntimeModules: []string{entry},
+					Node:           &NodeConfig{Entry: entry},
+					NodeTest:       &NodeTestConfig{TestFilesList: "_main/test_files.txt"},
+				}
+				if err := fixtureNativeView(t, cfg, r, real); err != nil {
+					t.Fatal(err)
+				}
+				view := fixtureRuntimeRoot(t, cfg, r, nil)
+				plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer plan.Cleanup()
+				if got, want := plan.Argv[len(plan.Argv)-1], filepath.Join(view, entry); got != want {
+					t.Fatalf("native entry = %q, want %q", got, want)
+				}
+				childEnv := Environ(plan.EnvOverrides, plan.runfilesEnv)
+				for _, key := range []string{"RUNFILES_DIR", "JAVA_RUNFILES", "RUNFILES_MANIFEST_FILE", "RUNFILES_MANIFEST_ONLY", "TEST_SRCDIR"} {
+					t.Setenv(key, runfilesEnv(childEnv, key))
+				}
+				child, err := runfiles.New(runfiles.SourceRepo(""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				module, err := child.Rlocation(entry)
+				if err != nil || module != filepath.Join(view, entry) {
+					t.Fatalf("child module lookup = %q, %v; want native view entry", module, err)
+				}
+				path, err := child.Rlocation("fixtures/value.txt")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, err := os.ReadFile(path); err != nil || string(got) != "external fixture" {
+					t.Fatalf("apparent repository lookup = %q, %v; path %s", got, err, path)
+				}
+			})
+		}
+	}
+}
+
 func TestPlanNodeFallsBackToSystemNode(t *testing.T) {
-	r, _ := fakeRunfiles(t, map[string]string{"_main/a.js": "x"})
+	r, real := fakeRunfiles(t, map[string]string{"_main/a.js": "x"})
 	cfg := &Config{Mode: ModeNode, Node: &NodeConfig{Entry: "_main/a.js"}}
-	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
+	plan, err := fixturePlan(t, cfg, r, real, nil, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +120,6 @@ func TestPlanNodeFallsBackToSystemNode(t *testing.T) {
 	}
 }
 
-// Without a runfiles tree the importer's node_modules is staged from the
-// manifest into a directory of the plan's own, which NODE_PATH names.
 func TestPlanNodeAddsNodeModulesToNodePath(t *testing.T) {
 	r, real := fakeRunfiles(t, map[string]string{
 		"_main/a.js":                            "x",
@@ -66,7 +130,7 @@ func TestPlanNodeAddsNodeModulesToNodePath(t *testing.T) {
 		Entry:       "_main/a.js",
 		NodeModules: "_main/tests/node_modules",
 	}}
-	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
+	plan, err := fixturePlan(t, cfg, r, real, nil, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,56 +148,237 @@ func TestPlanNodeAddsNodeModulesToNodePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	zod := real["_main/tests/node_modules/zod/index.js"]
-	if want, _ := filepath.EvalSymlinks(zod); got != want {
-		t.Errorf("zod/index.js resolves to %q, want %q", got, want)
+	if data, err := os.ReadFile(got); err != nil || string(data) != "x" {
+		t.Fatalf("selected npm bytes lost: %q, %v (input %s)", data, err, zod)
 	}
 }
 
-func TestPlanNodeLinksOptionalDepsIntoATempTree(t *testing.T) {
-	r, real := fakeRunfiles(t, map[string]string{
-		"_main/a.js":                      "x",
-		"+npm+/oxlint_linux/package.json": "{}",
-		"+npm+/scoped/package.json":       "{}",
-	})
-	cfg := &Config{Mode: ModeNode, Node: &NodeConfig{
-		Entry: "_main/a.js",
-		OptionalDeps: []PackageLink{
-			{Name: "oxlint-linux-x64", PackageJSON: "+npm+/oxlint_linux/package.json"},
-			{Name: "@oxc/linux-x64", PackageJSON: "+npm+/scoped/package.json"},
-		},
-	}}
-	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
-	if err != nil {
-		t.Fatal(err)
+func npmContextFixture(t *testing.T, mode, module string, contexts []NpmContext, files map[string]string) (*Config, *Resolver, map[string]string) {
+	t.Helper()
+	files["_main/tests.txt"] = module + "\n"
+	files["_main/app/config.mjs"] = "export default {}"
+	files["_main/node_modules/vitest/vitest.mjs"] = "vitest"
+	r, original := fakeRunfiles(t, files)
+	cfg := &Config{Mode: mode, Workspace: "_main", RuntimeModules: []string{module}}
+	switch mode {
+	case ModeNode:
+		cfg.Node = &NodeConfig{Entry: module}
+	case ModeNodeTest:
+		cfg.NodeTest = &NodeTestConfig{TestFilesList: "_main/tests.txt"}
+	case ModeVitest:
+		cfg.Vitest = &VitestConfig{
+			TestFilesList: "_main/tests.txt", ConfigFile: "_main/app/config.mjs",
+			VitestInTree: "vitest/vitest.mjs", NodeModules: []string{"_main/node_modules"},
+			NpmContexts: contexts,
+		}
 	}
-	defer plan.Cleanup()
+	return cfg, r, original
+}
 
-	if plan.UseExec {
-		t.Error("a plan with a temp tree must not exec: nothing would clean the tree up")
-	}
-	root := plan.EnvOverrides["NODE_PATH"]
-	if root == "" {
-		t.Fatal("NODE_PATH was not pointed at the temp tree")
-	}
-	root = strings.Split(root, string(os.PathListSeparator))[0]
-	for name, pkg := range map[string]string{
-		"oxlint-linux-x64": "+npm+/oxlint_linux/package.json",
-		"@oxc/linux-x64":   "+npm+/scoped/package.json",
+func TestPlanKeepsSourceNpmStoresForEveryRuntimeMode(t *testing.T) {
+	for _, tc := range []struct{ mode, extension string }{
+		{ModeNode, "js"}, {ModeNodeTest, "js"}, {ModeVitest, "js"}, {ModeVitest, "ts"},
 	} {
-		got, err := filepath.EvalSymlinks(filepath.Join(root, filepath.FromSlash(name)))
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		want, _ := filepath.EvalSymlinks(filepath.Dir(real[pkg]))
-		if got != want {
-			t.Errorf("%s resolves to %q, want %q", name, got, want)
+		t.Run(tc.mode+"/"+tc.extension, func(t *testing.T) {
+			module := "_main/app/main." + tc.extension
+			context := NpmContext{Module: module, Source: "shared/main.ts", Bindings: map[string]string{"pkg": "_main/store/pkg"}}
+			cfg, r, original := npmContextFixture(t, tc.mode, module, []NpmContext{context, context}, map[string]string{
+				module:                    "import { createRequire } from './factory.js'; createRequire(import.meta.url)('pkg');",
+				"_main/node_modules/pkg":  dirMarker,
+				"_main/store/pkg":         dirMarker,
+				"_main/app/unrelated.txt": "ordinary data",
+			})
+			plan, err := fixturePlan(t, cfg, r, original, nil, Shard{Total: 1}, context, context)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer plan.Cleanup()
+			root := fixtureRuntimeRoot(t, cfg, r, plan)
+			wantData, err := os.ReadFile(original["_main/app/unrelated.txt"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotData, err := os.ReadFile(filepath.Join(root, "_main/app/unrelated.txt"))
+			if err != nil || string(gotData) != string(wantData) {
+				t.Fatalf("unrelated data provenance lost: %q, %v", gotData, err)
+			}
+			for path, store := range map[string]string{
+				"_main/app/node_modules/pkg": "_main/store/pkg",
+			} {
+				got, err := os.Stat(filepath.Join(root, filepath.FromSlash(path)))
+				want, sourceErr := os.Stat(filepath.Join(root, filepath.FromSlash(store)))
+				if err != nil || sourceErr != nil || !os.SameFile(got, want) {
+					t.Fatalf("%s lost source File %s: %v, %v", path, store, err, sourceErr)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanKeepsDistinctModuleAndPackageScopeNpmStores(t *testing.T) {
+	for _, mode := range []string{ModeNode, ModeNodeTest, ModeVitest} {
+		for _, scopeOnly := range []bool{false, true} {
+			t.Run(mode+"/scopeOnly="+strconv.FormatBool(scopeOnly), func(t *testing.T) {
+				module := "_main/app/shared/nested/main.js"
+				context := NpmContext{
+					Module: module, Source: "shared/nested/main.ts",
+					Bindings: map[string]string{"pkg": "_main/store/module-pkg"},
+					PackageScope: &NpmPackageScope{
+						Manifest: "_main/app/shared/package.json",
+						Bindings: map[string]string{"pkg": "_main/store/scope-pkg"},
+					},
+				}
+				if scopeOnly {
+					context.Bindings = nil
+				}
+				cfg, r, original := npmContextFixture(t, mode, module, []NpmContext{context}, map[string]string{
+					module:                          "import '#dep';",
+					"_main/app/shared/package.json": `{"imports":{"#dep":"pkg"}}`,
+					"_main/store/scope-pkg":         dirMarker,
+					"_main/store/module-pkg":        dirMarker,
+				})
+				plan, err := fixturePlan(t, cfg, r, original, nil, Shard{Total: 1}, context)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer plan.Cleanup()
+				root := fixtureRuntimeRoot(t, cfg, r, plan)
+				bindings := map[string]string{"_main/app/shared/node_modules/pkg": "_main/store/scope-pkg"}
+				moduleLookup := "_main/app/shared/nested/node_modules/pkg"
+				if !scopeOnly {
+					bindings[moduleLookup] = "_main/store/module-pkg"
+				} else if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(moduleLookup))); !os.IsNotExist(err) {
+					t.Fatalf("scope-only binding acquired a module binding: %v", err)
+				}
+				for path, store := range bindings {
+					got, err := os.Stat(filepath.Join(root, filepath.FromSlash(path)))
+					want, sourceErr := os.Stat(filepath.Join(root, filepath.FromSlash(store)))
+					if err != nil || sourceErr != nil || !os.SameFile(got, want) {
+						t.Fatalf("%s selected another store instead of %s: %v, %v", path, store, err, sourceErr)
+					}
+				}
+			})
 		}
 	}
+}
 
-	tmp := root
-	plan.Cleanup()
-	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
-		t.Errorf("cleanup left %s behind", tmp)
+func TestPlanNpmConflictsCannotOverwriteDeclaredData(t *testing.T) {
+	for _, mode := range []string{ModeNode, ModeNodeTest, ModeVitest} {
+		for _, occupied := range []string{"module", "scope", "incompatible stores"} {
+			t.Run(mode+"/"+occupied, func(t *testing.T) {
+				module := "_main/app/nested/main.js"
+				manifest := "_main/app/package.json"
+				if occupied == "incompatible stores" {
+					manifest = "_main/app/nested/package.json"
+				}
+				context := NpmContext{
+					Module: module, Source: "shared/nested/main.ts",
+					Bindings:     map[string]string{"pkg": "_main/store/module-pkg"},
+					PackageScope: &NpmPackageScope{Manifest: manifest, Bindings: map[string]string{"pkg": "_main/store/scope-pkg"}},
+				}
+				files := map[string]string{
+					module: "export const value = 1;", manifest: `{}`,
+					"_main/store/module-pkg": dirMarker, "_main/store/scope-pkg": dirMarker,
+				}
+				data := "_main/app/nested/node_modules/pkg"
+				if occupied == "scope" {
+					data = "_main/app/node_modules/pkg"
+				}
+				if occupied != "incompatible stores" {
+					files[data] = "ordinary data"
+				}
+				cfg, r, original := npmContextFixture(t, mode, module, []NpmContext{context}, files)
+				plan, err := fixturePlan(t, cfg, r, original, nil, Shard{Total: 1}, context)
+				if plan != nil && len(plan.cleanup) != 0 {
+					defer plan.Cleanup()
+				}
+				if err == nil || !strings.Contains(err.Error(), "projection destination") || !strings.Contains(err.Error(), context.Source) {
+					t.Fatalf("MakePlan = %v, want source-owned npm destination conflict", err)
+				}
+				if occupied != "incompatible stores" {
+					got, readErr := os.ReadFile(original[data])
+					if readErr != nil || string(got) != "ordinary data" {
+						t.Fatalf("failed npm placement changed data: %q, %v", got, readErr)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPlanNodeKeepsOptionalPackageAliasesAndAdjacentAddon(t *testing.T) {
+	for _, modules := range []bool{false, true} {
+		t.Run(strconv.FormatBool(modules), func(t *testing.T) {
+			r, real := fakeRunfiles(t, map[string]string{
+				"_main/a.js":                      "x",
+				"+npm+/oxlint_linux/package.json": "{}",
+				"+npm+/scoped/package.json":       "{}",
+				"+npm+/scoped/addon.node":         "native bytes",
+			})
+			cfg := &Config{Mode: ModeNode, Node: &NodeConfig{
+				Entry: "_main/a.js",
+				OptionalDeps: []PackageLink{
+					{Name: "oxlint-linux-x64", PackageJSON: "+npm+/oxlint_linux/package.json"},
+					{Name: "@oxc/linux-x64", PackageJSON: "+npm+/scoped/package.json"},
+					{Name: "_main", PackageJSON: "+npm+/scoped/package.json"},
+				},
+			}}
+			if modules {
+				cfg.RuntimeModules = []string{cfg.Node.Entry}
+			}
+			plan, err := fixturePlan(t, cfg, r, real, nil, Shard{Total: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer plan.Cleanup()
+
+			if !plan.UseExec {
+				t.Error("native execution must preserve exec identity")
+			}
+			root := plan.EnvOverrides["NODE_PATH"]
+			if root == "" {
+				t.Fatal("NODE_PATH was not pointed at the prepared optional packages")
+			}
+			root = strings.Split(root, string(os.PathListSeparator))[0]
+			for name, pkg := range map[string]string{
+				"oxlint-linux-x64": "+npm+/oxlint_linux/package.json",
+				"@oxc/linux-x64":   "+npm+/scoped/package.json",
+				"_main":            "+npm+/scoped/package.json",
+			} {
+				got, err := filepath.EvalSymlinks(filepath.Join(root, filepath.FromSlash(name)))
+				if err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				manifest, resolveErr := filepath.EvalSymlinks(filepath.Join(fixtureRuntimeRoot(t, cfg, r, plan), pkg))
+				if resolveErr != nil {
+					t.Fatal(resolveErr)
+				}
+				want := filepath.Dir(manifest)
+				if got != want {
+					t.Errorf("%s resolves to %q, want %q", name, got, want)
+				}
+			}
+
+			if modules {
+				entry := filepath.Join(fixtureRuntimeRoot(t, cfg, r, plan), cfg.Node.Entry)
+				if got, err := os.ReadFile(entry); err != nil || string(got) != "x" {
+					t.Fatalf("optional package replaced the workspace entry: %q, %v", got, err)
+				}
+			}
+			original, err := os.Stat(filepath.Join(fixtureRuntimeRoot(t, cfg, r, plan), "+npm+/scoped/addon.node"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			linked, err := os.Stat(filepath.Join(root, "@oxc/linux-x64/addon.node"))
+			if err != nil || !os.SameFile(original, linked) {
+				t.Fatalf("optional native module lost its internal canonical File: %v", err)
+			}
+			tmp := filepath.Dir(root)
+			plan.Cleanup()
+			if _, err := os.Stat(tmp); err != nil {
+				t.Errorf("cleanup removed immutable optional packages: %v", err)
+			}
+		})
 	}
 }
 
@@ -182,7 +427,7 @@ func treeRoot(plan *Plan) string {
 // vitest collects the run by its own glob over the root: the launcher names
 // no file, so nothing is matched file by file against a list of arguments.
 func TestPlanVitestHandsVitestNoFile(t *testing.T) {
-	r, real := vitestFixture(t)
+	r, _ := vitestFixture(t)
 	t.Setenv("COVERAGE_DIR", "")
 	plan, err := MakePlan(vitestConfig(), r, nil, Shard{Total: 1})
 	if err != nil {
@@ -191,7 +436,7 @@ func TestPlanVitestHandsVitestNoFile(t *testing.T) {
 	defer plan.Cleanup()
 	tree := treeRoot(plan)
 	want := []string{
-		real["+node+/bin/node"],
+		filepath.Join(tree, "+node+/bin/node"),
 		filepath.Join(tree, "_main/tests/app/node_modules/vitest/vitest.mjs"),
 		"run", "--config",
 		filepath.Join(tree, "_main/tests/app/_app_vitest.config.mjs"),
@@ -236,12 +481,12 @@ func TestPlanVitestRejectsChangedInsteadOfPassingWithZeroTests(t *testing.T) {
 				r, _ := vitestFixture(t)
 				plan, err := MakePlan(vitestConfig(), r, args, shard)
 				if err == nil {
-					if plan.Cleanup != nil {
+					if len(plan.cleanup) != 0 {
 						plan.Cleanup()
 					}
 					t.Fatal("--changed must fail even when this shard has no tests")
 				}
-				if !strings.Contains(err.Error(), "Git source history") || !strings.Contains(err.Error(), "compiled-file filter") {
+				if !strings.Contains(err.Error(), "Git source history") || !strings.Contains(err.Error(), "source-file filter") {
 					t.Fatalf("error must explain the unsupported selection and alternative: %v", err)
 				}
 			})
@@ -251,7 +496,7 @@ func TestPlanVitestRejectsChangedInsteadOfPassingWithZeroTests(t *testing.T) {
 
 func TestPlanVitestPreservesExplicitFiltersAndPositionalChanged(t *testing.T) {
 	for _, args := range [][]string{
-		{"a.test.js", "-t", "adds numbers"},
+		{"a.test.ts", "-t", "adds numbers"},
 		{"--testNamePattern=adds numbers"},
 		{"--changedness"},
 		{"--", "--changed"},
@@ -358,6 +603,8 @@ func TestPlanVitestLeavesEmptySuitePolicyToVitest(t *testing.T) {
 
 func TestPlanVitestExitsCleanlyOnAnEmptyShard(t *testing.T) {
 	r, _ := vitestFixture(t)
+	scratch := t.TempDir()
+	t.Setenv("TEST_TMPDIR", scratch)
 	plan, err := MakePlan(vitestConfig(), r, nil, Shard{Index: 7, Total: 8})
 	if err != nil {
 		t.Fatal(err)
@@ -367,6 +614,9 @@ func TestPlanVitestExitsCleanlyOnAnEmptyShard(t *testing.T) {
 	}
 	if len(plan.Argv) != 0 {
 		t.Errorf("argv = %q, want none for an empty shard", plan.Argv)
+	}
+	if files, err := os.ReadDir(scratch); err != nil || len(files) != 0 {
+		t.Fatalf("empty shard staged files: %v, %v", files, err)
 	}
 	if !slices.ContainsFunc(plan.Messages, func(m string) bool {
 		return strings.Contains(m, "no test files assigned to shard 7/8")
@@ -388,6 +638,7 @@ func TestPlanVitestWritesItsLcovUnderCoverageDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Cleanup()
 	joined := strings.Join(plan.Argv, " ")
 	reports := filepath.Join(dir, "vitest")
 	if !strings.Contains(joined, "--coverage.reportsDirectory "+reports) {
@@ -419,8 +670,6 @@ func TestPlanVitestWritesItsLcovUnderCoverageDir(t *testing.T) {
 	}
 }
 
-// runfilesTree is the fixture as the directory a Linux test runs from, where
-// vitest's root and the launcher's tree are one and the same runfiles tree.
 func runfilesTree(t *testing.T, real map[string]string) *Resolver {
 	t.Helper()
 	const config = "_main/tests/app/_app.vitest/config.mjs"
@@ -571,6 +820,9 @@ func TestPlanDevServerRunsViteFromTheNodeModulesTree(t *testing.T) {
 	if !plan.Supervise.IgnoreTerm {
 		t.Error("ibazel SIGTERMs the runner on rebuild; vite must survive it")
 	}
+	if !plan.Supervise.TerminateOnInterrupt {
+		t.Error("the dev server must explicitly retain its interrupt-to-termination behavior")
+	}
 }
 
 func TestPlanDevServerExplainsAMissingVite(t *testing.T) {
@@ -632,11 +884,17 @@ func TestPlanDevServerExplainsAMissingNodeModules(t *testing.T) {
 // target's identically named copy, which vitest's root would glob in.
 func TestPlanVitestStagesAPrivateRootWithoutARunfilesDirectory(t *testing.T) {
 	r, real := vitestFixture(t)
-	plan, err := MakePlan(vitestConfig(), r, nil, Shard{Total: 1})
+	cfg := vitestConfig()
+	cfg.RuntimeModules = []string{
+		"_main/tests/app/a.test.js",
+		"_main/tests/app/b.test.js",
+		"_main/tests/app/c.test.js",
+	}
+	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := treeRoot(plan)
+	root := plan.EnvOverrides["TS_TEST_FILES_ROOT"]
 	if root == "" || root == plan.Dir ||
 		strings.HasPrefix(real["_main/tests/app/a.test.js"], root) {
 		t.Fatalf("dir = %q, want a package under a staged root of its own", plan.Dir)
@@ -657,7 +915,7 @@ func TestPlanVitestStagesAPrivateRootWithoutARunfilesDirectory(t *testing.T) {
 			t.Fatalf("%s: %v", link, err)
 		}
 		rlocation := []string{"a", "b", "c"}[i]
-		if expected, _ := filepath.EvalSymlinks(real["_main/tests/app/"+rlocation+".test.js"]); resolved != expected {
+		if expected := filepath.Join(resolvedPath(t, treeRoot(plan)), "_main/tests/app/"+rlocation+".test.js"); resolved != expected {
 			t.Errorf("%s resolves to %q, want %q", link, resolved, expected)
 		}
 	}
@@ -678,20 +936,19 @@ func TestPlanVitestStagesAPrivateRootWithoutARunfilesDirectory(t *testing.T) {
 	}
 	slices.Sort(files)
 	wantStaged := []string{
-		"_main/node_modules",
-		"_main/tests/app/_app_vitest.config.mjs",
 		"_main/tests/app/a.test.js",
 		"_main/tests/app/b.test.js",
 		"_main/tests/app/c.test.js",
-		"_main/tests/app/node_modules/vitest/vitest.mjs",
 	}
 	if strings.Join(files, ",") != strings.Join(wantStaged, ",") {
 		t.Errorf("staged root holds %q, want exactly %q", files, wantStaged)
 	}
 
 	plan.Cleanup()
-	if _, err := os.Stat(root); !os.IsNotExist(err) {
-		t.Errorf("cleanup left %s behind", root)
+	for _, path := range []string{root, treeRoot(plan)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("cleanup left %s behind", path)
+		}
 	}
 }
 
@@ -700,16 +957,26 @@ func TestPlanVitestStagesAPrivateRootWithoutARunfilesDirectory(t *testing.T) {
 func TestPlanVitestStagesTheFilesVitestWalksBesideTheTree(t *testing.T) {
 	_, real := vitestFixture(t)
 	r := runfilesTree(t, real)
-	plan, err := MakePlan(vitestConfig(), r, nil, Shard{Total: 1})
+	cfg := vitestConfig()
+	cfg.RuntimeModules = []string{
+		"_main/tests/app/a.test.js",
+		"_main/tests/app/b.test.js",
+		"_main/tests/app/c.test.js",
+	}
+	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	filesRoot := plan.EnvOverrides["TS_TEST_FILES_ROOT"]
-	if filesRoot == "" || strings.HasPrefix(filesRoot, r.Dir()) {
+	tree := runfilesEnv(plan.runfilesEnv, "RUNFILES_DIR")
+	if filesRoot == "" || strings.HasPrefix(filesRoot, tree) {
 		t.Fatalf("TS_TEST_FILES_ROOT = %q, want a root outside the tree %q",
-			filesRoot, r.Dir())
+			filesRoot, tree)
 	}
-	if want := filepath.Join(r.Dir(), "_main/tests/app"); plan.Dir != want {
+	if tree == r.Dir() {
+		t.Fatal("the execution tree must not modify the input runfiles directory")
+	}
+	if want := filepath.Join(tree, "_main/tests/app"); plan.Dir != want {
 		t.Errorf("dir = %q, want vite's root in the tree, %q", plan.Dir, want)
 	}
 	staged := []string{}
@@ -737,17 +1004,19 @@ func TestPlanVitestStagesTheFilesVitestWalksBesideTheTree(t *testing.T) {
 	}
 	for _, rel := range want {
 		got, err := filepath.EvalSymlinks(filepath.Join(filesRoot, rel))
-		expected, _ := filepath.EvalSymlinks(real[rel])
+		expected := filepath.Join(resolvedPath(t, tree), rel)
 		if err != nil || got != expected {
 			t.Errorf("%s resolves to %q, %v; want %q", rel, got, err, expected)
 		}
 	}
-	if plan.Cleanup == nil {
+	if len(plan.cleanup) == 0 {
 		t.Fatal("the staged root has to come back off")
 	}
 	plan.Cleanup()
-	if _, err := os.Stat(filesRoot); !os.IsNotExist(err) {
-		t.Errorf("cleanup left %s behind", filesRoot)
+	for _, path := range []string{filesRoot, tree} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("cleanup left %s behind", path)
+		}
 	}
 }
 
@@ -763,13 +1032,15 @@ func TestPlanVitestLinksTheImporterAtTheWorkspaceRoot(t *testing.T) {
 		importer + "/vitest/vitest.mjs":          "x",
 		"+node+/bin/node":                        "#!/bin/sh\n",
 	})
-	r, root := withRunfilesDir(t, real[importer], importer)
+	r, _ := withRunfilesDir(t, real[importer], importer)
 	cfg := vitestConfig()
 	cfg.Vitest.NodeModules = []string{importer}
 	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Cleanup()
+	root := treeRoot(plan)
 	got, err := os.Readlink(filepath.Join(root, "_main", "node_modules"))
 	if err != nil {
 		t.Fatalf("no node_modules link at the workspace root: %v", err)
@@ -795,7 +1066,7 @@ func TestPlanVitestWalksTheChainForVitest(t *testing.T) {
 		"+node+/bin/node":                            "#!/bin/sh\n",
 	})
 	const test = "_main/tests/app/a.test.js"
-	r, root := withRunfilesDir(t, real[test], test)
+	r, _ := withRunfilesDir(t, real[test], test)
 	cfg := vitestConfig()
 	near, above := "_main/tests/app/node_modules", "_main/tests/node_modules"
 	cfg.Vitest.NodeModules = []string{near, above}
@@ -803,6 +1074,8 @@ func TestPlanVitestWalksTheChainForVitest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Cleanup()
+	root := treeRoot(plan)
 	vitest := filepath.Join(root, above, "vitest/vitest.mjs")
 	if !slices.Contains(plan.Argv, vitest) {
 		t.Errorf("argv = %q, want vitest from the importer above %q",
@@ -819,19 +1092,23 @@ func TestPlanVitestWalksTheChainForVitest(t *testing.T) {
 	}
 }
 
-// A manifest-only layout has no directory to walk: the store is staged into
-// the test root, a declared link keeping its relative target.
-func TestPlanVitestStagesTheStoreFromTheManifest(t *testing.T) {
+func TestPlanVitestPreservesSupplierScopeAndStoreWithoutDiscoveringHelpers(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "var")
 	if err := os.Symlink(t.TempDir(), base); err != nil {
 		t.Fatal(err)
 	}
 	const store = "bin/tests/app/node_modules/.pnpm/vitest@4/node_modules/vitest"
 	tree := filepath.Join(base, store)
+	const helper = "export const answer = 42;\n"
+	const scope = `{"type":"module","imports":{"#helper":"./helper.mjs"}}`
 	for rel, body := range map[string]string{
-		"files/app_test_files.txt": "_main/tests/app/a.test.js\n",
+		"files/app_test_files.txt": "_main/tests/app/a.test.js\n_main/tests/app/b.test.js\n",
 		"files/a.test.js":          "x",
+		"files/b.test.js":          "x",
 		"files/config.mjs":         "export default {}",
+		"files/helper.mjs":         helper,
+		"files/package.json":       scope,
+		"files/payload.txt":        "linked data\n",
 		"files/node":               "#!/bin/sh\n",
 		store + "/vitest.mjs":      "x",
 	} {
@@ -844,45 +1121,154 @@ func TestPlanVitestStagesTheStoreFromTheManifest(t *testing.T) {
 		}
 	}
 	files := filepath.Join(base, "files")
-	r := manifestResolver(t, []string{
+	entries := []string{
 		"_main/tests/app/app_test_files.txt " + files + "/app_test_files.txt",
 		"_main/tests/app/a.test.js " + files + "/a.test.js",
+		"_main/tests/app/b.test.js " + files + "/b.test.js",
 		"_main/tests/app/_app.vitest/config.mjs " + files + "/config.mjs",
+		"_main/tests/config/helper.mjs " + files + "/helper.mjs",
+		"_main/tests/config/package.json " + files + "/package.json",
+		"_main/tests/app/fixture_links/payload.txt " + files + "/payload.txt",
+		"_main/tests/app/fixture_links/valid.json payload.txt",
+		"_main/tests/app/fixture_links/valid.js payload.txt",
+		"_main/tests/app/fixture_links/dangling.json absent.txt",
+		"_main/tests/app/fixture_links/dangling.js absent.txt",
 		"_main/tests/app/node_modules/vitest .pnpm/vitest@4/node_modules/vitest",
 		"_main/tests/app/node_modules/.pnpm/vitest@4/node_modules/vitest " + tree,
 		"+node+/bin/node " + files + "/node",
-	})
-	plan, err := MakePlan(vitestConfig(), r, nil, Shard{Total: 1})
-	if err != nil {
-		t.Fatal(err)
 	}
-	defer plan.Cleanup()
-	root := treeRoot(plan)
-	link := filepath.Join(root, "_main/tests/app/node_modules/vitest")
-	relative := filepath.FromSlash(".pnpm/vitest@4/node_modules/vitest")
-	if got, err := os.Readlink(link); err != nil || got != relative {
-		t.Errorf("readlink %s = %q, %v; want the manifest's target verbatim",
-			link, got, err)
-	}
-	got, err := filepath.EvalSymlinks(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := filepath.EvalSymlinks(tree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Errorf("%s resolves to %q, want the store tree %q", link, got, want)
-	}
-	entry := filepath.Join(link, "vitest.mjs")
-	if !slices.Contains(plan.Argv, entry) {
-		t.Errorf("argv = %q, want vitest through the staged link %q",
-			plan.Argv, entry)
-	}
-	nodeModules := filepath.Join(root, "_main/tests/app/node_modules")
-	if got := plan.EnvOverrides["NODE_PATH"]; got != nodeModules {
-		t.Errorf("NODE_PATH = %q, want the staged importer directory", got)
+	for _, mode := range []string{"manifest", "manifest_directory", "directory"} {
+		t.Run(mode, func(t *testing.T) {
+			var r *Resolver
+			if mode != "directory" {
+				r = manifestResolver(t, entries)
+				if mode == "manifest_directory" {
+					program := filepath.Join(t.TempDir(), "launcher")
+					directory := program + ".runfiles"
+					if err := os.Mkdir(directory, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					manifest, err := os.ReadFile(runfilesEnv(r.Env(), "RUNFILES_MANIFEST_FILE"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(directory, "MANIFEST"), manifest, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					r, err = resolverForExecutable(program)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				dir := t.TempDir()
+				for _, entry := range entries {
+					rel, target, _ := strings.Cut(entry, " ")
+					path := filepath.Join(dir, filepath.FromSlash(rel))
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.FromSlash(target), path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				r, err = directoryResolver(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := vitestConfig()
+			cfg.RuntimeModules = []string{
+				"_main/tests/app/a.test.js",
+				"_main/tests/app/b.test.js",
+				"_main/tests/config/helper.mjs",
+			}
+			plan, err := MakePlan(cfg, r, nil, Shard{Total: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer plan.Cleanup()
+			root := treeRoot(plan)
+			for rel, want := range map[string]string{
+				"_main/tests/config/helper.mjs": helper,
+				"_main/tests/app/b.test.js":     "x",
+			} {
+				path := filepath.Join(root, rel)
+				info, err := os.Lstat(path)
+				if err != nil || !info.Mode().IsRegular() {
+					t.Fatalf("supplier file %s is not materialized: %v, %v", rel, info, err)
+				}
+				if got, err := os.ReadFile(path); err != nil || string(got) != want {
+					t.Fatalf("supplier file %s = %q, %v; want %q", rel, got, err, want)
+				}
+			}
+			manifest := filepath.Join(root, "_main/tests/config/package.json")
+			if got, err := os.Readlink(manifest); err != nil || got != filepath.Join(files, "package.json") {
+				t.Fatalf("scope link = %q, %v; want the original package scope", got, err)
+			}
+			if got, err := os.ReadFile(manifest); err != nil || string(got) != scope {
+				t.Fatalf("scope contents = %q, %v; want %q", got, err, scope)
+			}
+			for _, extension := range []string{"json", "js"} {
+				for name, target := range map[string]string{"valid": "payload.txt", "dangling": "absent.txt"} {
+					link := filepath.Join(root, "_main/tests/app/fixture_links", name+"."+extension)
+					if got, err := os.Readlink(link); err != nil || got != target {
+						t.Fatalf("data link %s = %q, %v; want %q", link, got, err, target)
+					}
+					if name == "valid" {
+						if got, err := os.ReadFile(link); err != nil || string(got) != "linked data\n" {
+							t.Fatalf("data link contents = %q, %v", got, err)
+						}
+					} else if _, err := os.Stat(link); !os.IsNotExist(err) {
+						t.Fatalf("dangling data link acquired a target: %v", err)
+					}
+				}
+			}
+			discovery := plan.EnvOverrides["TS_TEST_FILES_ROOT"]
+			if discovery == root {
+				t.Fatal("supplier runtime files must not enter Vitest discovery")
+			}
+			selected, err := os.ReadDir(filepath.Join(discovery, "_main/tests/app"))
+			if err != nil || len(selected) != 1 || selected[0].Name() != "a.test.js" {
+				t.Fatalf("discovery files = %v, %v; want only the assigned test", selected, err)
+			}
+			if _, err := os.Stat(filepath.Join(discovery, "_main/tests/config")); !os.IsNotExist(err) {
+				t.Fatalf("supplier config entered test discovery: %v", err)
+			}
+			if got := runfilesEnv(plan.runfilesEnv, "RUNFILES_DIR"); got != root {
+				t.Fatalf("child runfiles directory = %q, want %q", got, root)
+			}
+			if got := runfilesEnv(plan.runfilesEnv, "RUNFILES_MANIFEST_FILE"); got != "" {
+				t.Fatalf("child retained the unstaged manifest %q", got)
+			}
+			link := filepath.Join(root, "_main/tests/app/node_modules/vitest")
+			relative := filepath.FromSlash(".pnpm/vitest@4/node_modules/vitest")
+			if got, err := os.Readlink(link); err != nil || got != relative {
+				t.Errorf("readlink %s = %q, %v; want the manifest's target verbatim",
+					link, got, err)
+			}
+			got, err := filepath.EvalSymlinks(link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := filepath.EvalSymlinks(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Errorf("%s resolves to %q, want the store tree %q", link, got, want)
+			}
+			entry := filepath.Join(link, "vitest.mjs")
+			if !slices.Contains(plan.Argv, entry) {
+				t.Errorf("argv = %q, want vitest through the staged link %q",
+					plan.Argv, entry)
+			}
+			nodeModules := filepath.Join(root, "_main/tests/app/node_modules")
+			if got := plan.EnvOverrides["NODE_PATH"]; got != nodeModules {
+				t.Errorf("NODE_PATH = %q, want the staged importer directory", got)
+			}
+		})
 	}
 }
 
@@ -904,22 +1290,108 @@ func manifestResolver(t *testing.T, lines []string) *Resolver {
 	return r
 }
 
-func TestManifestEntryReadsBothLineShapes(t *testing.T) {
-	const link, tree = "_main/node_modules/zod", "../.pnpm/zod@3/node_modules/zod"
-	const store = "_main/node_modules/.pnpm/zod@3/node_modules/zod"
-	for _, tc := range []struct{ line, rlocation, target string }{
-		{link + " " + tree, link, tree},
-		{store + " /abs/tree", store, "/abs/tree"},
-		{` _main/a\sb /abs/a\sb\bc`, "_main/a b", `/abs/a b\c`},
-	} {
-		rlocation, target, ok := manifestEntry(tc.line)
-		if !ok || rlocation != tc.rlocation || target != tc.target {
-			t.Errorf("manifestEntry(%q) = %q, %q, %v; want %q, %q",
-				tc.line, rlocation, target, ok, tc.rlocation, tc.target)
-		}
+func TestManifestStagingCannotChangeDirectoryEntries(t *testing.T) {
+	for _, overlap := range []string{"same", "different"} {
+		t.Run(overlap, func(t *testing.T) {
+			source := t.TempDir()
+			child := filepath.Join(source, "child")
+			if err := os.WriteFile(child, []byte("original"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(t.TempDir(), "other file")
+			if err := os.WriteFile(other, []byte("other"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), "child-alias")
+			if err := os.Symlink(child, target); err != nil {
+				t.Fatal(err)
+			}
+			if overlap == "different" {
+				target = other
+			}
+			const base = "_main/node_modules/"
+			r := manifestResolver(t, []string{
+				base + "data/child " + target,
+				base + "data " + source,
+				base + "data-tail " + other,
+				" " + base + "space\\sfile " + strings.ReplaceAll(other, " ", `\s`),
+				base + "empty ",
+			})
+			root := t.TempDir()
+			_, err := r.Stage(root, nil)
+			if overlap == "different" {
+				if err == nil || !strings.Contains(err.Error(), "conflicts with directory entry") {
+					t.Fatalf("conflicting exact child was accepted: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				for path, want := range map[string]string{
+					"data/child": "original",
+					"data-tail":  "other",
+					"space file": "other",
+					"empty":      "",
+				} {
+					got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(base+path)))
+					if err != nil || string(got) != want {
+						t.Errorf("staged %s = %q, %v; want %q", path, got, err, want)
+					}
+				}
+			}
+			if got, err := os.ReadFile(child); err != nil || string(got) != "original" {
+				t.Errorf("manifest overlay changed source directory: %q, %v", got, err)
+			}
+		})
 	}
-	if _, _, ok := manifestEntry(""); ok {
-		t.Error("an empty line is no entry")
+}
+
+func TestManifestStagingRejectsPathsOutsideItsTree(t *testing.T) {
+	for _, path := range []string{"../escaped", "."} {
+		t.Run(path, func(t *testing.T) {
+			r := manifestResolver(t, []string{path + " /unused"})
+			if _, err := r.Stage(t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "non-normalized runfiles path") {
+				t.Fatalf("escaping manifest path was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestNodeModulesCannotWriteThroughWorkspaceDirectoryEntry(t *testing.T) {
+	for _, mode := range []string{"missing", "existing"} {
+		t.Run(mode, func(t *testing.T) {
+			existing := mode == "existing"
+			source, packages := t.TempDir(), t.TempDir()
+			const importer = "external/node_modules"
+			r := manifestResolver(t, []string{"_main " + source, importer + " " + packages})
+			root := t.TempDir()
+			_, err := r.Stage(root, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(source, "node_modules")
+			if existing {
+				if err := os.Symlink(packages, link); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = installNodeModules(&Plan{}, root, "_main", []string{importer})
+			if existing {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, err := os.Readlink(link); err != nil || got != packages {
+					t.Fatalf("existing mapping was changed: %q, %v", got, err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "workspace directory alias") {
+					t.Fatalf("write through workspace alias was accepted: %v", err)
+				}
+				if _, err := os.Lstat(link); !os.IsNotExist(err) {
+					t.Fatalf("workspace alias modified source tree: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -929,6 +1401,8 @@ func withRunfilesDir(t *testing.T, real, rlocation string) (*Resolver, string) {
 	t.Helper()
 	root := strings.TrimSuffix(filepath.ToSlash(real), "/"+rlocation)
 	t.Setenv("RUNFILES_DIR", root)
+	t.Setenv("RUNFILES_MANIFEST_FILE", "")
+	t.Setenv("RUNFILES_MANIFEST_ONLY", "")
 	r, err := directoryResolver(root)
 	if err != nil {
 		t.Fatal(err)
@@ -977,7 +1451,7 @@ func TestPlanDevServerLinksTheNpmTreeIntoTheWorkspace(t *testing.T) {
 		t.Errorf("link -> %q, want the node_modules %q", target,
 			real["_main/tests/app/node_modules"])
 	}
-	if plan.Cleanup == nil {
+	if len(plan.cleanup) == 0 {
 		t.Fatal("a link the launcher made has to come back off")
 	}
 	plan.Cleanup()
@@ -999,7 +1473,7 @@ func TestPlanDevServerKeepsAnIdenticalLinkAndDoesNotRemoveIt(t *testing.T) {
 	}
 	// Another dev server on the same directory may own it; removing it breaks a
 	// server this process never started.
-	if plan.Cleanup != nil {
+	if len(plan.cleanup) != 0 {
 		plan.Cleanup()
 	}
 	if _, err := os.Lstat(link); err != nil {
@@ -1099,7 +1573,8 @@ func TestPlanVitestRunsFromTheConfigsPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(r.Dir(), "_main/tests/app"); plan.Dir != want {
+	defer plan.Cleanup()
+	if want := filepath.Join(runfilesEnv(plan.runfilesEnv, "RUNFILES_DIR"), "_main/tests/app"); plan.Dir != want {
 		t.Errorf("dir = %q, want the config's package %q", plan.Dir, want)
 	}
 }
@@ -1113,7 +1588,8 @@ func TestPlanVitestRunsFromAnAncestorConfigsPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(r.Dir(), "_main/tests"); plan.Dir != want {
+	defer plan.Cleanup()
+	if want := filepath.Join(runfilesEnv(plan.runfilesEnv, "RUNFILES_DIR"), "_main/tests"); plan.Dir != want {
 		t.Errorf("dir = %q, want the ancestor package %q", plan.Dir, want)
 	}
 }
@@ -1127,7 +1603,8 @@ func TestPlanVitestWritesTheConfigAsARegularFileInThePackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(r.Dir(), "_main/tests/app/_app_vitest.config.mjs")
+	defer plan.Cleanup()
+	dst := filepath.Join(treeRoot(plan), "_main/tests/app/_app_vitest.config.mjs")
 	st, err := os.Lstat(dst)
 	if err != nil {
 		t.Fatalf("no config at the package path: %v", err)
@@ -1164,15 +1641,18 @@ func TestPlanVitestReplacesASymlinkAtAStagedPath(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(r.Dir(), filepath.FromSlash(to))
-	if err := os.Symlink(stale, dst); err != nil {
+	original := filepath.Join(r.Dir(), filepath.FromSlash(to))
+	if err := os.Symlink(stale, original); err != nil {
 		t.Fatal(err)
 	}
 	cfg := vitestConfig()
 	cfg.Vitest.Stage[from] = to
-	if _, err := MakePlan(cfg, r, nil, Shard{Total: 1}); err != nil {
+	plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Cleanup()
+	dst := filepath.Join(treeRoot(plan), filepath.FromSlash(to))
 	st, err := os.Lstat(dst)
 	if err != nil {
 		t.Fatal(err)
@@ -1185,6 +1665,93 @@ func TestPlanVitestReplacesASymlinkAtAStagedPath(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(stale); string(got) != "stale" {
 		t.Errorf("the symlink's target was written through: %q", got)
+	}
+	if got, err := os.Readlink(original); err != nil || got != stale {
+		t.Errorf("the input runfiles symlink changed: %q, %v", got, err)
+	}
+}
+
+func TestPlanVitestConfigStagingCannotWriteThroughDirectoryEntries(t *testing.T) {
+	for _, mode := range []string{"manifest", "directory", "directory_internal_alias"} {
+		t.Run(mode, func(t *testing.T) {
+			const private = "_main/tests/app/_app.vitest/tests/config/"
+			const destination = "_main/tests/config"
+			const wrapper = "_main/tests/app/_app_vitest.config.mjs"
+			r, real := fakeRunfiles(t, map[string]string{
+				"_main/tests/app/_app.vitest/config.mjs":         "export default {}",
+				private + "vitest.config.mjs":                    "export default { fresh: true }",
+				private + "nested/helper.mjs":                    "export const fresh = true",
+				wrapper:                                          "previous wrapper",
+				"_main/tests/app/app_test_files.txt":             "_main/tests/app/a.test.js",
+				"_main/tests/app/a.test.js":                      "x",
+				"_main/tests/app/node_modules/vitest/vitest.mjs": "x",
+				"+node+/bin/node":                                "#!/bin/sh\n",
+			})
+			original := t.TempDir()
+			if mode == "directory_internal_alias" {
+				original = filepath.Join(filepath.Dir(real[wrapper]), "original_config")
+			}
+			contents := map[string]string{
+				"vitest.config.mjs": "original config",
+				"nested/helper.mjs": "original helper",
+				"sentinel.txt":      "original sentinel",
+			}
+			identities := map[string]os.FileInfo{}
+			for path, content := range contents {
+				file := filepath.Join(original, filepath.FromSlash(path))
+				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Stat(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				identities[path] = info
+			}
+			if mode != "manifest" {
+				r = runfilesTree(t, real)
+				if err := os.Symlink(original, filepath.Join(r.Dir(), filepath.FromSlash(destination))); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var lines []string
+				for path, file := range real {
+					lines = append(lines, path+" "+file)
+				}
+				lines = append(lines, destination+" "+original)
+				r = manifestResolver(t, lines)
+			}
+			cfg := vitestConfig()
+			cfg.Vitest.Stage[private+"vitest.config.mjs"] = destination + "/vitest.config.mjs"
+			cfg.Vitest.Stage[private+"nested/helper.mjs"] = destination + "/nested/helper.mjs"
+			scratch := t.TempDir()
+			t.Setenv("TEST_TMPDIR", scratch)
+			plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
+			if plan != nil && len(plan.cleanup) != 0 {
+				defer plan.Cleanup()
+			}
+			if err == nil || !strings.Contains(err.Error(), "beneath non-directory or symlink entry") {
+				t.Fatalf("config directory alias was accepted: %v", err)
+			}
+			for path, content := range contents {
+				file := filepath.Join(original, filepath.FromSlash(path))
+				if got, err := os.ReadFile(file); err != nil || string(got) != content {
+					t.Errorf("config staging changed original %s: %q, %v", path, got, err)
+				}
+				if info, err := os.Stat(file); err != nil || !os.SameFile(identities[path], info) {
+					t.Errorf("config staging replaced original %s: %v", path, err)
+				}
+			}
+			if got, err := os.ReadFile(real[wrapper]); err != nil || string(got) != "previous wrapper" {
+				t.Errorf("config staging wrote an earlier destination before rejecting the alias: %q, %v", got, err)
+			}
+			if files, err := os.ReadDir(scratch); err != nil || len(files) != 0 {
+				t.Fatalf("failed config staging left temporary trees: %v, %v", files, err)
+			}
+		})
 	}
 }
 
@@ -1228,15 +1795,435 @@ func TestStageTestRootRemovesPartialRoot(t *testing.T) {
 }
 
 func TestPlanVitestRemovesRootOnFailure(t *testing.T) {
-	r, _ := vitestFixture(t)
-	cfg := vitestConfig()
-	cfg.Vitest.VitestInTree = "vitest/missing.mjs"
-	scratch := t.TempDir()
-	t.Setenv("TEST_TMPDIR", scratch)
-	if _, err := MakePlan(cfg, r, nil, Shard{Total: 1}); err == nil {
-		t.Fatal("missing Vitest must fail")
+	for _, phase := range []string{"staging", "vitest lookup"} {
+		t.Run(phase, func(t *testing.T) {
+			r, real := vitestFixture(t)
+			cfg := vitestConfig()
+			if phase == "staging" {
+				if err := os.Remove(real["_main/tests/app/_app.vitest/config.mjs"]); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				cfg.Vitest.VitestInTree = "vitest/missing.mjs"
+			}
+			scratch := t.TempDir()
+			t.Setenv("TEST_TMPDIR", scratch)
+			if _, err := MakePlan(cfg, r, nil, Shard{Total: 1}); err == nil {
+				t.Fatalf("missing input must fail during %s", phase)
+			}
+			if files, err := os.ReadDir(scratch); err != nil || len(files) != 0 {
+				t.Fatalf("failed plan left files behind: %v, %v", files, err)
+			}
+		})
 	}
-	if files, err := os.ReadDir(scratch); err != nil || len(files) != 0 {
-		t.Fatalf("failed plan left files behind: %v, %v", files, err)
+}
+
+func TestNativeViewCannotChangeControlSignals(t *testing.T) {
+	const fixtureRole = "TS_LAUNCHER_SIGNAL_FIXTURE"
+	const fixtureRoot = "TS_LAUNCHER_SIGNAL_ROOT"
+	const fixtureMode = "TS_LAUNCHER_SIGNAL_MODE"
+	const fixtureConfig = "TS_LAUNCHER_SIGNAL_CONFIG"
+	const entry = "_main/entry.js"
+	const testPattern = "^TestNativeViewCannotChangeControlSignals$"
+	controls := []os.Signal{
+		syscall.SIGHUP, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM,
+		syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGWINCH, syscall.SIGCONT,
 	}
+	switch os.Getenv(fixtureRole) {
+	case "application":
+		received := make(chan os.Signal, len(controls))
+		signal.Notify(received, controls...)
+		fmt.Printf("ready %d %d\n", os.Getpid(), syscall.Getpgrp())
+		for range controls {
+			fmt.Printf("signal %d\n", (<-received).(syscall.Signal))
+		}
+		os.Exit(0)
+	case "launcher":
+		r, err := directoryResolver(os.Getenv(fixtureRoot))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := &Config{
+			Mode:           os.Getenv(fixtureMode),
+			Workspace:      "_main",
+			Runtime:        "_main/launcher_test",
+			RunArgs:        []string{"-test.run=" + testPattern, "--"},
+			RuntimeModules: []string{entry},
+			Env:            map[string]string{fixtureRole: "application"},
+			Node:           &NodeConfig{Entry: entry},
+			NodeTest:       &NodeTestConfig{TestFilesList: "_main/entry_files.txt"},
+		}
+		cfg.NativeViewAnchor = os.Getenv(fixtureConfig)
+		plan, err := MakePlan(cfg, r, nil, Shard{Total: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println("staged " + fixtureRuntimeRoot(t, cfg, r, plan))
+		code, err := Run(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(code)
+	}
+
+	deadline, bounded := t.Deadline()
+	if !bounded {
+		t.Fatal("signal subprocesses require the test runner's deadline")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "_main"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, filepath.Join(root, "_main/launcher_test")); err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string]string{"_main/launcher_test": executable}
+	for file, contents := range map[string]string{
+		entry:                   "declared module",
+		"_main/entry_files.txt": entry + "\n",
+	} {
+		entries[file] = filepath.Join(root, file)
+		if err := os.WriteFile(entries[file], []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, mode := range []string{ModeNode, ModeNodeTest} {
+		t.Run(mode, func(t *testing.T) {
+			resolver, err := directoryResolver(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &Config{Mode: mode, Workspace: "_main", RuntimeModules: []string{entry}, Node: &NodeConfig{Entry: entry}, NodeTest: &NodeTestConfig{TestFilesList: "_main/entry_files.txt"}}
+			if err := fixtureNativeView(t, cfg, resolver, entries); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithDeadline(t.Context(), deadline)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "-test.run="+testPattern)
+			cmd.Env = Environ(map[string]string{
+				fixtureRole:   "launcher",
+				fixtureRoot:   root,
+				fixtureMode:   mode,
+				fixtureConfig: cfg.NativeViewAnchor,
+			}, nil)
+			cmd.Stderr = os.Stderr
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdout.Close()
+			cmd.Cancel = func() error {
+				_ = stdout.Close()
+				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waited := false
+			defer func() {
+				cancel()
+				if !waited {
+					_ = cmd.Wait()
+				}
+			}()
+			lines := bufio.NewScanner(stdout)
+			readLine := func() string {
+				t.Helper()
+				if !lines.Scan() {
+					t.Fatalf("signal fixture ended before its acknowledgement: %v", lines.Err())
+				}
+				return lines.Text()
+			}
+			staged, found := strings.CutPrefix(readLine(), "staged ")
+			if !found || staged == "" || staged == root {
+				t.Fatalf("launcher did not select the prepared view: %q", staged)
+			}
+
+			var runtimePID, runtimeGroup int
+			got := readLine()
+			if _, err := fmt.Sscanf(got, "ready %d %d", &runtimePID, &runtimeGroup); err != nil || runtimePID != cmd.Process.Pid || runtimeGroup != cmd.Process.Pid {
+				t.Fatalf("staging changed the executable PID or process group: %q, launcher %d", got, cmd.Process.Pid)
+			}
+			for i, control := range controls {
+				var err error
+				if i%2 == 0 {
+					err = cmd.Process.Signal(control)
+				} else {
+					err = syscall.Kill(-cmd.Process.Pid, control.(syscall.Signal))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := readLine(), fmt.Sprintf("signal %d", control.(syscall.Signal)); got != want {
+					t.Fatalf("application received %q after sending %v to its launcher, want %q", got, control, want)
+				}
+			}
+			err = cmd.Wait()
+			waited = true
+			if err != nil {
+				t.Fatalf("application's signal handlers did not exit successfully: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(staged, entry)); err != nil {
+				t.Fatalf("exec removed immutable module: %v", err)
+			}
+		})
+	}
+}
+
+// Bazel may transport a regular File as a symlink to another artifact.
+func TestStageRegularFileTransportCannotCreateCanonicalAlias(t *testing.T) {
+	for _, layout := range []string{"directory", "manifest"} {
+		for _, transport := range []string{"regular", "symlink"} {
+			t.Run(layout+"/"+transport, func(t *testing.T) {
+				const module = "_main/a.js"
+				const data = "_main/b.js"
+				const contents = "export const value = 42;\n"
+				resolver, inputs := fakeRunfiles(t, map[string]string{module: contents, data: contents})
+				if transport == "symlink" {
+					if err := os.Remove(inputs[data]); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(inputs[module], inputs[data]); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if layout == "directory" {
+					directory := t.TempDir()
+					for _, name := range []string{module, data} {
+						path := filepath.Join(directory, name)
+						if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(inputs[name], path); err != nil {
+							t.Fatal(err)
+						}
+					}
+					var err error
+					resolver, err = directoryResolver(directory)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				root := t.TempDir()
+				if _, err := resolver.Stage(root, []string{module}); err != nil {
+					t.Fatal(err)
+				}
+				canonical, err := os.Stat(filepath.Join(root, module))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ordinary, err := os.Stat(filepath.Join(root, data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if os.SameFile(canonical, ordinary) {
+					t.Error("regular File transport created an undeclared canonical alias")
+				}
+				if got, err := os.ReadFile(filepath.Join(root, data)); err != nil || string(got) != contents {
+					t.Errorf("ordinary data bytes = %q, %v; want %q", got, err, contents)
+				}
+				if got, err := os.ReadFile(inputs[module]); err != nil || string(got) != contents {
+					t.Errorf("canonical input changed: %q, %v", got, err)
+				}
+				if transport == "symlink" {
+					if target, err := os.Readlink(inputs[data]); err != nil || target != inputs[module] {
+						t.Errorf("transport symlink changed: %q, %v", target, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStageDependencyAliasUsesCanonicalModulePath(t *testing.T) {
+	for _, mode := range []string{"manifest", "directory"} {
+		t.Run(mode, func(t *testing.T) {
+			files := t.TempDir()
+			canonical := filepath.Join(files, "dep", "index.js")
+			if err := os.MkdirAll(filepath.Dir(canonical), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(canonical, []byte("export { value } from './value.js';"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			entries := []string{"_main/dep/index.js " + canonical, "_main/app/dep/index.js " + canonical}
+			var resolver *Resolver
+			if mode == "manifest" {
+				resolver = manifestResolver(t, entries)
+			} else {
+				directory := t.TempDir()
+				for _, entry := range entries {
+					name, target, _ := strings.Cut(entry, " ")
+					at := filepath.Join(directory, name)
+					if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(target, at); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				resolver, err = directoryResolver(directory)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			root := t.TempDir()
+			if _, err := resolver.Stage(root, []string{"_main/dep/index.js"}); err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := filepath.EvalSymlinks(filepath.Join(root, "_main/app/dep/index.js"))
+			want := filepath.Join(resolvedPath(t, root), "_main/dep/index.js")
+			if err != nil || resolved != want {
+				t.Fatalf("alias resolves to %q, %v; want canonical staged module %q", resolved, err, want)
+			}
+			if info, err := os.Lstat(want); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("canonical module is not materialized: %v, %v", info, err)
+			}
+		})
+	}
+}
+
+func fixtureRuntimeRoot(t *testing.T, cfg *Config, original *Resolver, plan *Plan) string {
+	t.Helper()
+	if cfg.NativeViewAnchor != "" {
+		view, err := nativeResolver(cfg, original, &Plan{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return view.Dir()
+	}
+	return runfilesEnv(plan.runfilesEnv, "RUNFILES_DIR")
+}
+
+func fixtureNativeView(t *testing.T, cfg *Config, original *Resolver, entries map[string]string, contexts ...NpmContext) error {
+	t.Helper()
+	if cfg.Mode != ModeNode && cfg.Mode != ModeNodeTest {
+		return nil
+	}
+	modules := slices.Clone(cfg.RuntimeModules)
+	var chain []string
+	var optional []runtimeview.PackageLink
+	if cfg.Mode == ModeNode {
+		modules = append(modules, cfg.Node.Entry)
+		if cfg.Node.NodeModules != "" {
+			chain = []string{cfg.Node.NodeModules}
+		}
+		optional = cfg.Node.OptionalDeps
+	} else {
+		files, err := testFiles(original, cfg.NodeTest.TestFilesList)
+		if err != nil {
+			return err
+		}
+		for _, file := range files {
+			modules = append(modules, file.rlocation)
+		}
+		chain = cfg.NodeTest.NodeModules
+	}
+	base := t.TempDir()
+	spec := runtimeview.Spec{
+		Root: filepath.Join(base, "app_launcher.runtime", "view"), Modules: modules,
+		Entries: map[string]string{}, Links: map[string]string{}, NpmContexts: contexts, OptionalDeps: optional,
+	}
+	selected := map[string]string{}
+	for _, module := range modules {
+		selected[entries[module]] = module
+	}
+	inputs := map[string]bool{}
+	for _, name := range slices.Sorted(maps.Keys(entries)) {
+		source := entries[name]
+		if source != "" && !filepath.IsAbs(source) {
+			spec.Links[name] = filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(name), source)))
+			continue
+		}
+		spec.Entries[name] = source
+		if source == "" || inputs[source] {
+			continue
+		}
+		inputs[source] = true
+		input := runtimeview.Input{Path: source, Output: filepath.Join(base, "app_launcher.runtime", "files", filepath.FromSlash(name)), Kind: "file"}
+		info, err := os.Lstat(source)
+		if err != nil {
+			return err
+		}
+		switch {
+		case selected[source] != "":
+			input.Kind, input.Target = "alias", filepath.Join(spec.Root, filepath.FromSlash(selected[source]))
+		case info.Mode()&os.ModeSymlink != 0:
+			input.Kind = "symlink"
+		case info.IsDir():
+			input.Kind = "directory"
+		}
+		spec.Inputs = append(spec.Inputs, input)
+	}
+	if len(chain) > 0 {
+		destination := filepath.ToSlash(filepath.Join(cfg.Workspace, "node_modules"))
+		available := true
+		for name := range entries {
+			if name == destination || strings.HasPrefix(name, destination+"/") || strings.HasPrefix(destination, name+"/") {
+				available = false
+				break
+			}
+		}
+		if available {
+			spec.Links[destination] = chain[len(chain)-1]
+		}
+	}
+	if err := runtimeview.Build(spec); err != nil {
+		return err
+	}
+	cfg.RuntimeModules = nil
+	cfg.NativeViewAnchor = "_main/launcher_fixture/" + filepath.Base(filepath.Dir(base)) + "/" + filepath.Base(base) + "/app_launcher.json"
+	config := filepath.Join(base, "app_launcher.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(config, data, 0o644); err != nil {
+		return err
+	}
+	manifest := runfilesEnv(original.Env(), "RUNFILES_MANIFEST_FILE")
+	if manifest != "" {
+		file, err := os.OpenFile(manifest, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(file, cfg.NativeViewAnchor+" "+config)
+		closeErr := file.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		resolved, err := newResolver(runfiles.ManifestFile(manifest))
+		if err != nil {
+			return err
+		}
+		original.rf = resolved.rf
+		return nil
+	}
+	alias, err := original.Path(cfg.NativeViewAnchor)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+		return err
+	}
+	t.Cleanup(func() { _ = os.Remove(alias) })
+	return os.Symlink(config, alias)
+}
+
+func fixturePlan(t *testing.T, cfg *Config, r *Resolver, entries map[string]string, args []string, shard Shard, contexts ...NpmContext) (*Plan, error) {
+	t.Helper()
+	if err := fixtureNativeView(t, cfg, r, entries, contexts...); err != nil {
+		return nil, err
+	}
+	return MakePlan(cfg, r, args, shard)
 }

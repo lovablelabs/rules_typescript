@@ -1,0 +1,6 @@
+{
+  "name": "config-importer-worker",
+  "main": "../../../workers_nested/src/environment.ts",
+  "compatibility_date": "2026-01-01",
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }]
+}

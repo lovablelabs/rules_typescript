@@ -105,6 +105,7 @@ type actionConfig struct {
 	isolatedDeclarations                  bool
 	libCheck                              bool
 	sourceOnly                            bool
+	javaScriptInputs                      bool
 }
 
 type stringList []string
@@ -140,6 +141,7 @@ func writeTsconfig(args []string) error {
 	flags.BoolVar(&a.isolatedDeclarations, "isolated_declarations", false, "oxc emits the declarations, so every export must be annotated")
 	flags.BoolVar(&a.sourceOnly, "source_only", false, "the program publishes sources without emitting JavaScript")
 	flags.BoolVar(&a.libCheck, "lib_check", false, "check the program's .d.ts closure too")
+	flags.BoolVar(&a.javaScriptInputs, "javascript_inputs", false, "a source-mode dependency publishes JavaScript the program reads")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -309,15 +311,30 @@ func (a *actionConfig) build(effective *effectiveOptions, roots []string,
 	}
 
 	files, include, exclude := a.chainRoots(chain, dir)
+	projectSpec := func(spec string) string {
+		if path.IsAbs(spec) {
+			return spec
+		}
+		return fileRelative(dir, compilerPath(path.Join(dir, spec)))
+	}
+	project := func(specs []string) {
+		for i, spec := range specs {
+			specs[i] = projectSpec(spec)
+		}
+	}
+	project(files)
+	project(include)
+	project(exclude)
+	project(typesRoots)
 	named := make(map[string]bool, len(roots))
 	for _, p := range roots {
-		named[path.Clean(p)] = true
+		named[path.Clean(projectSpec(p))] = true
 	}
 	// tsc drops the lower-priority extension of a pair -- an .mjs beside its
 	// .d.mts -- from what include names, never from files.
 	src := make(map[string]bool, len(a.srcs))
 	for _, s := range a.srcs {
-		rel := fileRelative(dir, s)
+		rel := fileRelative(dir, compilerPath(s))
 		src[path.Clean(rel)] = true
 		if !named[path.Clean(rel)] {
 			include = append(include, rel)
@@ -399,6 +416,9 @@ func (a *actionConfig) hasTsxSrc() bool {
 // A JavaScript src sets allowJs; without it a pattern skips the file and a
 // root entry for it is TS6504.
 func (a *actionConfig) hasJavaScriptSrc() bool {
+	if a.javaScriptInputs {
+		return true
+	}
 	for _, src := range a.srcs {
 		if isJavaScript(src) {
 			return true
@@ -429,7 +449,7 @@ func (a *actionConfig) paths(chain *tsconfig.Resolved, dir string) map[string][]
 				rewritten = append(rewritten, value)
 				continue
 			}
-			target := path.Join(chain.PathsDir, value)
+			target := compilerPath(path.Join(chain.PathsDir, value))
 			rewritten = append(rewritten,
 				explicitlyRelative(relativePath(dir, target)),
 				explicitlyRelative(relativePath(dir, path.Join(a.binDir, target))))

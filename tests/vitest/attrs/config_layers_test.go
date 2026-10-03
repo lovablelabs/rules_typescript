@@ -20,23 +20,21 @@ func TestTheGeneratedConfigLayersBazelUserProviderAndSnapshots(t *testing.T) {
 		`const providerLayer = { test: { coverage: { provider: "v8" } } };`,
 		`merge(merge(merge(bazelLayer, user), providerLayer), snapshotLayer)`,
 		`const merged = withCompiledRun(merge(`,
-		`withCompiledRun(merge(bazelLayer, p)) : p,`,
+		`withCompiledRun(merge(bazelLayer, p), merged.root, user.root == null) : p,`,
 	)
 	config.Excludes(
 		"attrLayer", "environment:", "setupFiles: [abs(", "globals: true",
 	)
 }
 
-// The run is one pattern over the root, not the list of the compiled test
-// files, so vitest collects it by one crawl whatever the count of files.
-func TestTheGeneratedConfigCollectsTheRunByOnePattern(t *testing.T) {
+func TestTheGeneratedConfigDoesNotListIndividualTestFiles(t *testing.T) {
 	tree := verify.New(t)
 
 	config := tree.File("tests/vitest/attrs/_attrs_test.vitest/config.mjs")
 	config.Contains(
-		`const INCLUDE = ["**/*.{test,spec}.{js,jsx,mjs,cjs}"];`,
+		`const INCLUDE = ["**/*.{test,spec}.ts"];`,
 		`const BIN_PROBE = "tests/vitest/attrs/attrs.test.js";`,
-		`include: INCLUDE,`,
+		`INCLUDE.map((pattern) => '../'.repeat(level) + pattern)).flat(),`,
 	)
 	config.Excludes(
 		`"attrs.test.js"]`, "for (const f of INCLUDE)",
@@ -51,6 +49,6 @@ func TestTheGeneratedConfigWalksTheStagedRoot(t *testing.T) {
 	config := tree.File("tests/vitest/attrs/_attrs_test.vitest/config.mjs")
 	config.Contains(
 		`const FILES_ROOT = process.env.TS_TEST_FILES_ROOT;`,
-		`dir: resolve(FILES_ROOT, relative(RUNFILES_ROOT, root)),`,
+		`const dir = resolve(DISCOVERY_ROOT, relative(RUNFILES_ROOT, root));`,
 	)
 }

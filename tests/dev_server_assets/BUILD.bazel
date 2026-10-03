@@ -1,0 +1,11 @@
+package(default_visibility = [
+    "//tests/dev_server:__pkg__",
+    "//tests/dev_server/lib:__pkg__",
+])
+
+exports_files([
+    "helper.mjs",
+    "nested.css",
+    "payload.svg",
+    "style.css",
+])

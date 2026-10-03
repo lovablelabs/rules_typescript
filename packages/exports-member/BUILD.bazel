@@ -6,10 +6,8 @@ load("@rules_typescript//ts:defs.bzl", "ts_compile")
 # keep
 ts_compile(
     name = "exports-member",
-    srcs = [
-        "package.json",
-        "src/index.ts",
-    ],
+    srcs = ["src/index.ts"],
     emit = True,  # keep
+    package_scopes = ["package.json"],
     visibility = ["//visibility:public"],
 )
