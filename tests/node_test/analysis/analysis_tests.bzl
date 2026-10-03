@@ -137,8 +137,10 @@ def _selected_runtime_roots_impl(ctx):
                     path = rlocation_path(ctx, runtime)
                     asserts.true(env, runtime in inputs, "native materializer consumes the selected File: " + source.short_path)
                     asserts.equals(env, runtime.path, spec["entries"].get(path), "native materializer retains exact admitted File provenance")
-                    output = outputs.get(spec["root"] + "/" + path)
-                    asserts.true(env, output != None and not output.is_directory and not output.is_symlink, "selected module has one declared regular runtime output")
+                    view_path = spec["root"] + "/" + path
+                    output = outputs.get(view_path)
+                    trees = [tree for tree in outputs.values() if tree.is_directory and view_path.startswith(tree.path + "/")]
+                    asserts.true(env, (output != None and not output.is_directory and not output.is_symlink) or (output == None and len(trees) == 1), "selected module has one declared regular runtime output or link-free tree")
         for path in actual + [rlocation_path(ctx, published[file]) for file in ctx.files.runtime_companions]:
             asserts.true(env, path in modules, "selected roots and imported JSON retain their staged identities: " + path)
 
@@ -217,7 +219,7 @@ def _native_runfiles_mapping_impl(ctx):
         if retained:
             asserts.equals(env, retained[0].path, spec["entries"].get(runtime), "view lookup retains declared runtime bytes through the same native materializer")
             inputs = [item for item in spec["inputs"] if item["path"] == retained[0].path]
-            asserts.equals(env, ["file"], [item["kind"] for item in inputs], "the runtime authority relocates with the application view")
+            asserts.equals(env, [("placed", spec["root"] + "/" + runtime)], [(item["kind"], item.get("target")) for item in inputs], "the runtime authority relocates with the application view")
         if config["mode"] == "node_test":
             checks = [action for action in actions if action.mnemonic == "TsgoCheck"]
             asserts.equals(env, 1, len(checks), "one private program owns test validation")

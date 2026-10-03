@@ -52,7 +52,7 @@ def tsconfig_action(
         isolated_declarations,
         lib_check,
         emit = True,
-        declaration_paths = []):
+        declaration_paths = ([], None)):
     """Writes <name>.tsconfig.json and <name>.options.json from the chain.
 
     Returns struct(tsconfig, options).
@@ -92,7 +92,7 @@ def tsconfig_action(
             config_args.add(file, format = "-type_input=%s")
         else:
             retained_types.append(file)
-    config_args.add_all(declaration_paths, format_each = "-type_input=%s")
+    config_args.add_all(declaration_paths[0], map_each = declaration_paths[1], format_each = "-type_input=%s")
 
     # A source-mode dependency's JavaScript is typed from its source only under allowJs (TS7016 otherwise).
     if [file for file in retained_types if file.is_source and file.extension in ["js", "jsx", "mjs", "cjs"]]:

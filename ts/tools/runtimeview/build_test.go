@@ -72,6 +72,123 @@ func TestBuildRetainsCanonicalAliasesWithoutInferringRegularFileProvenance(t *te
 	}
 }
 
+func TestBuildOutputlessAliasEntryLinksDirectlyToItsCanonicalModule(t *testing.T) {
+	inputs, output := t.TempDir(), t.TempDir()
+	source := writeInput(t, inputs, "source/main.js", "export const singleton = {};\n")
+	root := filepath.Join(output, "view")
+	canonical := filepath.Join(root, "_main/main.js")
+	spec := Spec{Root: root, Modules: []string{"_main/main.js"}, Inputs: []Input{
+		{Path: source, Kind: "alias", Target: canonical},
+	}, Entries: map[string]string{"_main/main.js": source, "_main/data.js": source}}
+	if err := Build(spec); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(filepath.Join(root, "_main/data.js")); err != nil || target != "main.js" {
+		t.Fatalf("alias entry links to %q, %v; want the canonical module main.js", target, err)
+	}
+	sameAuthority(t, canonical, filepath.Join(root, "_main/data.js"), true)
+}
+
+func TestBuildPlacedInputsMaterializeAtTheirViewPathWithoutTransportCopies(t *testing.T) {
+	inputs, output := t.TempDir(), t.TempDir()
+	data := writeInput(t, inputs, "data.txt", "data")
+	store := filepath.Join(inputs, "store")
+	writeInput(t, inputs, "store/index.js", "store")
+	link := filepath.Join(inputs, "pkg")
+	if err := os.Symlink("store", link); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(output, "view")
+	spec := Spec{Root: root, Inputs: []Input{
+		{Path: data, Kind: "placed", Form: "file", Target: filepath.Join(root, "_main/data.txt")},
+		{Path: store, Kind: "placed", Form: "directory", Target: filepath.Join(root, "_main/store")},
+		{Path: link, Kind: "placed", Form: "symlink", Target: filepath.Join(root, "_main/pkg")},
+	}, Entries: map[string]string{"_main/data.txt": data, "_main/store": store, "_main/pkg": link}}
+	if err := Build(spec); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(filepath.Join(root, "_main/data.txt")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("placed file is not a regular copy: %v, %v", info, err)
+	}
+	if info, err := os.Lstat(filepath.Join(root, "_main/store/index.js")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("placed directory is not copied in place: %v, %v", info, err)
+	}
+	if target, err := os.Readlink(filepath.Join(root, "_main/pkg")); err != nil || target != "store" {
+		t.Fatalf("placed link text = %q, %v; want store", target, err)
+	}
+	if _, err := os.Lstat(filepath.Join(output, "files")); !os.IsNotExist(err) {
+		t.Fatalf("placed inputs wrote transport copies: %v", err)
+	}
+}
+
+func TestBuildPlacedFileStagedAsSandboxLinkIsCopiedAsRegularContent(t *testing.T) {
+	inputs, output := t.TempDir(), t.TempDir()
+	artifact := writeInput(t, inputs, "execroot/main.js", "export const x = 1;\n")
+	staged := filepath.Join(inputs, "sandbox/main.js")
+	if err := os.MkdirAll(filepath.Dir(staged), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(artifact, staged); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(output, "view")
+	spec := Spec{Root: root, Inputs: []Input{
+		{Path: staged, Kind: "placed", Form: "file", Target: filepath.Join(root, "_main/main.js")},
+	}, Entries: map[string]string{"_main/main.js": staged}}
+	if err := Build(spec); err != nil {
+		t.Fatal(err)
+	}
+	placed := filepath.Join(root, "_main/main.js")
+	if info, err := os.Lstat(placed); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("sandbox-staged regular input placed as %v, %v; want a regular file", info, err)
+	}
+	if got, err := os.ReadFile(placed); err != nil || string(got) != "export const x = 1;\n" {
+		t.Fatalf("placed content = %q, %v", got, err)
+	}
+}
+
+func TestBuildLinksIntoPlacedDirectoryResolveInsideTheView(t *testing.T) {
+	inputs, output := t.TempDir(), t.TempDir()
+	store := filepath.Join(inputs, "store")
+	writeInput(t, inputs, "store/bin/cli.js", "cli")
+	shared := filepath.Join(inputs, "bin/shared")
+	absolute := filepath.Join(inputs, "bin/absolute")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../store/bin/cli.js", shared); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(store, "bin/cli.js"), absolute); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(output, "view")
+	spec := Spec{Root: root, Inputs: []Input{
+		{Path: store, Kind: "placed", Form: "directory", Target: filepath.Join(root, "_main/store")},
+		{Path: shared, Kind: "symlink", Output: filepath.Join(output, "files/bin/shared")},
+		{Path: absolute, Kind: "placed", Form: "symlink", Target: filepath.Join(root, "_main/bin/absolute")},
+	}, Entries: map[string]string{"_main/store": store, "_main/bin/shared": shared, "_main/other/shared": shared, "_main/bin/absolute": absolute}}
+	if err := Build(spec); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "_main/store/bin/cli.js")
+	for _, link := range []string{filepath.Join(output, "files/bin/shared"), filepath.Join(root, "_main/other/shared"), filepath.Join(root, "_main/bin/absolute")} {
+		sameAuthority(t, want, link, true)
+	}
+	if target, err := os.Readlink(filepath.Join(root, "_main/bin/absolute")); err != nil || filepath.IsAbs(target) {
+		t.Fatalf("absolute link into a placed directory = %q, %v; want a relative link inside the view", target, err)
+	}
+}
+
+func TestBuildRejectsNonAliasInputWithoutDeclaredOutput(t *testing.T) {
+	inputs, output := t.TempDir(), t.TempDir()
+	source := writeInput(t, inputs, "data.txt", "opaque")
+	spec := Spec{Root: filepath.Join(output, "view"), Inputs: []Input{{Path: source, Kind: "file"}}, Entries: map[string]string{"_main/data.txt": source}}
+	if err := Build(spec); err == nil || !strings.Contains(err.Error(), "no declared output") {
+		t.Fatalf("output-less file input accepted: %v", err)
+	}
+}
+
 func TestBuildDeclaredLinksAndOpaqueDataSurviveCompleteRelocation(t *testing.T) {
 	inputs, construction := t.TempDir(), t.TempDir()
 	asset := writeInput(t, inputs, "transport/asset.txt", "opaque asset")

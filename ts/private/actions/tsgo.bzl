@@ -101,9 +101,13 @@ def program_args(
     compiler_sources(args, srcs, chain, dep_dts, generated_srcs)
     args.add_all(importers, format_each = "-node_modules=%s")
     args.add_all(inherited_importers, format_each = "-inherit_node_modules=%s")
-    args.add_all(overlays, format_each = "-overlay=%s")
+    add_overlays(args, overlays)
     args.add_all(manifests, format_each = "-manifest=%s")
     return args
+
+def add_overlays(args, overlays):
+    for values, map_each in overlays:
+        args.add_all(values, map_each = map_each, format_each = "-overlay=%s")
 
 def program_inputs(tsconfig, srcs, chain, dep_dts, npm_files, extra = [], tool_files = depset()):
     return depset(
