@@ -19,6 +19,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            repository-cache: |
+              - "**/MODULE.bazel"
+              - "**/pnpm-lock.yaml"
+              - "**/Cargo.lock"
+              - .bazelversion
+          # Both OS repository caches with both disk caches exceed GitHub's 10 GB.
+          - os: macos-latest
+            repository-cache: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'macos-latest' && 75 || 60 }}
     steps:
@@ -34,14 +44,12 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          repository-cache: |
-            - "**/MODULE.bazel"
-            - "**/pnpm-lock.yaml"
-            - "**/Cargo.lock"
-            - .bazelversion
+          repository-cache: ${{ matrix.repository-cache }}
           # Only the source-test lane saves this OS cache; smaller consumers
           # must not reserve its immutable key before the native build finishes.
           disk-cache: shared-ci
+          # PRs restore main's caches; saving per PR evicts them under the 10 GB cap.
+          cache-save: ${{ github.event_name == 'push' }}
 
       # `bazel test //...` and a byte-identical Gazelle rerun are both satisfied
       # by a Gazelle run that deletes a test target, so neither notices a
