@@ -10,7 +10,10 @@ ts_compile(
     node_modules = "//:node_modules",
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
-    deps = ["@npm//:zod"],
+    deps = [
+        "//:root",
+        "@npm//:zod",
+    ],
 )
 
 ts_test(

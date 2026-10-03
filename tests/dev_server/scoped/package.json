@@ -1,0 +1,25 @@
+{
+  "name": "@fixture/declared-scope",
+  "type": "module",
+  "exports": {
+    "./self-helper": {
+      "types": "./self-helper.ts",
+      "browser": {
+        "development": "./self-helper.js",
+        "default": "./wrong-condition.ts"
+      },
+      "default": "./wrong-condition.ts"
+    }
+  },
+  "imports": {
+    "#helper": "./helper.mjs",
+    "#generated-helper": {
+      "types": "./generated-helper.ts",
+      "browser": {
+        "development": "./generated-helper.js",
+        "default": "./wrong-condition.ts"
+      },
+      "default": "./wrong-condition.ts"
+    }
+  }
+}

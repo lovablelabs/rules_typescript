@@ -244,6 +244,33 @@ func mkdir(t *testing.T, dir string) {
 	}
 }
 
+// copyResolved copies a tree as regular files: a sandbox stages runfiles as
+// per-file symlinks (darwin-sandbox), which a real bazel-bin never contains.
+func copyResolved(t *testing.T, dst, src string) {
+	t.Helper()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	mkdir(t, dst)
+	for _, entry := range entries {
+		from, to := filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())
+		info, err := os.Stat(from)
+		if err != nil {
+			t.Fatalf("stat %s: %v", from, err)
+		}
+		if info.IsDir() {
+			copyResolved(t, to, from)
+			continue
+		}
+		content, err := os.ReadFile(from)
+		if err != nil {
+			t.Fatalf("read %s: %v", from, err)
+		}
+		write(t, to, string(content))
+	}
+}
+
 func write(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

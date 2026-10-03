@@ -1,0 +1,20 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "runtimeview",
+    srcs = [
+        "build.go",
+        "stage.go",
+    ],
+    importpath = "github.com/mikn/rules_typescript/ts/tools/runtimeview",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "runtimeview_test",
+    srcs = [
+        "build_test.go",
+        "symlinked_tmp_test.go",
+    ],
+    embed = [":runtimeview"],
+)

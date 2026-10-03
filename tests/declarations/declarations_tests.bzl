@@ -3,6 +3,7 @@ TsInfo.declarations, never a default output: a leaf runs TsgoCheck alone,
 TsgoDeclare runs when a dependent's compile reads the .d.ts."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("//tests:runnable_actions.bzl", "runnable_action_aspect", "runnable_actions")
 load("//ts:defs.bzl", "TsInfo")
 
 _PKG = "tests/declarations/"
@@ -10,16 +11,11 @@ _PKG = "tests/declarations/"
 def _rel(f):
     return f.path[f.path.find(_PKG) + len(_PKG):]
 
-def _action(env, mnemonic):
-    for action in analysistest.target_actions(env):
+def _action(env, mnemonic, actions = None):
+    for action in actions if actions != None else analysistest.target_actions(env):
         if action.mnemonic == mnemonic:
             return action
     return None
-
-def _value_after(argv, flag):
-    if flag not in argv:
-        return None
-    return argv[argv.index(flag) + 1]
 
 def _leaf_declares_on_demand_impl(ctx):
     env = analysistest.begin(ctx)
@@ -79,25 +75,14 @@ def _leaf_declares_on_demand_impl(ctx):
             [_rel(f) for f in declare.outputs.to_list()],
             "the declare's outputs are the declarations",
         )
-        for flag in [
-            "--declaration",
-            "--emitDeclarationOnly",
-            "--noEmitOnError",
-        ]:
-            asserts.true(env, flag in argv, "the declare passes " + flag)
-        asserts.equals(env, "false", _value_after(argv, "--noEmit"), "--noEmit")
-        out_dir = _value_after(argv, "--outDir") or ""
-        asserts.true(
-            env,
-            out_dir.endswith("/tests/declarations"),
-            "--outDir is the package's bin directory: " + out_dir,
-        )
-        asserts.equals(
-            env,
-            "tests/declarations",
-            _value_after(argv, "--rootDir"),
-            "--rootDir",
-        )
+        asserts.true(env, "emit" in argv and "-declarations_only" in argv, "the declaration action requests the checked tsgo program")
+        asserts.equals(env, 1, len([arg for arg in argv if arg.startswith("-tsgo=")]), "one tsgo compiler")
+        asserts.equals(env, [], [arg for arg in argv if arg.startswith("-oxc=") or arg == "-declarations"], "no isolated declaration backend")
+        out_dirs = [arg for arg in argv if arg.startswith("-out_dir=")]
+        asserts.equals(env, 1, len(out_dirs), "one output directory")
+        if out_dirs:
+            asserts.true(env, out_dirs[0].endswith("/tests/declarations"), "declarations stay in the package output directory")
+        asserts.equals(env, ["-root=tests/declarations"], [arg for arg in argv if arg.startswith("-root=")], "single-package source root")
         asserts.true(env, "--explainFiles" not in argv, "no listing")
         asserts.equals(
             env,
@@ -141,4 +126,33 @@ check_reads_the_dep_declarations_test = analysistest.make(
             doc = "The ts_compile the target under test depends on.",
         ),
     },
+)
+
+def _compiler_inputs_remain_type_only_impl(ctx):
+    env = analysistest.begin(ctx)
+    target = analysistest.target_under_test(env)
+    actions = runnable_actions(env)
+    for extra in ctx.files.compiler_inputs:
+        for mnemonic in ["TsConfig", "TsgoCheck"]:
+            action = _action(env, mnemonic, actions)
+            asserts.true(env, action != None, mnemonic + " exists")
+            if action != None:
+                asserts.true(env, extra in action.inputs.to_list(), mnemonic + " retains compiler metadata")
+                if mnemonic == "TsConfig":
+                    asserts.true(env, extra.path not in action.argv, "metadata is not an explicit source root")
+        if TsInfo in target:
+            declare = _action(env, "TsgoDeclare", actions)
+            asserts.true(env, declare != None, "emitted declarations retain compiler inputs")
+            if declare != None:
+                asserts.true(env, extra in declare.inputs.to_list(), "declaration emit retains compiler metadata")
+            info = target[TsInfo]
+            for files in [info.data, info.transitive_data, info.js, info.declarations, info.sources]:
+                asserts.true(env, extra not in files.to_list(), "compiler metadata acquired a runtime, declaration or source-root role")
+        asserts.true(env, extra not in target[DefaultInfo].files.to_list(), "compiler metadata became a default output")
+    return analysistest.end(env)
+
+compiler_inputs_remain_type_only_test = analysistest.make(
+    _compiler_inputs_remain_type_only_impl,
+    attrs = {"compiler_inputs": attr.label_list(allow_files = True)},
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )

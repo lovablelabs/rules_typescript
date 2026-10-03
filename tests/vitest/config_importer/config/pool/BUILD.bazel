@@ -1,0 +1,12 @@
+load("//npm:defs.bzl", "node_modules")
+
+package(default_visibility = ["//tests/vitest/config_importer/test:__pkg__"])
+
+exports_files(["setup.mjs"])
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/workers:node_modules",
+    deps = ["@npm_workers//:cloudflare_vitest-pool-workers"],
+)

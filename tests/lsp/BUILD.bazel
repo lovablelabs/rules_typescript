@@ -66,13 +66,12 @@ sh_test(
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 
-# The fragment closure of a public target, which is where the private one's
-# fragment comes from. Naming //tests/lsp/fragment_fixture:leaf here instead is
-# the visibility error this whole mechanism exists to avoid.
+# An analysis test cannot write fragments; its compiler dependencies retain
+# their original fragments, including the private leaf.
 fragment_files(
     name = "fixture_fragments",
     testonly = True,
-    dep = "//tests/lsp/fragment_fixture:root",
+    dep = ":fragments_reach_private_test",
 )
 
 sh_test(
@@ -90,6 +89,7 @@ sh_test(
 
 fragments_reach_private_test(
     name = "fragments_reach_private_test",
+    member = "//tests/lsp/fragment_fixture:root",
     target_under_test = "//tests/lsp/fragment_fixture:root",
 )
 

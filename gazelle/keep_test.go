@@ -1,19 +1,15 @@
 package typescript
 
-// The other half of TestHandAuthoredAttrValue: a value on a managed attribute
-// that is not a plain string or a plain list of them, which is the only shape
-// rule.MergeRules reconciles rather than rewrites. Gazelle-for-Go replaces the
-// rest, so this extension does too -- what it asserts is that the replacement
-// is announced and that "# keep" holds the expression.
-
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
 )
@@ -28,6 +24,7 @@ type nonLiteralCase struct {
 	target    string
 	attr      string
 	class     string // "list" or "scalar"
+	consumer  string
 }
 
 // managedAttrCases names every attribute in keep.go's managedAttrs, in a
@@ -39,8 +36,13 @@ func managedAttrCases() []nonLiteralCase {
 		return nonLiteralCase{workspace: workspace, pkg: pkg, kind: kind,
 			target: target, attr: attr, class: class}
 	}
+	consumedBy := func(c nonLiteralCase, consumer string) nonLiteralCase {
+		c.consumer = consumer
+		return c
+	}
 	cases := []nonLiteralCase{
-		managed("plain", "src", "ts_compile", "src", "srcs", "list"),
+		consumedBy(managed("plain", "src", "ts_compile", "src", "srcs", "list"), "//src:src_test"),
+		managed("plain", "shared", "ts_compile", "shared", "package_scopes", "list"),
 		managed("plain", "src", "ts_compile", "src", "deps", "list"),
 		managed("plain", "src", "ts_compile", "src", "visibility", "list"),
 		managed("plain", "src", "ts_compile", "src", "tsconfig", "scalar"),
@@ -71,7 +73,7 @@ func managedAttrCases() []nonLiteralCase {
 		managed("pnpm_member", "", "node_modules_member", "node_modules/@w/core",
 			"visibility", "list"),
 
-		managed("worker", "worker", "filegroup", "vitest_config", "srcs", "list"),
+		consumedBy(managed("worker", "worker", "filegroup", "vitest_config", "srcs", "list"), "//worker/test:test_test"),
 		managed("worker", "worker", "filegroup", "vitest_config", "visibility",
 			"list"),
 	}
@@ -94,13 +96,6 @@ var nonLiteralShapes = map[string][]string{
 	"scalar": {"ident"},
 }
 
-// TestNonLiteralAttrValue: whichever way rule.MergeRules goes on a shape it
-// cannot reconcile -- an Ident it replaces with the contents lost, a
-// "list + list" it refuses and leaves alone -- the run says the attribute is no
-// longer Gazelle's to maintain, and "# keep" holds it. Which of the two it
-// picks is Gazelle's business, the same as it is for Go; doing either in
-// silence is the defect, because the user is left believing a value they wrote
-// is still declared.
 func TestNonLiteralAttrValue(t *testing.T) {
 	fixtures := map[string]convergeCase{}
 	for _, tc := range convergeCases() {
@@ -132,88 +127,163 @@ func runNonLiteralCase(t *testing.T, tc convergeCase, nc nonLiteralCase, shape s
 	}
 	writeWorkspace(t, root, files)
 	captureLog(t, func() { convergeGazelle(t, root) })
+	builds := buildFileBytes(t, root)
 
 	authored := writeNonLiteralAttr(t, root, nc, shape, false)
 	buildPath := filepath.Join(root, filepath.FromSlash(nc.pkg), "BUILD.bazel")
 
-	logged := captureLog(t, func() { convergeGazelle(t, root) })
-	text := buildFileText(t, root, nc.pkg)
-
-	if declaredAttrExpr(t, root, nc) == nil {
-		t.Fatalf("%s(%s).%s is gone after the merge: the attribute was deleted rather than "+
-			"replaced or left alone, so nothing declares the inputs it named.\n%s",
-			nc.kind, nc.target, nc.attr, indent(text))
-	}
-	if !rewriteReported(logged, buildPath, nc) {
-		t.Fatalf("%s(%s).%s held a %s expression the merger cannot reconcile and the run said "+
-			"nothing -- it has to name the file, the rule, the attribute and \"# keep\". "+
-			"Whether Gazelle replaced the value or stopped maintaining it, the user is left "+
-			"believing it is still recomputed.\n%s\nthe run said:\n%s",
-			nc.kind, nc.target, nc.attr, shape, indent(text), indentLog(logged))
-	}
-	if missing := missingFrom(declaredStrings(t, root, nc.pkg), authored.values); len(missing) > 0 &&
-		exprShape(declaredAttrExpr(t, root, nc)) == shape {
-		t.Fatalf("%s(%s).%s kept its %s shape but lost %v: a value vanished out of an expression "+
-			"the merge reported it would leave alone.\n%s\nthe run said:\n%s",
-			nc.kind, nc.target, nc.attr, shape, missing, indent(text), indentLog(logged))
-	}
-
-	// The report has to track what is actually in the file: repeated on a shape
-	// Gazelle left alone, silent once the value is Gazelle's own. A warning that
-	// outlives its cause is one the user learns to skip.
-	logged = captureLog(t, func() { convergeGazelle(t, root) })
-	stillUnmergeable := !isLiteralAttrValue(declaredAttrExpr(t, root, nc))
-	if got := rewriteReported(logged, buildPath, nc); got != stillUnmergeable {
-		t.Fatalf("%s(%s).%s is %s after the merge and the next run reported it: %v. The "+
-			"diagnostic and the file disagree.\n%s\nthe run said:\n%s",
-			nc.kind, nc.target, nc.attr, exprShape(declaredAttrExpr(t, root, nc)), got,
-			indent(buildFileText(t, root, nc.pkg)), indentLog(logged))
-	}
-
-	// "# keep" is what the diagnostic tells the user to reach for, so it has to
-	// hold every shape, whichever way the merger would have gone.
-	assertKeepHoldsExpr(t, tc, nc, shape)
-}
-
-// assertKeepHoldsExpr: the same shape, marked, across two runs and in silence.
-func assertKeepHoldsExpr(t *testing.T, tc convergeCase, nc nonLiteralCase, shape string) {
-	t.Helper()
-
-	root := t.TempDir()
-	files := map[string]string{}
-	for rel, body := range tc.files {
-		files[rel] = body
-	}
-	for rel, body := range nc.extra {
-		files[rel] = body
-	}
-	writeWorkspace(t, root, files)
-	captureLog(t, func() { convergeGazelle(t, root) })
-
-	authored := writeNonLiteralAttr(t, root, nc, shape, true)
-	buildPath := filepath.Join(root, filepath.FromSlash(nc.pkg), "BUILD.bazel")
-
-	for run := 2; run <= 3; run++ {
+	if nc.attr == "srcs" && (nc.kind == "ts_compile" || nc.kind == "ts_test") && shape == "concat" {
+		assertUnknownInputsRefused(t, root, nc, label.New("", nc.pkg, nc.target).String())
+	} else {
 		logged := captureLog(t, func() { convergeGazelle(t, root) })
 		text := buildFileText(t, root, nc.pkg)
-		if got := exprShape(declaredAttrExpr(t, root, nc)); got != shape {
-			t.Fatalf("%s(%s).%s carries \"# keep\" and was authored as %s, but is %s after run "+
-				"%d. \"# keep\" above the attribute is the one thing the rewrite diagnostic "+
-				"tells the user to do, so it has to work on every shape.\n%s\nthe run "+
-				"said:\n%s", nc.kind, nc.target, nc.attr, shape, got, run, indent(text),
-				indentLog(logged))
+
+		if declaredAttrExpr(t, root, nc) == nil {
+			t.Fatalf("%s(%s).%s is gone after the merge: the attribute was deleted rather than "+
+				"replaced or left alone, so nothing declares the inputs it named.\n%s",
+				nc.kind, nc.target, nc.attr, indent(text))
 		}
-		if missing := missingFrom(declaredStrings(t, root, nc.pkg), authored.values); len(missing) > 0 {
-			t.Fatalf("%s(%s).%s carries \"# keep\" and lost %v on run %d.\n%s\nthe run "+
-				"said:\n%s", nc.kind, nc.target, nc.attr, missing, run, indent(text),
-				indentLog(logged))
+		if !rewriteReported(logged, buildPath, nc) {
+			t.Fatalf("%s(%s).%s held a %s expression the merger cannot reconcile and the run said "+
+				"nothing -- it has to name the file, the rule, the attribute and \"# keep\". "+
+				"Whether Gazelle replaced the value or stopped maintaining it, the user is left "+
+				"believing it is still recomputed.\n%s\nthe run said:\n%s",
+				nc.kind, nc.target, nc.attr, shape, indent(text), indentLog(logged))
 		}
-		if rewriteReported(logged, buildPath, nc) {
-			t.Fatalf("%s(%s).%s carries \"# keep\", so Gazelle is not maintaining it and has "+
-				"nothing to announce, yet run %d reported a rewrite. Advice that keeps warning "+
-				"after it is followed reads as advice that did not work.\nthe run said:\n%s",
-				nc.kind, nc.target, nc.attr, run, indentLog(logged))
+		if missing := missingFrom(declaredStrings(t, root, nc.pkg), authored.values); len(missing) > 0 &&
+			exprShape(declaredAttrExpr(t, root, nc)) == shape {
+			t.Fatalf("%s(%s).%s kept its %s shape but lost %v: a value vanished out of an expression "+
+				"the merge reported it would leave alone.\n%s\nthe run said:\n%s",
+				nc.kind, nc.target, nc.attr, shape, missing, indent(text), indentLog(logged))
 		}
+
+		logged = captureLog(t, func() { convergeGazelle(t, root) })
+		stillUnmergeable := !isLiteralAttrValue(declaredAttrExpr(t, root, nc))
+		if got := rewriteReported(logged, buildPath, nc); got != stillUnmergeable {
+			t.Fatalf("%s(%s).%s is %s after the merge and the next run reported it: %v. The "+
+				"diagnostic and the file disagree.\n%s\nthe run said:\n%s",
+				nc.kind, nc.target, nc.attr, exprShape(declaredAttrExpr(t, root, nc)), got,
+				indent(buildFileText(t, root, nc.pkg)), indentLog(logged))
+		}
+	}
+
+	keptRoot := t.TempDir()
+	for rel := range files {
+		if name := filepath.Base(rel); name == "BUILD" || name == "BUILD.bazel" {
+			delete(files, rel)
+		}
+	}
+	maps.Copy(files, builds)
+	writeWorkspace(t, keptRoot, files)
+	if got := buildFileBytes(t, keptRoot); !maps.Equal(got, builds) {
+		t.Fatalf("kept fixture BUILD paths or bytes differ from initial generation:\nwant: %v\ngot: %v", builds, got)
+	}
+	assertKeepHoldsExpr(t, keptRoot, nc, shape)
+}
+
+func assertKeepHoldsExpr(t *testing.T, root string, nc nonLiteralCase, shape string) {
+	t.Helper()
+
+	authored := writeNonLiteralAttr(t, root, nc, shape, true)
+	expression := bzl.FormatString(declaredAttrExpr(t, root, nc))
+	buildPath := filepath.Join(root, filepath.FromSlash(nc.pkg), "BUILD.bazel")
+	builds := buildFileBytes(t, root)
+	ownerships := []string{"attribute"}
+	if (nc.kind == "ts_compile" || nc.kind == "ts_test") && (nc.attr == "srcs" || nc.attr == "package_scopes" || nc.attr == "tsconfig" || nc.attr == "config") {
+		ownerships = append(ownerships, "rule", "ignored")
+	}
+	for _, ownership := range ownerships {
+		writeWorkspace(t, root, builds)
+		if ownership == "rule" {
+			keepFixtureRule(t, root, label.New("", nc.pkg, nc.target).String())
+		} else if ownership == "ignored" {
+			writeFile(t, buildPath, "# gazelle:ignore\n"+buildFileText(t, root, nc.pkg))
+		}
+		consumer := ""
+		if ownership == "attribute" && len(ownerships) > 1 && (nc.attr == "srcs" || shape != "mixed") {
+			consumer = label.New("", nc.pkg, nc.target).String()
+		} else if ownership != "ignored" {
+			consumer = nc.consumer
+		}
+		if consumer != "" {
+			assertUnknownInputsRefused(t, root, nc, consumer)
+			if consumer == label.New("", nc.pkg, nc.target).String() {
+				continue
+			}
+			keepFixtureRule(t, root, consumer)
+		}
+		for _, pass := range []string{"initial", "repeated"} {
+			logged := captureLog(t, func() { convergeGazelle(t, root) })
+			text := buildFileText(t, root, nc.pkg)
+			if got := bzl.FormatString(declaredAttrExpr(t, root, nc)); got != expression {
+				t.Fatalf("%s ownership changed the kept expression on %s run:\nwant: %s\ngot: %s", ownership, pass, expression, got)
+			}
+			if got := exprShape(declaredAttrExpr(t, root, nc)); got != shape {
+				t.Fatalf("%s ownership changed %s(%s).%s from %s to %s on %s run:\n%s\n%s",
+					ownership, nc.kind, nc.target, nc.attr, shape, got, pass, indent(text), indentLog(logged))
+			}
+			if missing := missingFrom(declaredStrings(t, root, nc.pkg), authored.values); len(missing) > 0 {
+				t.Fatalf("%s ownership lost %v from %s(%s).%s on %s run:\n%s\n%s",
+					ownership, missing, nc.kind, nc.target, nc.attr, pass, indent(text), indentLog(logged))
+			}
+			if rewriteReported(logged, buildPath, nc) {
+				t.Fatalf("%s ownership still reported a rewrite of %s(%s).%s on %s run:\n%s",
+					ownership, nc.kind, nc.target, nc.attr, pass, indentLog(logged))
+			}
+		}
+	}
+}
+
+func keepFixtureRule(t *testing.T, root, target string) {
+	t.Helper()
+	consumer, err := label.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildPath := filepath.Join(root, filepath.FromSlash(consumer.Pkg), "BUILD.bazel")
+	file, err := rule.LoadFile(buildPath, consumer.Pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range file.Rules {
+		if r.Name() == consumer.Name {
+			r.AddComment("# keep")
+			writeFile(t, buildPath, string(file.Format()))
+			return
+		}
+	}
+	t.Fatalf("fixture has no rule %s to keep", target)
+}
+
+func assertUnknownInputsRefused(t *testing.T, root string, nc nonLiteralCase, consumer string) {
+	t.Helper()
+	before := buildFileBytes(t, root)
+	output, err := protoGazelle(t, root)
+	if err == nil {
+		t.Fatalf("opaque %s(%s).%s allowed automatic closure:\n%s", nc.kind, nc.target, nc.attr, output)
+	}
+	owner := label.New("", nc.pkg, nc.target).String()
+	facts := []string{consumer + " cannot discover its compiler closure", owner + " has unsupported srcs membership", "explicit source-file labels", "keep the whole rule or ignore its package"}
+	if nc.attr == "tsconfig" {
+		facts = []string{consumer + " cannot discover its compiler closure", `selected tsconfig ""`, "authored, readable compiler configuration", "keep the whole rule or ignore its package"}
+	}
+	if nc.attr == "package_scopes" {
+		facts = []string{consumer + " requires package scope package.json", "kept package_scopes omit it", "deps do not supply its runtime scope input", "retain the scope or supply it through a compiler dependency"}
+	}
+	if nc.attr == "config" || nc.kind == "filegroup" && nc.attr == "srcs" {
+		reason := "config is an expression"
+		if nc.kind == "filegroup" {
+			reason = owner + " has expression-valued srcs"
+		}
+		facts = []string{consumer + " cannot establish its selected config root", reason, "refusing to regenerate config runtime inputs", "keep the whole ts_test rule and maintain its runtime inputs manually"}
+	}
+	for _, fact := range facts {
+		if !strings.Contains(output, fact) {
+			t.Errorf("opaque %s(%s).%s refusal lacks %q:\n%s", nc.kind, nc.target, nc.attr, fact, output)
+		}
+	}
+	if diff := snapshotDiff(before, buildFileBytes(t, root)); diff != "" {
+		t.Fatalf("unsupported %s(%s).%s changed BUILD files: %s", nc.kind, nc.target, nc.attr, diff)
 	}
 }
 
@@ -315,9 +385,11 @@ func writeNonLiteralAttr(t *testing.T, root string, nc nonLiteralCase, shape str
 	if prelude != "" {
 		body = prelude + "\n\n" + body
 	}
-	if err := os.WriteFile(buildPath, []byte(body), 0o644); err != nil {
+	file, err := rule.LoadData(buildPath, nc.pkg, []byte(body))
+	if err != nil {
 		t.Fatal(err)
 	}
+	writeFile(t, buildPath, string(file.Format()))
 	return authoredExpr{values: values}
 }
 

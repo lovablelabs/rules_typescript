@@ -1,0 +1,14 @@
+load("//ts:defs.bzl", "ts_test")
+
+# Failed analysis in gazelle_roundtrip_roots_test: owned/package.json shadows the moved marker's own scope.
+ts_test(
+    name = "consumer_test",
+    srcs = ["consumer.test.ts"],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    deps = [
+        "//tests/vitest/ancestor_scope:scope",
+        "//tests/vitest/ancestor_scope/roots/owned:canonical",
+        "@npm//:vitest",
+    ],
+)

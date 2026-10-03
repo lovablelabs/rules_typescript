@@ -35,10 +35,13 @@ cd "${BUILD_WORKSPACE_DIRECTORY:-$(git rev-parse --show-toplevel)}"
 # that is the intended outcome rather than an accident.
 MANUAL_ONLY=$(
   cat <<'ALLOWLIST'
-# Analysis-only fixture. Its ts_test target is asserted to FAIL at analysis --
-# it sets vitest attrs under runner = "//ts/runners:node_test" -- so a target
-# that ran would report a red test for the intended outcome.
-tests/node_test/analysis/attrs.test.ts
+# Analysis-only fixtures. Each ts_test target is asserted to FAIL at analysis:
+# a test_srcs root that is not in srcs, and test_srcs selecting no program input.
+tests/node_test/analysis/undeclared.test.ts
+tests/node_test/analysis/empty.test.ts
+# Analysis-only fixture: joined_scope_inputs_test inspects the program's inputs;
+# running the test adds nothing it asserts.
+tests/compile_layout/joined_scope/scope.test.ts
 # Analysis-only fixture, asserted to FAIL at analysis: the wrangler config it
 # stages through `wrangler_config` is in its `data` too.
 tests/workers_nested/test/data_shadow.test.ts

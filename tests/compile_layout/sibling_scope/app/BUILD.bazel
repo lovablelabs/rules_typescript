@@ -1,0 +1,16 @@
+# gazelle:ignore
+
+load("//tests/compile_layout:layout_tests.bzl", "sibling_scope_inputs_test")
+load("//ts:defs.bzl", "ts_compile")
+
+ts_compile(
+    name = "app",
+    srcs = ["index.ts"],
+    tsconfig = "tsconfig.json",
+    deps = ["//tests/compile_layout/sibling_scope/lib"],
+)
+
+sibling_scope_inputs_test(
+    name = "sibling_scope_inputs_test",
+    target_under_test = ":app",
+)

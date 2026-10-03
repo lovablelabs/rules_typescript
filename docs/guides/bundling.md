@@ -38,7 +38,7 @@ load("@rules_typescript//ts:defs.bzl", "BundlerInfo")
 
 def _my_bundler_impl(ctx):
     return [BundlerInfo(
-        bundler_binary = ctx.file.binary,
+        bundler_binary = ctx.attr.binary[DefaultInfo].files_to_run,
         config_file = None,                 # optional static config
         runtime_deps = depset([]),           # files needed at bundle time
         use_generated_config = False,        # set True for a generated Vite config
@@ -48,7 +48,6 @@ my_bundler = rule(
     implementation = _my_bundler_impl,
     attrs = {
         "binary": attr.label(
-            allow_single_file = True,
             executable = True,
             cfg = "exec",
         ),
@@ -67,8 +66,12 @@ ts_binary(
 )
 ```
 
-The entry point has to produce exactly one `.js`: a `ts_compile` with a single
-source file. A `.css`, a `*.module.css`, an image or any other data src in a
+Pass the executable target's `DefaultInfo.files_to_run` so Bazel stages its runfiles with the tool. A standalone executable without runfiles may use a `File`; `runtime_deps` supplies additional action inputs.
+
+Bundling uses the same [entry selection](../rules/ts-binary.md#without-a-bundler)
+as direct execution, including `entry_file` for targets with multiple outputs.
+
+A `.css`, a `*.module.css`, an image or any other data src in a
 `ts_compile`'s `srcs` reaches the bundler through its
 `TsInfo.transitive_data`, so every non-JS file the graph imports is in the
 sandbox beside the compiled `.js` that imports it.
@@ -130,7 +133,7 @@ modules.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `bundler_binary` | `File` | The executable that performs bundling |
+| `bundler_binary` | `File` or `FilesToRunProvider` | Standalone executable, or executable target with its runfiles |
 | `config_file` | `File` or `None` | Optional static config passed via `--config` (mode 1 only) |
 | `runtime_deps` | `depset of File` | Files the bundler needs at runtime |
 | `use_generated_config` | `bool` | When `True`, use mode 2 (generated vite.config.mjs) |

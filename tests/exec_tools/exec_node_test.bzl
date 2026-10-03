@@ -7,6 +7,7 @@ that cannot run at all.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("//tests:runnable_actions.bzl", "runnable_action_aspect", "runnable_actions")
 
 _FOREIGN = "nodejs_windows_amd64"
 
@@ -15,7 +16,7 @@ def _action_node_impl(ctx):
     mnemonic = ctx.attr.mnemonic
     matched = []
 
-    for action in analysistest.target_actions(env):
+    for action in runnable_actions(env):
         if action.mnemonic != mnemonic:
             continue
         matched.append(action)
@@ -47,4 +48,5 @@ exec_node_action_test = analysistest.make(
     config_settings = {
         "//command_line_option:platforms": [Label("//platforms:windows_amd64")],
     },
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )

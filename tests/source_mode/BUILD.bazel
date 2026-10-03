@@ -29,8 +29,25 @@ ts_compile(
 )
 
 ts_binary(
-    name = "unsupported_node",
+    name = "emitted_entry_run",
     entry_point = ":entry",
+    tags = ["manual"],  # The analysis test requires this consumer to fail.
+)
+
+node_rejects_source_test(
+    name = "emitted_entry_rejects_source_dependency_test",
+    target_under_test = ":emitted_entry_run",
+)
+
+ts_compile(
+    name = "source_forwarder",
+    srcs = [],
+    deps = ["//tests/source_mode/lib:library"],
+)
+
+ts_binary(
+    name = "unsupported_node",
+    entry_point = ":source_forwarder",
     tags = ["manual"],  # The analysis test requires this target to fail.
 )
 

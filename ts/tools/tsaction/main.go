@@ -23,21 +23,23 @@ import (
 const execrootToken = "{{EXECROOT}}"
 
 const usage = `usage:
-  tsaction stamp -stamp=FILE -- TOOL [ARG...]
+  tsaction stamp -stamp=FILE [-runtime_scope=JSON]... [-- TOOL [ARG...]]
   tsaction stage -out=DIR SRC DEST [SRC DEST...]
+  tsaction native-view -spec=FILE
   tsaction tar -out=FILE -dir=DIR [-prefix=P]
   tsaction tsconfig -tsgo=BIN [-tsconfig=FILE] -baseline=FILE -out=FILE -options=FILE
       -bin_dir=DIR [-jsx=preserve] [-module=KIND] [-types_dep=NAME]...
       [-isolated_declarations] [-lib_check] SRC...
   tsaction paths -tsconfig=FILE -package=PKG [-bin_dir=DIR] -out=FILE
   tsaction manifest [-tsx=.js|.jsx] SRC OUT
-  tsaction tsgo -root=DIR [-source=FILE]... -node_modules=DIR [-overlay=DIR]...
-      [-manifest=FILE]... [-check=FILE [-tsconfig=FILE]] [-stamp=FILE]
+  tsaction tsgo -root=DIR [-source=FILE]... -node_modules=DIR [-inherit_node_modules=DIR]...
+      [-overlay=PAIR]... [-manifest=FILE]... [-check=FILE [-tsconfig=FILE]] [-stamp=FILE]
       -- TSGO [ARG...]
   tsaction emit -options=FILE -tsconfig=FILE [-source=FILE]... -node_modules=DIR
-      [-overlay=DIR]... [-manifest=FILE]... -scratch=DIR -out_dir=DIR -oxc=BIN
+      [-inherit_node_modules=DIR]... [-overlay=PAIR]... [-manifest=FILE]...
+      -scratch=DIR -out_dir=DIR
       -tsgo=BIN -root=DIR... [-source_map] [-declarations] SRC...
-  tsaction emit -options=FILE -out_dir=DIR -oxc=BIN -root=DIR... -es_modules
+  tsaction emit -options=FILE -out_dir=DIR -oxc=BIN -root=DIR... [-es_modules]
       [-source_map] [-declarations] SRC...`
 
 func main() {
@@ -51,6 +53,8 @@ func main() {
 	switch os.Args[1] {
 	case "stamp":
 		err = stamp(args)
+	case "native-view":
+		err = nativeView(args)
 	case "stage":
 		err = stage(args)
 	case "tar":
@@ -108,25 +112,31 @@ func expandParamFiles(args []string) ([]string, error) {
 
 func stamp(args []string) error {
 	flags := flag.NewFlagSet("stamp", flag.ExitOnError)
-	out := flags.String("stamp", "", "file to create when the command exits 0")
+	out := flags.String("stamp", "", "file to create when validation and any command succeed")
+	var runtimeScopes stringList
+	flags.Var(&runtimeScopes, "runtime_scope", "a package scope and its declared runtime targets as JSON (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	cmdline := flags.Args()
-	if *out == "" || len(cmdline) == 0 {
-		return errors.New("stamp needs -stamp=FILE and a command after --")
+	if *out == "" || len(cmdline) == 0 && len(runtimeScopes) == 0 {
+		return errors.New("stamp needs -stamp=FILE and a command after -- or runtime scope checks")
 	}
 
-	execroot, err := os.Getwd()
-	if err != nil {
+	if err := validateRuntimeScopes(runtimeScopes); err != nil {
 		return err
 	}
-	for i, arg := range cmdline {
-		cmdline[i] = strings.ReplaceAll(arg, execrootToken, execroot)
-	}
-
-	if err := runTool(cmdline); err != nil {
-		return err
+	if len(cmdline) > 0 {
+		execroot, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		for i, arg := range cmdline {
+			cmdline[i] = strings.ReplaceAll(arg, execrootToken, execroot)
+		}
+		if err := runTool(cmdline); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(*out, nil, 0o644)
 }

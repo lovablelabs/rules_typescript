@@ -154,7 +154,7 @@ func parseProtoIdentity(r *rule.Rule, owner string) (*protoIdentity, error) {
 		if raw == "" {
 			continue
 		}
-		if _, err := label.Parse(raw); err != nil {
+		if _, err := parseLabel(raw); err != nil {
 			return nil, fmt.Errorf("ts_proto_config %s: invalid label %q: %w", id.Name, raw, err)
 		}
 	}
@@ -238,11 +238,7 @@ func protoWrapperName(native label.Label, id *protoIdentity) string {
 
 func absoluteProtoLabel(c *config.Config, native label.Label, pkg string) label.Label {
 	native = getConfig(c).protos.graph.normalize(native)
-	native = native.Abs(c.RepoName, pkg)
-	if native.Repo == "" {
-		native.Repo = c.RepoName
-	}
-	return native
+	return labelIdentity(native, c.RepoName, pkg)
 }
 
 func managedProtoWrapper(c *config.Config, owner string, r *rule.Rule) bool {
@@ -253,7 +249,7 @@ func managedProtoWrapper(c *config.Config, owner string, r *rule.Rule) bool {
 	if !ok || !protoIdentityName.MatchString(family) {
 		return false
 	}
-	native, err := label.Parse(r.AttrString("proto"))
+	native, err := parseLabel(r.AttrString("proto"))
 	if err != nil {
 		return false
 	}
@@ -307,7 +303,7 @@ func withProtoRules(args language.GenerateArgs, tc *tsConfig, res language.Gener
 		}
 		r := rule.NewRule("ts_proto_library", name)
 		r.SetAttr("visibility", []string{"//visibility:public"})
-		r.SetAttr("proto", obs.native.Rel(args.Config.RepoName, args.Rel).String())
+		r.SetAttr("proto", relativeLabel(obs.native, args.Config.RepoName, args.Rel).String())
 		r.SetAttr("out_dir", id.OutDir)
 		r.SetAttr("tsconfig", id.Tsconfig)
 		r.SetAttr("options", id.Options)
@@ -336,79 +332,164 @@ func protoWrapperKey(root string, native label.Label) string {
 }
 
 func protoImportsForRule(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	native, err := label.Parse(r.AttrString("proto"))
+	if r.Kind() != "ts_proto_library" {
+		return nil
+	}
+	outDir, literal := r.Attr("out_dir").(*bzl.StringExpr)
+	if !literal {
+		return nil
+	}
+	native, err := parseLabel(r.AttrString("proto"))
 	if err != nil {
 		return nil
 	}
-	root := path.Join(f.Pkg, r.AttrString("out_dir"))
+	root := path.Join(f.Pkg, outDir.Value)
 	return []resolve.ImportSpec{
-		{Lang: languageName, Imp: "ts_proto_root:" + root},
 		{Lang: languageName, Imp: protoWrapperKey(root, absoluteProtoLabel(c, native, f.Pkg))},
 	}
 }
 
 func protoProvider(c *config.Config, ix *resolve.RuleIndex, root, imp string) []resolve.FindResult {
+	tc := getConfig(c)
+	s := tc.protos
 	spec := resolve.ImportSpec{Lang: "proto", Imp: imp}
-	var native []resolve.FindResult
+	native := map[label.Label]bool{}
 	if overridden, ok := resolve.FindRuleWithOverride(c, spec, "proto"); ok {
-		for _, node := range getConfig(c).protos.graph.providers(c, imp) {
-			native = append(native, resolve.FindResult{Label: getConfig(c).protos.graph.labels[node.Label]})
+		for _, node := range s.graph.providers(c, imp) {
+			native[s.graph.labels[node.Label]] = true
 		}
 		if len(native) == 0 {
-			native = []resolve.FindResult{{Label: absoluteProtoLabel(c, overridden, "")}}
+			native[absoluteProtoLabel(c, overridden, "")] = true
 		}
 	} else {
-		native = ix.FindRulesByImportWithConfig(c, spec, "proto")
-		if len(native) == 0 {
-			for _, node := range getConfig(c).protos.graph.providers(c, imp) {
-				native = append(native, resolve.FindResult{Label: getConfig(c).protos.graph.labels[node.Label]})
+		for _, provider := range ix.FindRulesByImportWithConfig(c, spec, "proto") {
+			native[absoluteProtoLabel(c, provider.Label, "")] = true
+		}
+		for _, node := range s.graph.providers(c, imp) {
+			native[s.graph.labels[node.Label]] = true
+		}
+		for _, observations := range s.observations {
+			for _, observation := range observations {
+				if slices.Contains(observation.paths, imp) {
+					native[observation.native] = true
+				}
+			}
+		}
+		if tc.programs.emission != nil {
+			nativeLanguage := gazelleproto.NewLanguage()
+			for key := range tc.programs.emission.rules {
+				effective := tc.programs.semanticRule(key)
+				if effective == nil || effective.Kind() != "proto_library" {
+					continue
+				}
+				owner, err := parseLabel(key)
+				if err != nil {
+					continue
+				}
+				ownerConfig := tc.programs.inputs[owner.Pkg].config
+				if slices.Contains(nativeLanguage.Imports(ownerConfig, effective, &rule.File{Pkg: owner.Pkg}), spec) {
+					native[absoluteProtoLabel(ownerConfig, owner, "")] = true
+				}
 			}
 		}
 	}
-	var providers []resolve.FindResult
-	for _, n := range native {
-		providers = append(providers, ix.FindRulesByImport(resolve.ImportSpec{Lang: languageName, Imp: protoWrapperKey(root, n.Label)}, languageName)...)
+	providers := map[label.Label]resolve.FindResult{}
+	for owner := range native {
+		for _, provider := range protoWrapperProviders(c, ix, root, owner) {
+			providers[provider.Label] = provider
+		}
 	}
-	return providers
+	return slices.SortedFunc(maps.Values(providers), func(a, b resolve.FindResult) int { return strings.Compare(a.Label.String(), b.Label.String()) })
+}
+
+func protoWrapperProviders(c *config.Config, ix *resolve.RuleIndex, root string, native label.Label) []resolve.FindResult {
+	native = absoluteProtoLabel(c, native, "")
+	s := getConfig(c).programs
+	spec := resolve.ImportSpec{Lang: languageName, Imp: protoWrapperKey(root, native)}
+	providers := map[label.Label]resolve.FindResult{}
+	for _, provider := range ix.FindRulesByImport(spec, languageName) {
+		providers[provider.Label] = provider
+	}
+	if s.emission != nil {
+		for key := range s.emission.rules {
+			effective := s.semanticRule(key)
+			if effective == nil {
+				continue
+			}
+			owner, err := parseLabel(key)
+			if err != nil {
+				continue
+			}
+			ownerConfig := s.inputs[owner.Pkg].config
+			if slices.Contains(protoImportsForRule(ownerConfig, effective, &rule.File{Pkg: owner.Pkg}), spec) {
+				owner = absoluteProtoLabel(ownerConfig, owner, "")
+				providers[owner] = resolve.FindResult{Label: owner}
+			}
+		}
+	}
+	return slices.SortedFunc(maps.Values(providers), func(a, b resolve.FindResult) int { return strings.Compare(a.Label.String(), b.Label.String()) })
+}
+
+func protoOutputProviders(c *config.Config, ix *resolve.RuleIndex, file string) []resolve.FindResult {
+	if ix == nil || !firstParty(file) || !strings.HasSuffix(file, "_pb.ts") {
+		return nil
+	}
+	for dir := path.Dir(file); dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
+		imp := strings.TrimSuffix(strings.TrimPrefix(file, dir+"/"), "_pb.ts") + ".proto"
+		providers := protoProvider(c, ix, dir, imp)
+		if len(providers) > 0 {
+			return providers
+		}
+	}
+	return nil
 }
 
 func resolveProtoOutput(c *config.Config, ix *resolve.RuleIndex, file string, from label.Label) string {
-	if !strings.HasSuffix(file, "_pb.ts") {
+	providers := protoOutputProviders(c, ix, file)
+	if len(providers) == 0 {
 		return ""
 	}
-	for dir := path.Dir(file); dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
-		if len(ix.FindRulesByImport(resolve.ImportSpec{Lang: languageName, Imp: "ts_proto_root:" + dir}, languageName)) == 0 {
-			continue
-		}
-		imp := strings.TrimSuffix(strings.TrimPrefix(file, dir+"/"), "_pb.ts") + ".proto"
-		providers := protoProvider(c, ix, dir, imp)
-		if len(providers) != 1 {
-			log.Fatalf("typescript: %s has %d generated providers for %s; select exactly one native owner in %s", from.String(), len(providers), file, dir)
-		}
-		return providers[0].Label.Rel(from.Repo, from.Pkg).String()
+	if len(providers) != 1 {
+		log.Fatalf("typescript: %s has %d generated providers for %s; select exactly one native owner", from.String(), len(providers), file)
 	}
-	return ""
+	return relativeLabel(providers[0].Label, from.Repo, from.Pkg).String()
 }
 
-func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, imps *protoRuleImports, from label.Label) {
+func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r, effective *rule.Rule, imps *protoRuleImports, from label.Label) {
 	deps := map[string]bool{}
 	for _, dep := range imps.identity.Deps {
 		deps[dep] = true
 	}
 	tc := getConfig(c)
-	reported := map[string]bool{}
-	for _, edge := range configTypeEdges(c, ix, imps.identity.Tsconfig, imps.identity.owner) {
-		if dep := edgeDep(c, ix, tc, edge, from, reported, nil); dep != "" {
-			deps[dep] = true
+	var typeInputs []string
+	selected := effective.AttrString("tsconfig")
+	p := tc.programs.compilerProgram(c, selected, from.Pkg)
+	if !effective.ShouldKeep() && (!attrKept(effective, "deps") || !attrKept(effective, "type_inputs")) {
+		if err := compilerClosureError(p, from.String(), selected); err != nil {
+			log.Fatal(err)
 		}
 	}
+	if p != nil {
+		inputs := rule.NewRule(r.Kind(), r.Name())
+		for dep := range resolveEdges(c, ix, inputs, &ruleImports{program: p}, from) {
+			deps[dep] = true
+		}
+		typeInputs = append(inputs.AttrStrings("srcs"), inputs.AttrStrings("type_inputs")...)
+		typeInputs = append(typeInputs, inputs.AttrStrings("package_scopes")...)
+	}
+	if len(typeInputs) > 0 {
+		slices.Sort(typeInputs)
+		r.SetAttr("type_inputs", typeInputs)
+	} else {
+		r.DelAttr("type_inputs")
+	}
 	for _, native := range imps.nativeDeps {
-		found := ix.FindRulesByImport(resolve.ImportSpec{Lang: languageName, Imp: protoWrapperKey(path.Join(imps.identity.owner, imps.identity.OutDir), native)}, languageName)
+		found := protoWrapperProviders(c, ix, path.Join(imps.identity.owner, imps.identity.OutDir), native)
 		if len(found) != 1 {
 			log.Fatalf("typescript: %s: native dependency %s has %d generated providers in identity %s", from.String(), native.String(), len(found), imps.identity.Name)
 		}
 		if found[0].Label != from {
-			deps[found[0].Label.Rel(from.Repo, from.Pkg).String()] = true
+			deps[relativeLabel(found[0].Label, from.Repo, from.Pkg).String()] = true
 		}
 	}
 	for _, imp := range imps.imports {
@@ -420,7 +501,7 @@ func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, 
 			log.Fatalf("typescript: %s: proto import %s has %d generated providers in identity %s; enable exactly one native owner for that identity", from.String(), imp, len(found), imps.identity.Name)
 		}
 		if found[0].Label != from {
-			deps[found[0].Label.Rel(from.Repo, from.Pkg).String()] = true
+			deps[relativeLabel(found[0].Label, from.Repo, from.Pkg).String()] = true
 		}
 	}
 	if len(deps) > 0 {
@@ -428,4 +509,5 @@ func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, 
 	} else {
 		r.DelAttr("deps")
 	}
+	retainSourceImporters(c, r, from, p, nil)
 }

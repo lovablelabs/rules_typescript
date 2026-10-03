@@ -46,6 +46,7 @@ type IT struct {
 	scratchDir string
 	bazelrc    string
 	bazelBin   string
+	registry   string
 	stops      []func()
 }
 
@@ -461,7 +462,7 @@ func (it *IT) BazelStdout(args ...string) string {
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		it.Fail("bazel %s exited non-zero: %v", strings.Join(args, " "), err)
+		it.Fail("bazel %s exited non-zero: %v\n%s", strings.Join(args, " "), err, out.String())
 	}
 	return out.String()
 }
@@ -492,6 +493,9 @@ func (it *IT) Install() {
 	cmd.Env = append(cmd.Env,
 		"npm_config_cache_dir="+filepath.Join(store, "cache"),
 		"npm_config_state_dir="+filepath.Join(store, "state"))
+	if it.registry != "" {
+		cmd.Env = append(cmd.Env, "npm_config_registry="+it.registry)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

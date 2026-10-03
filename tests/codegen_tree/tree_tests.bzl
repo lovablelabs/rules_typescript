@@ -64,3 +64,36 @@ tree_reaches_compile_test = analysistest.make(
         ),
     },
 )
+
+def _dev_server_declared_tree_impl(ctx):
+    env = analysistest.begin(ctx)
+    trees = ctx.attr.tree[TsInfo].js.to_list()
+    asserts.equals(env, 1, len(trees), "the generator declares one compiled tree")
+    if len(trees) != 1:
+        return analysistest.end(env)
+    tree = trees[0]
+    asserts.true(env, tree.is_directory, "the generated input is a directory File")
+    entry = ctx.attr.entry[TsInfo]
+    asserts.true(env, tree in entry.transitive_js.to_list(), "the compiled tree stays live under a source-mode consumer")
+    pairs = [pair for owner in entry.owners.to_list() for pair in getattr(owner, "runtime_files", ())]
+    asserts.true(env, (tree, tree) in pairs, "the producer retains its exact original tree identity")
+    runfiles = analysistest.target_under_test(env)[DefaultInfo].default_runfiles.files.to_list()
+    asserts.true(env, tree in runfiles, "the dev server retains the original tree File")
+    configs = [
+        action
+        for action in analysistest.target_actions(env)
+        if any([output.basename == "vite.config.mjs" for output in action.outputs.to_list()])
+    ]
+    asserts.equals(env, 1, len(configs), "the dev server writes one plugin config")
+    if len(configs) == 1:
+        binding = "[{}]: {{ path: path.resolve(fs.realpathSync(bazelBin), {}), context: \"source\", isSource: false, directory: true }}".format(json.encode(tree.short_path), json.encode(tree.short_path))
+        asserts.equals(env, 1, configs[0].content.count(binding), "the config retains one declared tree boundary")
+    return analysistest.end(env)
+
+dev_server_declared_tree_test = analysistest.make(
+    _dev_server_declared_tree_impl,
+    attrs = {
+        "entry": attr.label(providers = [TsInfo], mandatory = True),
+        "tree": attr.label(providers = [TsInfo], mandatory = True),
+    },
+)

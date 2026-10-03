@@ -1,0 +1,4 @@
+exports_files(
+    ["helper.ts"],
+    visibility = ["//tests/vitest/ancestor_scope/roots/app:__pkg__"],
+)

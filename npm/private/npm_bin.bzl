@@ -20,11 +20,17 @@ Users can then:
 load(
     "//tools/launcher:launcher.bzl",
     "LAUNCHER_TOOLCHAINS",
+    "NATIVE_EXECUTABLE_ATTRS",
+    "NATIVE_PROGRAM_ATTRS",
+    "NativeExecutableInfo",
+    "complete_native_executable",
     "declare_launcher",
+    "declare_runnable",
     "rlocation_path",
 )
 load("//ts/private:providers.bzl", "NpmPackageInfo")
 load("//ts/private:runtime.bzl", "JS_RUNTIME_TOOLCHAIN_TYPE", "get_js_runtime")
+load("//ts/private:toolchain.bzl", "TOOLS_TOOLCHAIN_TYPE")
 load(":store.bzl", "NpmStoreInfo")
 
 def _npm_bin_impl(ctx):
@@ -63,14 +69,7 @@ def _npm_bin_impl(ctx):
             "Available files: {}".format(", ".join(available[:20]) + (" ..." if len(available) > 20 else "")),
         )
 
-    # Some npm packages (e.g. oxlint) reach a platform-specific native binary
-    # through require.resolve('@scope/platform-pkg/binary'), and Node resolves
-    # that by walking parent directories looking for node_modules/. Inside a
-    # runfiles tree or action sandbox there is no such directory, and with one
-    # repository per npm package the sibling is not even nearby, so the sibling
-    # identifies itself through NpmPackageInfo and its package.json locates its
-    # root. The launcher links them into a temp dir, not the runfiles tree,
-    # which is read-only for tools in action sandboxes and after `bazel run`.
+    # Native package lookup needs optional siblings in a directory named node_modules.
     optional_deps = []
     optional_dep_pkg_files = []
     for dep in ctx.attr.optional_dep_packages:
@@ -98,59 +97,70 @@ def _npm_bin_impl(ctx):
     if runtime_binary:
         config["runtime"] = rlocation_path(ctx, runtime_binary)
 
-    launcher = declare_launcher(ctx, config, basename = "{}_bin_launcher".format(ctx.label.name))
-
-    # Collect all runfiles: the launcher, entry script, all package files, and the runtime.
-    runfiles_files = [entry_script_file] + launcher.files
-    if runtime_binary:
-        runfiles_files.append(runtime_binary)
+    runfiles_files = [entry_script_file]
 
     # Also include the full package files so Node can resolve modules inside the package.
     runfiles = ctx.runfiles(
         files = runfiles_files,
         transitive_files = depset(ctx.files.package_files, transitive = optional_dep_pkg_files + ([store.transitive] if store else [])),
-        root_symlinks = launcher.root_symlinks,
     )
+
+    launcher = declare_launcher(ctx, config, basename = "{}_bin_launcher".format(ctx.label.name), runfiles = runfiles, runtime_file = runtime_binary)
+    runfiles = runfiles.merge(ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks))
 
     return [
         DefaultInfo(
             executable = launcher.executable,
             runfiles = runfiles,
         ),
+        NativeExecutableInfo(launcher = launcher, default_files = None),
     ]
 
-npm_bin = rule(
+def _npm_bin_executable_impl(ctx):
+    return complete_native_executable(ctx, ctx.label.name + "_bin_launcher")
+
+_BIN_ATTRS = {
+    "package_files": attr.label_list(
+        doc = "All files in the npm package directory (from the ts_npm_package target).",
+        allow_files = True,
+    ),
+    "store": attr.label(providers = [NpmStoreInfo]),
+    "entry_script": attr.string(
+        doc = "The relative path within the package to the bin entry script (e.g. 'vitest.mjs').",
+        mandatory = True,
+    ),
+    "optional_dep_packages": attr.label_list(
+        providers = [[NpmPackageInfo]],
+        doc = "Sibling npm package targets holding platform-specific native " +
+              "binaries this bin script resolves at runtime. The native view contains " +
+              "node_modules/ symlinks for them so require.resolve() works inside " +
+              "action sandboxes and runfiles trees.",
+    ),
+    "runtime": attr.label(
+        doc = "Per-target override for the JS runtime binary. " +
+              "When set, takes priority over the js_runtime toolchain.",
+        allow_single_file = True,
+        executable = True,
+        cfg = "exec",
+    ),
+}
+
+_npm_bin_program = rule(
     implementation = _npm_bin_impl,
     executable = True,
     fragments = ["platform"],
-    attrs = {
-        "package_files": attr.label_list(
-            doc = "All files in the npm package directory (from the ts_npm_package target).",
-            allow_files = True,
-        ),
-        "store": attr.label(providers = [NpmStoreInfo]),
-        "entry_script": attr.string(
-            doc = "The relative path within the package to the bin entry script (e.g. 'vitest.mjs').",
-            mandatory = True,
-        ),
-        "optional_dep_packages": attr.label_list(
-            providers = [[NpmPackageInfo]],
-            doc = "Sibling npm package targets holding platform-specific native " +
-                  "binaries this bin script resolves at runtime. The launcher creates " +
-                  "node_modules/ symlinks for them so require.resolve() works inside " +
-                  "action sandboxes and runfiles trees.",
-        ),
-        "runtime": attr.label(
-            doc = "Per-target override for the JS runtime binary. " +
-                  "When set, takes priority over the js_runtime toolchain.",
-            allow_single_file = True,
-            executable = True,
-            cfg = "exec",
-        ),
-    },
+    attrs = _BIN_ATTRS | NATIVE_PROGRAM_ATTRS,
     toolchains = LAUNCHER_TOOLCHAINS + [
+        TOOLS_TOOLCHAIN_TYPE,
         config_common.toolchain_type(JS_RUNTIME_TOOLCHAIN_TYPE, mandatory = False),
     ],
+)
+
+npm_bin = rule(
+    implementation = _npm_bin_executable_impl,
+    executable = True,
+    attrs = _BIN_ATTRS | NATIVE_EXECUTABLE_ATTRS,
+    toolchains = [TOOLS_TOOLCHAIN_TYPE],
     doc = """Exposes an npm package's bin script as an executable Bazel target.
 
 Generated by npm_import for each entry in the package's 'bin' field.
@@ -161,3 +171,6 @@ Example usage:
     bazel run @npm//:tsx -- script.ts
 """,
 )
+
+def npm_bin_macro(name, **kwargs):
+    declare_runnable(name, _npm_bin_program, npm_bin, kwargs)

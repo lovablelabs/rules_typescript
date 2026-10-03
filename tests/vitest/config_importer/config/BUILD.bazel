@@ -1,0 +1,24 @@
+load("//npm:defs.bzl", "node_modules")
+
+package(default_visibility = ["//tests/vitest/config_importer/test:__pkg__"])
+
+exports_files([
+    "workers.config.mjs",
+    "wrangler.jsonc",
+])
+
+# keep
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/npm:node_modules/.pnpm/node_modules",
+    deps = [
+        "@npm//:minimatch_10_2_4",
+        "@npm//:zod",
+    ],
+)
+
+# keep
+filegroup(
+    name = "vitest_config",
+    srcs = ["vitest.config.mjs"],
+)

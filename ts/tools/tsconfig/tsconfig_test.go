@@ -2,6 +2,7 @@ package tsconfig
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -89,7 +90,20 @@ func TestResolve_ExtendsArrayLastWins(t *testing.T) {
 	leaf := filepath.Join(repo, "apps/web/tsconfig.json")
 	write(t, leaf, `{"extends": ["./a", "./b.json"]}`)
 
-	got := mustResolve(t, leaf)
+	var visited []string
+	got, err := ResolveWithAdmission(leaf, func(file string) error {
+		visited = append(visited, filepath.Base(file))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"tsconfig.json", "a.json", "b.json"}; !reflect.DeepEqual(visited, want) {
+		t.Fatalf("admission order = %v, want %v", visited, want)
+	}
+	if want := (Extends{"./a", "./b.json"}); !reflect.DeepEqual(got.Extends, want) {
+		t.Errorf("leaf extends = %v, want %v", got.Extends, want)
+	}
 	if want := map[string][]string{"@/*": {"b/*"}}; !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
@@ -309,7 +323,13 @@ func TestResolve_LeafFailsBaseIsSkipped(t *testing.T) {
 	leaf := filepath.Join(repo, "tsconfig.json")
 	write(t, leaf, `{"extends": ["./broken.json", "./gone.json"], "compilerOptions": {"paths": {"@/*": ["src/*"]}}}`)
 	var got *Resolved
-	logged := captureLog(t, func() { got = mustResolve(t, leaf) })
+	logged := captureLog(t, func() {
+		var err error
+		got, err = ResolveWithAdmission(leaf, func(string) error { return nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 	if want := map[string][]string{"@/*": {"src/*"}}; !reflect.DeepEqual(got.Paths, want) {
 		t.Errorf("Paths = %v, want %v", got.Paths, want)
 	}
@@ -446,5 +466,42 @@ func TestResolve_JsxLeafWins(t *testing.T) {
 		if got := mustResolve(t, filepath.Join(repo, name)).Jsx; got != want {
 			t.Errorf("%s: Jsx = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestResolve_RejectedNestedBaseCannotPublishPartialOptions(t *testing.T) {
+	for _, state := range []string{"cold", "malformed checkout copy"} {
+		t.Run(state, func(t *testing.T) {
+			repo := t.TempDir()
+			leaf := filepath.Join(repo, "tsconfig.json")
+			generated := filepath.Join(repo, "generated.json")
+			write(t, leaf, `{"extends":["./first.json","./nested.json","./last.json"],"files":["main.ts"]}`)
+			write(t, filepath.Join(repo, "first.json"), `{"compilerOptions":{"module":"esnext"}}`)
+			write(t, filepath.Join(repo, "nested.json"), `{"extends":"./generated.json"}`)
+			write(t, filepath.Join(repo, "last.json"), `{"compilerOptions":{"module":"commonjs"}}`)
+			if state != "cold" {
+				write(t, generated, `{unreadable checkout metadata`)
+			}
+			rejected := errors.New("generated metadata has no source contents")
+			var visited []string
+			logged := captureLog(t, func() {
+				got, err := ResolveWithAdmission(leaf, func(file string) error {
+					visited = append(visited, filepath.Base(file))
+					if file == generated {
+						return rejected
+					}
+					return nil
+				})
+				if got != nil || !errors.Is(err, ErrAdmission) || !errors.Is(err, rejected) {
+					t.Fatalf("rejected nested base produced %v, %v", got, err)
+				}
+			})
+			if logged != "" {
+				t.Fatalf("admission rejection was treated as a skipped base: %s", logged)
+			}
+			if want := []string{"tsconfig.json", "first.json", "nested.json", "generated.json"}; !reflect.DeepEqual(visited, want) {
+				t.Fatalf("admission order = %v, want %v", visited, want)
+			}
+		})
 	}
 }

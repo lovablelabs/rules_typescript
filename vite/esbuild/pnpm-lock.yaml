@@ -11,6 +11,9 @@ importers:
       esbuild:
         specifier: 0.27.7
         version: 0.27.7
+      resolve.exports:
+        specifier: 2.0.3
+        version: 2.0.3
 
 packages:
 
@@ -175,6 +178,10 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  resolve.exports@2.0.3:
+    resolution: {integrity: sha512-OcXjMsGdhL4XnbShKpAcSqPMzQoYkYyhbEaeSko47MjRP9NfEQMhZkXL1DoFlt9LWQn4YttrdnV6X2OiyzBi+A==}
+    engines: {node: '>=10'}
+
 snapshots:
 
   '@esbuild/aix-ppc64@0.27.7':
@@ -283,3 +290,5 @@ snapshots:
       '@esbuild/win32-arm64': 0.27.7
       '@esbuild/win32-ia32': 0.27.7
       '@esbuild/win32-x64': 0.27.7
+
+  resolve.exports@2.0.3: {}

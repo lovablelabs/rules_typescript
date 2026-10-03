@@ -1,0 +1,112 @@
+[
+  {
+    "module": "RunfilesIdentity",
+    "config": "runfiles_identity.cfg",
+    "initial": 12,
+    "distinct": 24,
+    "generated": 36
+  },
+  {
+    "module": "RunfilesIdentity",
+    "config": "unchecked_canonical_owners.cfg",
+    "violations": [
+      "DuplicateCanonicalOwnersReject"
+    ]
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_single_stage_plain.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_single_stage_alias.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_single_build_plain.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_single_build_alias.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_shared_stage_plain.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_shared_stage_alias.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_shared_build_plain.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_shared_build_alias.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_distinct_stage_plain.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_distinct_stage_alias.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_distinct_build_plain.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  },
+  {
+    "module": "CanonicalTrace",
+    "config": "trace_distinct_build_alias.cfg",
+    "violations": [
+      "TracePending"
+    ],
+    "replay": true
+  }
+]

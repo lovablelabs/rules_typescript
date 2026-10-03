@@ -1,0 +1,92 @@
+load("//npm:defs.bzl", "node_modules", "node_modules_member")
+load("//tests/workers_nested/test:wrangler_config_tests.bzl", "config_pool_action_test")
+load("//ts:defs.bzl", "ts_test")
+load(":ownership_tests.bzl", "config_importer_tests", "config_rejected_test", "nested_config_pool_tests")
+
+# keep
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/npm:node_modules/.pnpm/node_modules",
+    deps = [
+        "@npm//:minimatch_9_0_9",
+        "@npm//:types_node",
+        "@npm//:vitest",
+    ],
+)
+
+config_importer_tests()
+
+# keep
+ts_test(
+    name = "config_hoist_test",
+    srcs = ["hoist.test.ts"],
+    config = "//tests/npm/features/hoist:vitest.config.mjs",
+    config_node_modules = ["//tests/npm/features/hoist:node_modules/config-hoist-member"],
+    node_modules = ":node_modules",
+    deps = [
+        "@npm//:types_node",
+        "@npm//:vitest",
+    ],
+)
+
+node_modules_member(
+    name = "node_modules/@cloudflare/vitest-pool-workers",
+    testonly = True,
+    member = "//tests/workers_nested/test:workspace_pool",
+)
+
+node_modules(
+    name = "member_importer",
+    parent = "//tests/workers:node_modules",
+)
+
+nested_config_pool_tests()
+
+# keep
+ts_test(
+    name = "sibling_config_pool_test",
+    srcs = ["workers.test.ts"],
+    config = "//tests/workers_nested:vitest_config",
+    config_node_modules = ["//tests/workers_nested:node_modules"],
+    coverage_provider = "istanbul",
+    emit = False,
+    node_modules = "//tests/workers_nested/test:node_modules",
+    tsconfig = "//tests/workers_nested:worker_tsconfig",
+    workers_pool = "//tests/workers_nested:node_modules",
+    wrangler_config = "//tests/workers_nested:wrangler.jsonc",
+    deps = [
+        "//tests/workers_nested:source_worker",
+        "@npm_workers//:vitest",
+        "@npm_workers//:vitest_coverage-istanbul",
+        "@npm_workers//:zod",
+    ],
+)
+
+config_pool_action_test(
+    name = "sibling_config_pool_action_test",
+    config_importer = "//tests/workers_nested:node_modules",
+    target_under_test = ":sibling_config_pool_test",
+)
+
+# The deliberately invalid subject runs only through the analysis test below.
+# keep
+ts_test(
+    name = "flattened_config_dep",
+    srcs = ["importer.test.ts"],
+    config = "//tests/vitest/config_importer/config:vitest_config",
+    emit = True,
+    node_modules = ":node_modules",
+    tags = ["manual"],
+    deps = [
+        "@npm//:minimatch_9_0_9",
+        "@npm//:types_node",
+        "@npm//:vitest",
+        "@npm//:zod",
+    ],
+)
+
+config_rejected_test(
+    name = "config_dep_rejected_test",
+    message = "'zod' in deps is linked by no importer on the chain",
+    target_under_test = ":flattened_config_dep",
+)

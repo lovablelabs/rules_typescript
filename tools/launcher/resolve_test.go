@@ -106,19 +106,21 @@ func TestNodeModulesUsesAutoDiscoveredRunfilesWithoutEnvironment(t *testing.T) {
 			if err := os.WriteFile(file, []byte(`{"name":"pkg"}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			root := tree
 			if mode == "manifest" {
 				if err := os.WriteFile(program+".runfiles_manifest", []byte(rl+" "+file+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				root = filepath.Join(base, "staged")
 			}
 			r, err := newResolver(runfiles.ProgramName(program))
 			if err != nil {
 				t.Fatal(err)
 			}
+			root := filepath.Join(base, "staged")
+			if _, err := r.Stage(root, nil); err != nil {
+				t.Fatal(err)
+			}
 			plan := &Plan{EnvOverrides: map[string]string{}}
-			if _, err := installNodeModules(r, plan, root, "_main", []string{"_main/app/node_modules"}); err != nil {
+			if _, err := installNodeModules(plan, root, "_main", []string{"_main/app/node_modules"}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rl)))
@@ -130,7 +132,7 @@ func TestNodeModulesUsesAutoDiscoveredRunfilesWithoutEnvironment(t *testing.T) {
 }
 
 func TestAuxiliaryLauncherUsesOwnRunfilesInsteadOfParents(t *testing.T) {
-	for _, mode := range []string{"manifest", "directory", "directory_only"} {
+	for _, mode := range []string{"manifest", "manifest_directory", "directory_only"} {
 		t.Run(mode, func(t *testing.T) {
 			_, parent := fakeRunfiles(t, map[string]string{"_main/tool.js": "parent"})
 			root := t.TempDir()
@@ -164,7 +166,7 @@ func TestAuxiliaryLauncherUsesOwnRunfilesInsteadOfParents(t *testing.T) {
 			if got, err := r.Path("_main/tool.js"); err != nil || got != ownFile {
 				t.Fatalf("auxiliary runfile = %q, %v; want %q", got, err, ownFile)
 			}
-			if (r.Dir() != "") != (mode != "manifest") {
+			if (r.Dir() != "") != (mode == "directory_only") {
 				t.Fatalf("directory staging changed: %q", r.Dir())
 			}
 			if mode == "directory_only" {

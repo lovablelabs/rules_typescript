@@ -11,9 +11,11 @@ emitted as ES modules under the vitest runner. node:test would run the .js.
 # gazelle:exclude tsconfig.commonjs.json
 
 load("//ts:defs.bzl", "ts_compile", "ts_config", "ts_test")
-load(":es_twins_tests.bzl", "es_modules_emit_test", "es_twins_test")
+load(":es_twins_tests.bzl", "es_modules_emit_test", "es_twins_test", "selected_commonjs_case")
 
 package(default_visibility = ["//:__pkg__"])
+
+exports_files(["external_cjs_source.ts"])
 
 # keep
 ts_config(
@@ -27,11 +29,11 @@ ts_compile(
     name = "commonjs",
     srcs = [
         "helper.ts",
-        "package.json",
         "vitest.setup.ts",
     ],
     emit = True,  # keep
     node_modules = "//tests/npm:node_modules",
+    package_scopes = ["package.json"],
     tsconfig = ":commonjs_tsconfig",
     deps = ["@npm//:vitest"],
 )
@@ -59,5 +61,46 @@ es_twins_test(
 # The test's own emit is the ES-modules one; nothing twins a test's program.
 es_modules_emit_test(
     name = "es_modules_emit_test",
+    dep = ":commonjs",
     target_under_test = ":commonjs_test",
+)
+
+# keep
+ts_test(
+    name = "external_commonjs_test",
+    srcs = [
+        "@vitest_commonjs//:external_cjs.test.ts",
+        "@vitest_commonjs//:library",
+    ],
+    config = "@vitest_commonjs//:vitest.config.mjs",
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    test_srcs = [
+        "@vitest_commonjs//:external_cjs.test.ts",
+        "@vitest_commonjs//:library",
+    ],
+    tsconfig = ":commonjs_tsconfig",
+    deps = [
+        "@npm//:vitest",
+        "@vitest_commonjs//:library",
+    ],
+)
+
+es_modules_emit_test(
+    name = "external_compiler_replacement_retains_runfiles_identity_test",
+    dep = "@vitest_commonjs//:library",
+    external = True,
+    selected_roots = True,
+    staged_config = "@vitest_commonjs//:vitest.config.mjs",
+    target_under_test = ":external_commonjs_test",
+)
+
+selected_commonjs_case(
+    name = "scoped_published_root",
+    scoped = True,
+)
+
+selected_commonjs_case(
+    name = "unscoped_published_root",
+    scoped = False,
 )

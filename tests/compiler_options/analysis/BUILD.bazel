@@ -3,10 +3,18 @@
 # The target below has srcs in these directories; a BUILD file in any of them
 # would turn it into a package and make those labels cross a package boundary.
 # gazelle:exclude nested
+# gazelle:exclude transitioned_types
 
 # The typeRoots directory types_under_type_roots stages: its .d.ts is a src of
 # that target, not a package of its own.
 # gazelle:exclude type_roots
+# gazelle:exclude scope_asset/package.json
+# gazelle:exclude scope_asset/asset/package.json
+# gazelle:exclude scope_asset/authored/package.json
+# gazelle:exclude scope_asset/forwarded/package.json
+# gazelle:exclude scope_asset/reused/package.json
+# gazelle:exclude scope_asset/transitive/package.json
+# gazelle:exclude scope_alias/package.json
 
 # Compiler options, not data: each is named by a tsconfig attr.
 # gazelle:exclude tsconfig.commonjs-inputs.json
@@ -22,20 +30,184 @@
 # gazelle:exclude *_test.go
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
-load("//ts:defs.bzl", "ts_compile", "ts_config")
+load("//npm:defs.bzl", "node_modules")
+load("//npm/private:store.bzl", "npm_store", "npm_store_member")
+load("//ts:defs.bzl", "ts_binary", "ts_compile", "ts_config", "ts_dev_server", "ts_test")
+load("//ts/private:ts_npm_package.bzl", "ts_npm_package")
 load(
     ":analysis_tests.bzl",
     "baseline_file_test",
+    "borrowed_importer_inputs_test",
+    "data_publication_identity_test",
     "declaration_content_edges_test",
     "declaration_map_without_tsgo_test",
+    "declaration_ownership_runtime_alias_test",
     "declare_command_line_test",
+    "dev_server_generated_dependency_files_test",
     "emit_command_line_test",
+    "exec_type_inputs",
+    "generated_runtime_layout_test",
+    "generated_type_inputs",
+    "independent_library_roots_test",
+    "json_module_survives_metadata_test",
     "jsx_source_test",
+    "member_scope_alias_conflict_test",
+    "member_scope_alias_test",
+    "member_scope_module_alias_test",
+    "missing_runtime_scope_test",
     "mixed_source_roots_test",
+    "non_scope_metadata_test",
+    "opaque_scope_destination_test",
+    "previous_shape_provider",
+    "previous_shape_provider_consumption_test",
+    "republished_runtime_owner",
+    "runtime_npm_context_test",
+    "scope_admission",
+    "scope_alias_member",
+    "scope_destination_conflict_test",
+    "scope_inputs_oxc_test",
+    "scope_inputs_tsgo_test",
+    "shadowed_runtime_scope_test",
+    "source_publication_identity_test",
 )
 
 package(default_visibility = ["//:__pkg__"])
+
+exports_files(
+    ["mixed_compiler_input_layout.ts"],
+    visibility = ["//visibility:public"],
+)
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = [
+        ":borrowed_culori_types",
+        "@npm//:culori",
+        "@npm//:vitest",
+    ],
+)
+
+[
+    write_file(
+        name = "borrowed_culori_" + kind,
+        out = "borrowed_culori/" + filename,
+        content = [
+            content,
+            "",
+        ],
+    )
+    for kind, filename, content in [
+        ("manifest", "package.json", '{"name":"@types/culori","version":"0.0.0","types":"index.d.ts"}'),
+        ("types_src", "index.d.ts", "export declare function formatHex(colour: string): string;"),
+    ]
+]
+
+filegroup(
+    name = "borrowed_culori_files",
+    srcs = [
+        ":borrowed_culori_manifest",
+        ":borrowed_culori_types_src",
+    ],
+)
+
+npm_store(
+    name = "node_modules/.pnpm/@types+culori@0.0.0/node_modules/@types/culori",
+    files = ":borrowed_culori_files",
+    package_dir = ":borrowed_culori_manifest",
+)
+
+ts_npm_package(
+    name = "borrowed_culori_types",
+    package_name = "@types/culori",
+    package_dir = ":borrowed_culori_manifest",
+    package_files = [":borrowed_culori_files"],
+    package_version = "0.0.0",
+    store = ":node_modules/.pnpm/@types+culori@0.0.0/node_modules/@types/culori",
+)
+
+genrule(
+    name = "borrowed_scalar_source",
+    outs = ["borrowed_scalar.ts"],
+    cmd = "echo 'import { formatHex } from \"culori\"; export const colour: string = formatHex(\"red\");' > $@",
+)
+
+ts_compile(
+    name = "borrowed_importer_inputs",
+    srcs = [
+        "lone.ts",
+        ":borrowed_scalar_source",
+    ],
+    node_modules = "//tests/npm:node_modules",
+    source_node_modules = [":node_modules"],
+    deps = [
+        "@npm//:culori",
+        "@npm//:types_culori",
+    ],
+)
+
+borrowed_importer_inputs_test(
+    name = "borrowed_importer_does_not_lose_declared_link_or_admit_unrelated_links_test",
+    importer = ":node_modules",
+    target_under_test = ":borrowed_importer_inputs",
+)
+
+ts_compile(
+    name = "native_context_emitted",
+    srcs = [":borrowed_scalar_source"],
+    emit = True,
+    node_modules = ":node_modules",
+    tsconfig = ":commonjs_inputs_config",
+    deps = [
+        ":borrowed_culori_types",
+        ":generated_ambient",
+        "@npm//:culori",
+    ],
+)
+
+ts_binary(
+    name = "native_context_binary",
+    entry_point = ":native_context_emitted",
+)
+
+# These analysis subjects use library sources, not executable test assertions.
+[
+    ts_test(
+        name = name,
+        srcs = ["mixed_compiler_input_layout.ts"],
+        emit = False,
+        node_modules = "//tests/npm:node_modules",
+        tags = ["manual"],
+        deps = [
+            producer,
+            "@npm//:vitest",
+        ],
+    )
+    for name, producer in [
+        ("native_context_source_test", ":borrowed_importer_inputs"),
+        ("native_context_twin_test", ":native_context_emitted"),
+    ]
+]
+
+[
+    runtime_npm_context_test(
+        name = "runtime_npm_context_" + name + "_retains_source_store_test",
+        importer = ":node_modules",
+        producer = producer,
+        source = ":borrowed_scalar_source",
+        source_mode = name == "source",
+        target_under_test = subject,
+        twin = name == "twin",
+    )
+    for name, producer, subject in [
+        ("binary", ":native_context_emitted", ":native_context_binary"),
+        ("source", ":borrowed_importer_inputs", ":native_context_source_test"),
+        ("twin", ":native_context_emitted", ":native_context_twin_test"),
+    ]
+]
 
 # A subtree and a JavaScript source in one target. The nested source sorts
 # first, so a strip prefix or rootDir taken from srcs[0] would be its directory.
@@ -103,8 +275,6 @@ build_test(
     targets = [":derived_resolution"],
 )
 
-# Srcs from another package hang off the exec root, which is the shape a
-# ts_compile in the top-level package has for all of its srcs.
 ts_compile(
     name = "from_exec_root",
     srcs = [
@@ -118,7 +288,7 @@ ts_compile(
 
 declare_command_line_test(
     name = "declare_from_exec_root_test",
-    root_dir = ".",
+    root_dir = "tests/compiler_options",
     target_under_test = ":from_exec_root",
 )
 
@@ -246,6 +416,26 @@ build_test(
     targets = [":own_generated_type_file"],
 )
 
+generated_type_inputs(name = "type_input_files")
+
+exec_type_inputs(
+    name = "exec_type_input_files",
+    producer = ":type_input_files",
+)
+
+# keep
+ts_compile(
+    name = "transitioned_type_inputs",
+    srcs = ["transitioned_types/consumer.ts"],
+    emit = False,
+    type_inputs = [":exec_type_input_files"],
+)
+
+build_test(
+    name = "transitioned_type_inputs_cannot_lose_logical_package_test",
+    targets = [":transitioned_type_inputs"],
+)
+
 # ── The guards ───────────────────────────────────────────────────────────────
 
 # --//ts:declaration_map under --//ts:declarations=oxc: oxc emits no map.
@@ -267,8 +457,6 @@ genrule(
     cmd = "echo 'export const generated = 1;' > $@",
 )
 
-# A checked-in source and a generated one hang off different roots, and one
-# declaration emit has one rootDir.
 ts_compile(
     name = "mixed_source_roots",
     srcs = [
@@ -329,4 +517,685 @@ ts_config(
     name = "commonjs_inputs_config",
     src = "tsconfig.commonjs-inputs.json",
     module = "commonjs",
+)
+
+[
+    ts_compile(
+        name = name,
+        srcs = [
+            name + ".ts",
+            foreign,
+        ],
+        emit = True,
+        package_scopes = package_scopes,
+        tags = ["manual"],
+        type_inputs = type_inputs,
+    )
+    for name, foreign, type_inputs, package_scopes in [
+        ("mixed_generated_layout", "//tests/compiler_options/layout:value.ts", [], []),
+        ("mixed_json_layout", "//tests/compiler_options/layout:authored.json", [], []),
+        (
+            "mixed_compiler_input_layout",
+            "//tests/compiler_options/layout:runtime_json",
+            ["//tests/compiler_options/layout:authored.json"],
+            [],
+        ),
+        (
+            "mixed_scope_input_layout",
+            "//tests/compiler_options/layout:runtime_json",
+            [],
+            ["//tests/compiler_options/layout:authored.json"],
+        ),
+    ]
+]
+
+[
+    json_module_survives_metadata_test(
+        name = name + "_test",
+        source = "//tests/compiler_options/layout:authored.json",
+        target_under_test = ":" + name,
+    )
+    for name in [
+        "mixed_json_layout",
+        "mixed_compiler_input_layout",
+        "mixed_scope_input_layout",
+    ]
+]
+
+independent_library_roots_test(
+    name = "independent_local_and_foreign_library_roots_test",
+    target_under_test = ":mixed_generated_layout",
+)
+
+# This fixture is analyzed under the Oxc transition below.
+ts_compile(
+    name = "generated_runtime_layout",
+    srcs = [
+        "lone.ts",
+        "//tests/compiler_options/layout:value.js",
+        "//tests/compiler_options/layout:value.json",
+    ],
+    emit = True,
+    tags = ["manual"],
+)
+
+generated_runtime_layout_test(
+    name = "generated_runtime_layout_test",
+    target_under_test = ":generated_runtime_layout",
+)
+
+generated_runtime_layout_test(
+    name = "coherent_owned_import_test",
+    target_under_test = "//tests/compiler_options/layout:coherent_owned_import",
+)
+
+[
+    write_file(
+        name = "generated_cycle_" + name,
+        out = "generated_cycle/" + name + ".mjs",
+        content = content,
+    )
+    for name, content in [
+        (
+            "entry",
+            [
+                "export const identity = {};",
+                "export const throughCycle = async () => (await import('./back.mjs')).identityFromEntry();",
+            ],
+        ),
+        (
+            "back",
+            [
+                "import { identity } from './entry.mjs';",
+                "export const identityFromEntry = () => identity;",
+            ],
+        ),
+    ]
+]
+
+ts_compile(
+    name = "canonical_generated_cycle",
+    srcs = [
+        ":generated_cycle_back",
+        ":generated_cycle_entry",
+    ],
+    emit = False,
+)
+
+ts_compile(
+    name = "declared_generated_cycle",
+    srcs = [":generated_cycle_entry"],
+    emit = True,
+    deps = [
+        ":canonical_generated_cycle",
+        ":mixed_generated_layout",
+    ],
+)
+
+# #235: checked declarations suppressed the generated cycle's native runtime alias.
+declaration_ownership_runtime_alias_test(
+    name = "declaration_ownership_cannot_remove_generated_runtime_alias_test",
+    producer = ":canonical_generated_cycle",
+    source = ":generated_cycle_entry",
+    target_under_test = ":declared_generated_cycle",
+)
+
+[
+    write_file(
+        name = "dev_generated_" + kind,
+        out = "dev_generated/" + filename,
+        content = [content],
+    )
+    for kind, filename, content in [
+        ("js", "value.js", "export const generated = 42;"),
+        ("json", "value.json", '{"value":42}'),
+        ("scope", "package.json", '{"type":"module"}'),
+    ]
+]
+
+ts_compile(
+    name = "dev_generated_producer",
+    srcs = [
+        ":dev_generated_js",
+        ":dev_generated_json",
+        "//tests/compiler_options/layout:a.ts",
+    ],
+    emit = True,
+    package_scopes = [":dev_generated_scope"],
+    tsconfig = "tsconfig.checkjs.json",
+    deps = ["//tests/compiler_options/layout:dep"],
+)
+
+ts_compile(
+    name = "dev_generated_entry",
+    srcs = ["lone.ts"],
+    data = ["//tests/compiler_options/layout:authored.json"],
+    type_inputs = [
+        "tsconfig.json",
+        "//tests/compiler_options/layout:authored.json",
+    ],
+    deps = [":dev_generated_producer"],
+)
+
+ts_compile(
+    name = "dev_asset_unmoved",
+    srcs = ["lone.ts"],
+    data = ["//tests/compiler_options/layout:authored.json"],
+    deps = ["//tests/workers_nested:worker_assets"],
+)
+
+ts_compile(
+    name = "dev_asset_extended_entry",
+    srcs = ["lone.ts"],
+    deps = [
+        ":dev_generated_producer",
+        "//tests/workers_nested:worker_assets",
+    ],
+)
+
+ts_dev_server(
+    name = "dev_generated_server",
+    entry_point = ":dev_generated_entry",
+    node_modules = "//tests/npm:node_modules",
+    plugin = "//vite:vite_plugin_bazel",
+    server = "//vite:dev_server",
+)
+
+dev_server_generated_dependency_files_test(
+    name = "dev_server_retains_original_generated_dependency_files_test",
+    asset = "//tests/compiler_options/layout:authored.json",
+    entry = ":dev_generated_entry",
+    extended = ":dev_asset_extended_entry",
+    metadata = "tsconfig.json",
+    originals = [
+        ":dev_generated_js",
+        ":dev_generated_json",
+        ":dev_generated_scope",
+    ],
+    outside_asset = "//tests/workers_nested:src/greeting.txt",
+    producer = ":dev_generated_producer",
+    target_under_test = ":dev_generated_server",
+    unmoved = ":dev_asset_unmoved",
+)
+
+previous_shape_provider(
+    name = "previous_shape_declaration",
+)
+
+previous_shape_provider(
+    name = "previous_shape_runtime",
+    data_path = "previous_shape_runtime/package.json",
+    runtime = True,
+)
+
+ts_compile(
+    name = "previous_shape_declaration_consumer",
+    srcs = ["previous_shape_declaration_consumer.ts"],
+    emit = True,  # keep
+    deps = [":previous_shape_declaration"],
+)
+
+ts_compile(
+    name = "previous_shape_runtime_consumer",
+    srcs = ["previous_shape_runtime_consumer.ts"],
+    data = [
+        "tsconfig.json",
+        ":previous_shape_runtime",
+    ],
+    emit = True,  # keep
+    deps = [
+        ":previous_shape_runtime",
+        "//tests/compiler_options/layout:dep",
+    ],
+)
+
+previous_shape_provider_consumption_test(
+    name = "previous_shape_declaration_does_not_break_emitted_consumer_test",
+    dep = ":previous_shape_declaration",
+    target_under_test = ":previous_shape_declaration_consumer",
+)
+
+previous_shape_provider_consumption_test(
+    name = "previous_shape_runtime_does_not_break_emitted_consumer_test",
+    dep = ":previous_shape_runtime",
+    target_under_test = ":previous_shape_runtime_consumer",
+)
+
+genrule(
+    name = "scope_metadata",
+    outs = ["scope/package.json"],
+    cmd = "echo '{\"type\":\"module\"}' > $@",
+)
+
+ts_compile(
+    name = "scope_forwarder",
+    srcs = [],
+    package_scopes = [":scope_metadata"],
+)
+
+[
+    ts_compile(
+        name = name,
+        srcs = [source],
+        emit = True,
+        package_scopes = scopes,
+        tags = ["manual"],
+        deps = deps,
+    )
+    for name, source, scopes, deps in [
+        (
+            "direct_scope_metadata",
+            "scope/value.ts",
+            [":scope_metadata"],
+            [],
+        ),
+        (
+            "dependency_scope_metadata",
+            "scope/dependency.ts",
+            [],
+            [":scope_forwarder"],
+        ),
+    ]
+]
+
+[
+    test(
+        name = name + "_" + backend + "_test",
+        scope = "tests/compiler_options/analysis/scope/package.json",
+        target_under_test = ":" + name,
+    )
+    for name in [
+        "direct_scope_metadata",
+        "dependency_scope_metadata",
+    ]
+    for backend, test in [
+        ("oxc", scope_inputs_oxc_test),
+        ("tsgo", scope_inputs_tsgo_test),
+    ]
+]
+
+ts_compile(
+    name = "non_scope_metadata",
+    srcs = ["lone.ts"],
+    emit = True,
+    package_scopes = ["//tests/compiler_options/layout:authored.json"],
+    tags = ["manual"],
+)
+
+non_scope_metadata_test(
+    name = "ordinary_json_cannot_be_scope_metadata_test",
+    target_under_test = ":non_scope_metadata",
+)
+
+[
+    filegroup(
+        name = name,
+        srcs = ["scope_asset/" + directory + "/package.json"],
+    )
+    for name, directory in [
+        ("scope_metadata_alias", "asset"),
+        ("reused_scope_metadata_alias", "reused"),
+    ]
+]
+
+ts_compile(
+    name = "scope_metadata_asset",
+    srcs = ["scope_asset/asset/value.ts"],
+    data = ["scope_asset/asset/package.json"],
+    emit = True,
+    package_scopes = [
+        "scope_asset/asset/package.json",
+        ":scope_metadata_alias",
+    ],
+    tags = ["manual"],
+)
+
+scope_inputs_oxc_test(
+    name = "scope_asset_has_one_runtime_path_test",
+    scope = "tests/compiler_options/analysis/scope_asset/asset/package.json",
+    scope_source = True,
+    staged = True,
+    target_under_test = ":scope_metadata_asset",
+)
+
+[
+    ts_compile(
+        name = name,
+        srcs = [],
+        package_scopes = ["scope_asset/" + directory + "/package.json"],
+    )
+    for name, directory in [
+        ("authored_scope_forwarder", "forwarded"),
+        ("transitive_scope_forwarder", "transitive"),
+        ("reused_scope_forwarder", "reused"),
+    ]
+]
+
+ts_compile(
+    name = "authored_scope_transitive",
+    srcs = [],
+    deps = [":transitive_scope_forwarder"],
+)
+
+ts_compile(
+    name = "compiler_scope_forwarder",
+    srcs = [],
+    type_inputs = ["scope_asset/package.json"],
+)
+
+[
+    write_file(
+        name = "source_identity_" + extension,
+        out = "scope_asset/source_identity/generated." + extension,
+        content = [content],
+    )
+    for extension, content in [
+        ("ts", "export const value = 42;"),
+        ("json", '{"value":42}'),
+    ]
+]
+
+ts_compile(
+    name = "source_identity",
+    srcs = [
+        "silent.tsconfig.json",
+        "util.js",
+        ":source_identity_json",
+        ":source_identity_ts",
+    ],
+    data = ["scope_asset/authored/package.json"],
+    emit = False,
+    package_scopes = ["scope_asset/package.json"],
+)
+
+source_publication_identity_test(
+    name = "source_publication_cannot_replace_unchanged_module_or_scope_test",
+    asset = "scope_asset/authored/package.json",
+    originals = [
+        "silent.tsconfig.json",
+        "util.js",
+        ":source_identity_json",
+        ":source_identity_ts",
+    ],
+    scope = "scope_asset/package.json",
+    target_under_test = ":source_identity",
+)
+
+ts_compile(
+    name = "emitted_scope_supplier",
+    srcs = ["scope_asset/dependency.ts"],
+    emit = True,
+    package_scopes = ["scope_asset/package.json"],
+    tags = ["manual"],
+)
+
+[
+    ts_compile(
+        name = name,
+        srcs = [source],
+        data = [":reused_scope_metadata_alias"] if name == "reused_runtime_scope" else [],
+        emit = emit,
+        package_scopes = scopes,
+        tags = ["manual"],
+        deps = deps,
+    )
+    for name, source, scopes, deps, emit in [
+        (
+            "authored_runtime_scope",
+            "scope_asset/authored/value.ts",
+            ["scope_asset/authored/package.json"],
+            [],
+            True,
+        ),
+        (
+            "forwarded_runtime_scope",
+            "scope_asset/forwarded/value.ts",
+            [],
+            [":authored_scope_forwarder"],
+            True,
+        ),
+        (
+            "transitive_runtime_scope",
+            "scope_asset/transitive/value.ts",
+            [],
+            [":authored_scope_transitive"],
+            True,
+        ),
+        (
+            "compiler_only_runtime_scope",
+            "scope_asset/compiler_only.ts",
+            [],
+            [":compiler_scope_forwarder"],
+            True,
+        ),
+        (
+            "source_runtime_scope",
+            "scope_asset/value.ts",
+            ["scope_asset/package.json"],
+            [],
+            False,
+        ),
+        (
+            "emitted_dependency_runtime_scope",
+            "scope_asset/value.ts",
+            [],
+            [":emitted_scope_supplier"],
+            True,
+        ),
+        (
+            "reused_runtime_scope",
+            "scope_asset/reused/value.ts",
+            ["scope_asset/reused/package.json"],
+            [":reused_scope_forwarder"],
+            True,
+        ),
+    ]
+]
+
+[
+    scope_inputs_oxc_test(
+        name = name + "_test",
+        compiler_only = name == "compiler_only_runtime_scope",
+        scope = "tests/compiler_options/analysis/scope_asset/" + directory + "package.json",
+        scope_source = True,
+        staged = name != "source_runtime_scope",
+        target_under_test = ":" + name,
+    )
+    for name, directory in [
+        ("authored_runtime_scope", "authored/"),
+        ("forwarded_runtime_scope", "forwarded/"),
+        ("transitive_runtime_scope", "transitive/"),
+        ("compiler_only_runtime_scope", ""),
+        ("source_runtime_scope", ""),
+        ("reused_runtime_scope", "reused/"),
+        ("emitted_dependency_runtime_scope", ""),
+    ]
+]
+
+previous_shape_provider(
+    name = "conflicting_scope_asset",
+    data_path = "scope_asset/package.json",
+    tags = ["manual"],
+)
+
+[
+    ts_compile(
+        name = name,
+        srcs = ["scope_asset/value.ts"],
+        data = data,
+        emit = True,
+        package_scopes = ["scope_asset/package.json"],
+        tags = ["manual"],
+        deps = deps,
+    )
+    for name, data, deps in [
+        (
+            "scope_conflicting_asset",
+            [":conflicting_scope_asset"],
+            [],
+        ),
+        (
+            "scope_opaque_destination",
+            [],
+            [":conflicting_scope_asset"],
+        ),
+    ]
+]
+
+scope_destination_conflict_test(
+    name = "scope_cannot_reuse_another_assets_contents_test",
+    target_under_test = ":scope_conflicting_asset",
+)
+
+opaque_scope_destination_test(
+    name = "scope_cannot_substitute_opaque_runtime_contents_test",
+    target_under_test = ":scope_opaque_destination",
+)
+
+[
+    scope_admission(
+        name = name,
+        src = "scope_asset/nested/value.ts",
+        live = live,
+        scope = "scope_asset/package.json",
+        shadowed = shadowed,
+        tags = ["manual"] if live else [],
+    )
+    for name, live, shadowed in [
+        ("published_module_missing_scope", True, False),
+        ("unpublished_module_missing_scope", False, False),
+        ("published_module_shadowed_scope", True, True),
+    ]
+]
+
+missing_runtime_scope_test(
+    name = "published_module_requires_runtime_scope_test",
+    target_under_test = ":published_module_missing_scope",
+)
+
+build_test(
+    name = "unpublished_module_does_not_require_runtime_scope_test",
+    targets = [":unpublished_module_missing_scope"],
+)
+
+shadowed_runtime_scope_test(
+    name = "published_module_rejects_runtime_scope_shadow_test",
+    target_under_test = ":published_module_shadowed_scope",
+)
+
+republished_runtime_owner(
+    name = "data_republished_owner",
+    src = "scope_asset/value.ts",
+    asset = ":mixed_json_layout",
+    json = "tsconfig.json",
+    scope = "scope_asset/package.json",
+)
+
+ts_compile(
+    name = "data_republished_runtime",
+    srcs = [],
+    data = [":data_republished_owner"],
+    deps = [":data_republished_owner"],
+)
+
+ts_compile(
+    name = "data_republished_runtime_relocated",
+    srcs = [],
+    data = [":data_republished_owner"],
+    emit = True,
+    deps = [
+        ":data_republished_owner",
+        ":dev_generated_producer",
+    ],
+)
+
+# #235: data publication caused a false scope shadow in the Gazelle roundtrip.
+data_publication_identity_test(
+    name = "data_publication_cannot_reinterpret_emitted_source_test",
+    asset_producer = ":mixed_json_layout",
+    producer = ":data_republished_owner",
+    relocated = ":data_republished_runtime_relocated",
+    target_under_test = ":data_republished_runtime",
+)
+
+write_file(
+    name = "ordinary_asset_member_manifest",
+    out = "package.json",
+    content = ['{"name":"publication-member","version":"0.0.0"}'],
+)
+
+ts_compile(
+    name = "ordinary_asset_member",
+    srcs = [],
+    data = ["//tests/compiler_options/layout:authored.json"],
+    emit = True,
+    package_scopes = [":ordinary_asset_member_manifest"],
+    deps = [":data_republished_owner"],
+)
+
+npm_store_member(
+    name = "node_modules/.pnpm/publication-member@0.0.0/node_modules/publication-member",
+    member = ":ordinary_asset_member",
+    member_dir = "tests/compiler_options/analysis",
+)
+
+# keep
+ts_compile(
+    name = "scope_alias_metadata_member",
+    emit = True,
+    package_scopes = [
+        ":ordinary_asset_member_manifest",
+        "scope_alias/package.json",
+    ],
+)
+
+npm_store_member(
+    name = "node_modules/.pnpm/scope-alias-metadata@0.0.0/node_modules/scope-alias-metadata",
+    member = ":scope_alias_metadata_member",
+    member_dir = "tests/compiler_options/analysis",
+)
+
+member_scope_alias_test(
+    name = "member_cannot_reject_metadata_only_scope_alias_test",
+    producer = ":scope_alias_metadata_member",
+    scope = "scope_alias/package.json",
+    target_under_test = ":node_modules/.pnpm/scope-alias-metadata@0.0.0/node_modules/scope-alias-metadata",
+)
+
+scope_alias_member(
+    name = "scope_alias_json_member",
+    json_module = True,
+    producer = ":scope_alias_metadata_member",
+    scope = "scope_alias/package.json",
+)
+
+npm_store_member(
+    name = "node_modules/.pnpm/scope-alias-json@0.0.0/node_modules/scope-alias-json",
+    member = ":scope_alias_json_member",
+    member_dir = "tests/compiler_options/analysis",
+    tags = ["manual"],
+)
+
+member_scope_module_alias_test(
+    name = "member_cannot_copy_scope_alias_used_as_json_module_test",
+    target_under_test = ":node_modules/.pnpm/scope-alias-json@0.0.0/node_modules/scope-alias-json",
+)
+
+scope_alias_member(
+    name = "scope_alias_conflicting_member",
+    other = "scope_asset/asset/package.json",
+    producer = ":scope_alias_metadata_member",
+    scope = "scope_alias/package.json",
+)
+
+npm_store_member(
+    name = "node_modules/.pnpm/scope-alias-conflict@0.0.0/node_modules/scope-alias-conflict",
+    member = ":scope_alias_conflicting_member",
+    member_dir = "tests/compiler_options/analysis",
+    tags = ["manual"],
+)
+
+member_scope_alias_conflict_test(
+    name = "member_cannot_copy_ambiguous_scope_alias_test",
+    target_under_test = ":node_modules/.pnpm/scope-alias-conflict@0.0.0/node_modules/scope-alias-conflict",
 )

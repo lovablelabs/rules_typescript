@@ -2,88 +2,77 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func planNode(cfg *Config, r *Resolver, plan *Plan, args []string) (*Plan, error) {
-	n := cfg.Node
-	argv, err := runtimeCommand(cfg, r)
+func nativeResolver(cfg *Config, original *Resolver, plan *Plan) (*Resolver, error) {
+	if cfg.NativeViewAnchor == "" {
+		return nil, fmt.Errorf("ts_launcher: native execution requires a build-owned runtime view; rebuild with the matching ruleset tools")
+	}
+	if !fs.ValidPath(cfg.NativeViewAnchor) || !filepath.IsLocal(filepath.FromSlash(cfg.NativeViewAnchor)) || !strings.HasSuffix(cfg.NativeViewAnchor, ".json") {
+		return nil, fmt.Errorf("ts_launcher: invalid native view anchor %q", cfg.NativeViewAnchor)
+	}
+	config, err := original.Path(cfg.NativeViewAnchor)
 	if err != nil {
 		return nil, err
 	}
-	entry, err := r.Path(n.Entry)
+	config, err = filepath.EvalSymlinks(config)
 	if err != nil {
 		return nil, err
 	}
-
-	// A temp directory, not the runfiles tree: the runfiles tree is read-only
-	// for tools inside action sandboxes and immutable after `bazel run`.
-	scratch := ""
-	tempDir := func() (string, error) {
-		if scratch != "" {
-			return scratch, nil
-		}
-		tmp, err := os.MkdirTemp("", "ts_launcher_nm")
-		if err != nil {
-			return "", err
-		}
-		scratch = tmp
-		plan.Cleanup = func() { _ = os.RemoveAll(tmp) }
-		plan.UseExec = false
-		return tmp, nil
+	root := filepath.Join(strings.TrimSuffix(config, ".json")+".runtime", "view")
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
 	}
-
-	if n.NodeModules != "" {
-		root := r.Dir()
-		if root == "" {
-			if root, err = tempDir(); err != nil {
-				return nil, err
-			}
-		}
-		chain := []string{n.NodeModules}
-		_, err = installNodeModules(r, plan, root, cfg.Workspace, chain)
-		if err != nil {
-			return nil, err
-		}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("ts_launcher: native view %q is not a directory", root)
 	}
-
-	if len(n.OptionalDeps) > 0 {
-		tmp, err := tempDir()
-		if err != nil {
-			return nil, err
-		}
-		for _, dep := range n.OptionalDeps {
-			if err := linkPackage(r, tmp, dep); err != nil {
-				return nil, err
-			}
-		}
-		plan.prependPath("NODE_PATH", tmp)
+	r, err := directoryResolver(root)
+	if err != nil {
+		return nil, err
 	}
-
-	plan.Argv = append(append(argv, entry), args...)
-	return plan, nil
+	plan.runfilesEnv = r.Env()
+	return r, nil
 }
 
-// linkPackage exposes one npm package as $root/<name>, because Node resolves
-// require.resolve('<name>/binary') only inside a directory called node_modules
-// and one-repository-per-package leaves no such directory near the script.
-func linkPackage(r *Resolver, root string, dep PackageLink) error {
-	if dep.Name == "" || dep.PackageJSON == "" {
-		return fmt.Errorf("ts_launcher: optional dep needs both name and package_json, got %+v", dep)
+func nativeNodePath(r *Resolver, plan *Plan, paths []string) error {
+	for i := len(paths) - 1; i >= 0; i-- {
+		path, err := r.Path(paths[i])
+		if err != nil {
+			return err
+		}
+		if isDir(path) {
+			plan.prependPath("NODE_PATH", path)
+		}
 	}
-	pkgJSON, err := r.Path(dep.PackageJSON)
+	return nil
+}
+
+func planNode(cfg *Config, original *Resolver, plan *Plan, args []string) (*Plan, error) {
+	argv, err := runtimeCommand(cfg, original)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	link := filepath.Join(root, filepath.FromSlash(dep.Name))
-	if strings.HasPrefix(dep.Name, "@") && !strings.Contains(dep.Name, "/") {
-		return fmt.Errorf("ts_launcher: scoped package name %q has no '/'", dep.Name)
+	r, err := nativeResolver(cfg, original, plan)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
-		return err
+	entry, err := r.Path(cfg.Node.Entry)
+	if err != nil {
+		return nil, err
 	}
-	_ = os.Remove(link)
-	return os.Symlink(filepath.Dir(pkgJSON), link)
+	if cfg.Node.NodeModules != "" {
+		if err := nativeNodePath(r, plan, []string{cfg.Node.NodeModules}); err != nil {
+			return nil, err
+		}
+	}
+	if len(cfg.Node.OptionalDeps) > 0 {
+		plan.prependPath("NODE_PATH", filepath.Join(r.Dir(), "..", "optional", "node_modules"))
+	}
+	plan.Argv = append(append(argv, entry), args...)
+	return plan, nil
 }

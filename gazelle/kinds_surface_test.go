@@ -12,6 +12,7 @@ import (
 
 // wantKinds is every kind this extension writes or withdraws.
 var wantKinds = []string{
+	"exports_files",
 	"filegroup",
 	"node_modules",
 	"node_modules_member",
@@ -25,8 +26,6 @@ var wantKinds = []string{
 	"ts_test",
 }
 
-// wantLoads is the load lines by file: every kind but filegroup, which is
-// native; the store call comes from the hub.
 var wantLoads = map[string][]string{
 	"@npm//:defs.bzl":                   {"npm_virtual_store"},
 	"@rules_typescript//npm:defs.bzl":   {"node_modules", "node_modules_member"},

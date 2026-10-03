@@ -8,10 +8,8 @@ load("@rules_typescript//ts:defs.bzl", "ts_compile")
 # keep
 ts_compile(
     name = "subpath-member",
-    srcs = [
-        "package.json",
-        "src/value.ts",
-    ],
+    srcs = ["src/value.ts"],
     emit = True,  # keep
+    package_scopes = ["package.json"],
     visibility = ["//visibility:public"],
 )

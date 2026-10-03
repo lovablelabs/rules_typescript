@@ -12,7 +12,10 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "harness",
     testonly = True,
-    srcs = ["harness.go"],
+    srcs = [
+        "archive.go",
+        "harness.go",
+    ],
     importpath = "github.com/mikn/rules_typescript/tests/integration/harness",
     visibility = ["//tests/integration:__subpackages__"],
     deps = [

@@ -1,7 +1,7 @@
-"""--//ts:checkers=N puts --checkers N on TsgoCheck's and TsgoDeclare's
-command lines; at 0, the default, tsgo's thread count is its own. The cpu:N
-requirement the same actions carry is aquery's to show: Starlark's Action
-has no execution_info."""
+"""--//ts:checkers=N puts --checkers N on TsgoCheck's tsgo command line and
+-checkers=N on TsgoDeclare's tsaction emit, which hands tsgo --checkers N; at
+0, the default, tsgo's thread count is its own. The cpu:N requirement the same
+actions carry is aquery's to show: Starlark's Action has no execution_info."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 
@@ -14,10 +14,13 @@ def _tsgo_actions(env):
         if action.mnemonic in _TSGO
     }
 
-def _value_after(argv, flag):
-    if flag not in argv:
+def _checkers(mnemonic, argv):
+    if mnemonic == "TsgoDeclare":
+        values = [arg[len("-checkers="):] for arg in argv if arg.startswith("-checkers=")]
+        return ",".join(values) if values else None
+    if "--checkers" not in argv:
         return None
-    return argv[argv.index(flag) + 1]
+    return argv[argv.index("--checkers") + 1]
 
 def _sixteen_impl(ctx):
     env = analysistest.begin(ctx)
@@ -28,7 +31,7 @@ def _sixteen_impl(ctx):
             asserts.equals(
                 env,
                 "16",
-                _value_after(actions[mnemonic].argv, "--checkers"),
+                _checkers(mnemonic, actions[mnemonic].argv),
                 mnemonic + " passes --checkers 16",
             )
     return analysistest.end(env)
@@ -44,9 +47,10 @@ def _default_impl(ctx):
     for mnemonic in _TSGO:
         asserts.true(env, mnemonic in actions, "the leaf runs " + mnemonic)
         if mnemonic in actions:
-            asserts.false(
+            asserts.equals(
                 env,
-                "--checkers" in actions[mnemonic].argv,
+                None,
+                _checkers(mnemonic, actions[mnemonic].argv),
                 mnemonic + " leaves tsgo's thread count alone",
             )
     return analysistest.end(env)

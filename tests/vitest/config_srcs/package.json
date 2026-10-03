@@ -1,0 +1,6 @@
+{
+  "name": "local-config-scope",
+  "type": "module",
+  "exports": { ".": "./config_srcs.test.ts" },
+  "imports": { "#value": "./config_srcs.test.ts" }
+}

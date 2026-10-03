@@ -10,6 +10,7 @@ ts_compile(
     node_modules = "//:node_modules",
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
+    deps = ["//:root"],
 )
 
 ts_test(
@@ -20,6 +21,7 @@ ts_test(
     tsconfig = ":tsconfig",
     deps = [
         ":lib",
+        "//:root",
         "@npm//:vite",
         "@npm//:vitest",
     ],
