@@ -59,8 +59,9 @@ for (const pair of flags.runtimeFiles) {
   selected.add(runtime);
   runtimeFiles.set(source, selected);
 }
-const runtimeSources = new Set(flags.runtimeSources);
-const runtimeJs = new Set(flags.runtimeJs);
+const paired = new Set([...runtimeFiles.values()].flatMap((runtimes) => [...runtimes]));
+const runtimeSources = new Set(flags.runtimeSources.filter((path) => !paired.has(path)));
+const runtimeJs = new Set(flags.runtimeJs.filter((path) => !paired.has(path)));
 const compiledExtensions = { ts: "js", tsx: "js", mts: "mjs", cts: "cjs" };
 const runtimeEntry = (main) => {
   const source = posix.normalize(posix.join(posix.dirname(configPath), main));

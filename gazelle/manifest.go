@@ -25,6 +25,20 @@ type manifest struct {
 // nearestManifest is the package.json at or above dir, the one tsc and node
 // read for every file under dir.
 func (s *programStore) nearestManifest(c *config.Config, dir string) *manifest {
+	if s.index == nil || s.emission == nil {
+		return s.findNearestManifest(c, dir)
+	}
+	memo := s.resolutionMemo()
+	key := identityKey{c, dir}
+	if m, ok := memo.manifests[key]; ok {
+		return m
+	}
+	m := s.findNearestManifest(c, dir)
+	memo.manifests[key] = m
+	return m
+}
+
+func (s *programStore) findNearestManifest(c *config.Config, dir string) *manifest {
 	for ; ; dir = parentDir(dir) {
 		switch s.metadataIdentity(c, path.Join(dir, "package.json")) {
 		case generatedInput, unknownInput:
@@ -60,12 +74,20 @@ type resolutionMemo struct {
 	stamp      identityStamp
 	identities map[identityKey]inputIdentity
 	generated  map[generatedKey]bool
+	trees      map[string]treeOwner
+	producers  map[string]fileProducer
+	manifests  map[identityKey]*manifest
+	// Per directory: its indexed codegen tree and the trees declared at or above it.
+	indexedTrees  map[string]treeOwner
+	ancestorTrees map[string]ancestorTrees
 }
 
 func (s *programStore) resolutionMemo() *resolutionMemo {
 	stamp := identityStamp{s.index, s.emission.listEpoch, s.emission.outputsGeneration}
 	if s.memo == nil || s.memo.stamp != stamp {
-		s.memo = &resolutionMemo{stamp: stamp, identities: map[identityKey]inputIdentity{}, generated: map[generatedKey]bool{}}
+		s.memo = &resolutionMemo{stamp: stamp, identities: map[identityKey]inputIdentity{}, generated: map[generatedKey]bool{},
+			trees: map[string]treeOwner{}, producers: map[string]fileProducer{}, manifests: map[identityKey]*manifest{},
+			indexedTrees: map[string]treeOwner{}, ancestorTrees: map[string]ancestorTrees{}}
 	}
 	return s.memo
 }

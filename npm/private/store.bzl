@@ -170,9 +170,12 @@ def _store_info(ctx, parts, tree, links):
 def _npm_store_impl(ctx):
     parts = _store_parts(ctx.label.name)
     tree = ctx.actions.declare_directory(ctx.label.name)
-    root = ctx.file.package_dir.dirname + "/"
+    package = ctx.file.package_dir.dirname
+    root = package + "/"
 
     def dest(f):
+        if f.path == package:
+            return "."
         if not f.path.startswith(root):
             fail("{}: {} lies outside the package at {}".format(
                 ctx.label,
@@ -198,7 +201,8 @@ npm_store = rule(
     attrs = {
         "files": attr.label(
             mandatory = True,
-            doc = "The snapshot repository's `:files` filegroup.",
+            doc = "The snapshot repository's `:files` filegroup: the package " +
+                  "directory, or files inside it.",
         ),
         "package_dir": attr.label(
             mandatory = True,

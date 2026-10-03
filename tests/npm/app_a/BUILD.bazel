@@ -93,7 +93,6 @@ ts_npm_package(
     name = "registry_shared",
     package_name = "shared",
     package_dir = ":registry_shared_manifest",
-    package_files = [":registry_shared_files"],
     package_version = "0.0.0",
     store = ":node_modules/.pnpm/shared@0.0.0/node_modules/shared",
     visibility = [

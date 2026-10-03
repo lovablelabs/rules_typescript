@@ -55,7 +55,6 @@ ts_npm_package(
     name = "member_only",
     package_name = "member-only",
     package_dir = ":member_only_manifest",
-    package_files = [":member_only_files"],
     package_version = "2.0.0",
     store = ":node_modules/.pnpm/member-only@2.0.0/node_modules/member-only",
 )

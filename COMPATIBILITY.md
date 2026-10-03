@@ -15,6 +15,13 @@ file optional and Bazel 9 stopped reading it, so `MODULE.bazel` alone marks a
 repository root. `.bazelversion` in this repository pins 9.2.0 and CI installs
 Bazelisk against it.
 
+Each npm package reaches its store copy as one source directory. Bazel 9
+tracks a source directory by its contents by default. Bazel 7 and 8 do so only
+with the startup environment variable `BAZEL_TRACK_SOURCE_DIRECTORIES=1`
+(e.g. `export BAZEL_TRACK_SOURCE_DIRECTORIES=1` before the server starts);
+without it they warn "dependency checking of directories is unsound" per
+package and detect a changed package by mtime alone.
+
 ## Platforms
 
 | Platform | Status |

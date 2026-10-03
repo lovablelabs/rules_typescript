@@ -39,10 +39,10 @@ def _runtime_is_the_chain_impl(ctx):
             "the dep's npm_files",
         )
         content = launchers[0].content
-        asserts.true(
+        asserts.equals(
             env,
-            '"node_modules": [' in content and
-            '"{}/tests/npm/node_modules"'.format(ctx.workspace_name) in content,
+            ["{}/tests/npm/node_modules".format(ctx.workspace_name)],
+            json.decode(content)["vitest"]["node_modules"],
             "the launcher runs the tests in the importer's node_modules: " +
             content,
         )

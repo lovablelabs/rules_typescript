@@ -249,7 +249,6 @@ def _wrangler_config_runfiles_impl(ctx):
             asserts.true(env, ctx.attr.expected_entry in legacy_js, "the old-shaped emitted File reaches conventional entry selection")
             asserts.false(env, ctx.file.entry.short_path in legacy_sources, "the original source is not a published runtime input")
         for source, runtime in pairs.items():
-            asserts.false(env, runtime.short_path in legacy_js + legacy_sources, "explicit mappings never become inferred legacy candidates")
             asserts.true(env, [source.short_path, runtime.short_path] in transported, "the patcher receives the producer's exact source/runtime pair")
         asserts.true(env, [ctx.file.test_source.short_path, ctx.attr.expected_test] in transported, "the caller's own runtime placement is independent of the producer's")
         selected_tests = [file for file in files if file.short_path == ctx.attr.expected_test]

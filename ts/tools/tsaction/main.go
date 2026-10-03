@@ -178,15 +178,71 @@ func stage(args []string) error {
 		return err
 	}
 	for i := 0; i < len(pairs); i += 2 {
-		dest := filepath.Join(*out, pairs[i+1])
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return err
-		}
-		if err := copyFile(pairs[i], dest); err != nil {
+		if err := copyPath(pairs[i], filepath.Join(*out, pairs[i+1])); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// copyPath follows src itself, which a sandbox may stage as a link, but no link inside it.
+func copyPath(src, dest string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		return copyFile(src, dest)
+	}
+	root, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return err
+	}
+	return copyTree(root, root, dest)
+}
+
+func copyTree(root, src, dest string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		return copyLink(root, src, dest)
+	case !info.IsDir():
+		return copyFile(src, dest)
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := copyTree(root, filepath.Join(src, entry.Name()), filepath.Join(dest, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyLink(root, src, dest string) error {
+	target, err := os.Readlink(src)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, filepath.Join(filepath.Dir(src), target))
+	if filepath.IsAbs(target) || err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("stage: %s links to %q, outside the package at %s", src, target, root)
+	}
+	if _, err := os.Stat(src); err != nil {
+		return fmt.Errorf("stage: %s links to %q, which does not resolve: %w", src, target, err)
+	}
+	return os.Symlink(target, dest)
 }
 
 func copyFile(src, dest string) error {

@@ -50,6 +50,17 @@ const readOnly = project(
 );
 assert.equal(readOnly.config?.main, "entry.js");
 assert.ok(readOnly.writable, "the patched copy of a read-only config stays read-only");
+// A runtime paired with another source is never a conventional candidate for this one.
+const pairedJs = project("./entry.ts", [["../fixture/worker/a.ts", "../fixture/worker/entry.js"]], undefined, [], ["../fixture/worker/entry.js"]);
+assert.equal(pairedJs.config?.main, "./entry.ts");
+const pairedSource = project(
+  "./entry.ts",
+  [["../fixture/worker/a.ts", "../fixture/worker/entry.ts"]],
+  undefined,
+  ["../fixture/worker/entry.ts"],
+  ["../fixture/worker/entry.js"],
+);
+assert.equal(pairedSource.config?.main, "entry.js");
 for (const [source, emitted] of [
   ["ts", "js"],
   ["tsx", "js"],

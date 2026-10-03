@@ -52,6 +52,12 @@ def _pool_chain(ctx, chain):
         npm_files = owner[DefaultInfo].files,
     )
 
+def _runtime_file_arg(pair):
+    return json.encode([pair[0].short_path, pair[1].short_path])
+
+def _file_short_path(file):
+    return None if file.is_directory else file.short_path
+
 def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset_files, runtime_sources, runtime_js):
     symlinks = {}
     replacements = {}
@@ -91,12 +97,11 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset
         args.add("--config", src)
         args.add("--out", patched)
         args.add("--config-path", src.short_path)
-        args.add_all([json.encode([source, runtime.short_path]) for source, runtime in entries.items()], before_each = "--runtime-file")
+        args.add_all(runtime_files, map_each = _runtime_file_arg, before_each = "--runtime-file", uniquify = True, expand_directories = False)
 
-        # Older owners publish runtime Files without source/runtime pairs.
-        mapped = {runtime: True for _source, runtime in runtime_files}
-        args.add_all([file.short_path for file in runtime_sources.to_list() if file not in mapped and not file.is_directory], before_each = "--runtime-source")
-        args.add_all([file.short_path for file in runtime_js.to_list() if file not in mapped and not file.is_directory], before_each = "--runtime-js")
+        # Older owners publish runtime Files without source/runtime pairs; the patch drops the paired ones.
+        args.add_all(runtime_sources, map_each = _file_short_path, before_each = "--runtime-source", expand_directories = False)
+        args.add_all(runtime_js, map_each = _file_short_path, before_each = "--runtime-js", expand_directories = False)
         args.add_all(pool.dirs, before_each = "--node-modules")
         ctx.actions.run(
             inputs = depset(
