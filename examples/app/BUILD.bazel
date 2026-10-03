@@ -1,7 +1,7 @@
 load("@gazelle//:def.bzl", "gazelle")
 load("@npm//:defs.bzl", "npm_virtual_store")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
-load("@rules_typescript//ts:defs.bzl", "ts_binary", "ts_config", "ts_pnpm")
+load("@rules_typescript//ts:defs.bzl", "ts_binary", "ts_compile", "ts_config", "ts_pnpm")
 
 gazelle(
     name = "gazelle",
@@ -38,4 +38,11 @@ ts_config(
     name = "tsconfig",
     src = "tsconfig.json",
     visibility = ["//visibility:public"],
+)
+
+ts_compile(
+    name = "root",
+    emit = True,
+    package_scopes = ["package.json"],
+    visibility = ["//:__subpackages__"],
 )

@@ -12,6 +12,7 @@ ts_compile(
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
     deps = [
+        "//:root",
         "//src/hooks",
         "@npm//:react",
     ],

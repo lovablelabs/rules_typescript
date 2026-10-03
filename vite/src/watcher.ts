@@ -1,14 +1,7 @@
-/**
- * Debounced watchers over what Bazel writes: the .js files under bazel-bin, and
- * the inputs that decide whether the running Vite is still the right Vite.
- *
- * One ibazel rebuild rewrites dozens of outputs, so events are coalesced into a
- * single `onRebuild` call per quiet window instead of one HMR update per file.
- */
-
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { ResolverOptions } from './resolver.js';
 
 /**
  * The part of Vite's `server.watcher` this module uses. Vite runs that watcher
@@ -22,17 +15,14 @@ export interface WatchSource {
   unwatch?(paths: string): unknown;
 }
 
-/** Called after a debounce window with the absolute paths of changed .js files. */
 export type RebuildCallback = (changedPaths: Set<string>) => void;
 
 export interface BazelWatcherOptions {
   /** Absolute path to the bazel-bin output tree. */
   bazelBin: string;
   onRebuild: RebuildCallback;
-  /**
-   * Vite's `server.watcher`. Without one, the watcher falls back to
-   * `node:fs.watch`, whose recursive mode needs Node 20+ on Linux.
-   */
+  isDeclaredFile?: (file: string) => boolean;
+  declaredFiles?: ResolverOptions['declaredFiles'];
   source?: WatchSource;
   /**
    * Quiet period before a batch is flushed, in milliseconds (default 50).
@@ -42,17 +32,26 @@ export interface BazelWatcherOptions {
   debounceMs?: number;
 }
 
+interface NativeWatch {
+  readonly watcher: fs.FSWatcher;
+  readonly dev: number;
+  readonly ino: number;
+  readonly directory: boolean;
+}
+
 export class BazelWatcher {
   private readonly bazelBin: string;
   private readonly onRebuild: RebuildCallback;
   private readonly source: WatchSource | null;
+  private readonly isDeclaredFile: (file: string) => boolean;
+  private readonly declaredFiles: NonNullable<ResolverOptions['declaredFiles']>;
   private readonly debounceMs: number;
 
   private readonly onFileEvent = (filePath: string): void => {
     this.handleFileEvent(filePath);
   };
 
-  private fsWatcher: fs.FSWatcher | null = null;
+  private readonly watches = new Map<string, NativeWatch>();
   private attached: WatchSource | null = null;
   private pendingChanges: Set<string> = new Set();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -60,16 +59,12 @@ export class BazelWatcher {
   constructor(options: BazelWatcherOptions) {
     this.bazelBin = options.bazelBin;
     this.onRebuild = options.onRebuild;
+    this.isDeclaredFile = options.isDeclaredFile ?? (() => false);
+    this.declaredFiles = options.declaredFiles ?? {};
     this.source = options.source ?? null;
     this.debounceMs = options.debounceMs ?? 50;
   }
 
-  /**
-   * Starts watching bazel-bin for .js changes.
-   *
-   * Rejects with an actionable message when no watch is possible, so the caller
-   * can warn or fail instead of losing HMR silently.
-   */
   async start(): Promise<void> {
     if (!fs.existsSync(this.bazelBin)) {
       throw new Error(
@@ -80,7 +75,7 @@ export class BazelWatcher {
     }
 
     if (this.source !== null) {
-      this.source.add(this.bazelBin);
+      for (const root of this.watchRoots()) this.source.add(root);
       this.source.on('add', this.onFileEvent);
       this.source.on('change', this.onFileEvent);
       this.attached = this.source;
@@ -88,20 +83,16 @@ export class BazelWatcher {
     }
 
     try {
-      this.fsWatcher = fs.watch(
-        this.bazelBin,
-        { recursive: true, persistent: true },
-        (_event, filename) => {
-          if (filename === null) return;
-          this.onFileEvent(path.resolve(this.bazelBin, filename.toString()));
-        },
-      );
+      const realBin = fs.realpathSync(this.bazelBin);
+      for (const root of this.watchRoots()) {
+        if (root !== this.bazelBin &&
+          (root === realBin || bazelPathToModuleId(root, realBin) !== null)) continue;
+        this.watchEntry(root, false);
+      }
     } catch (err) {
+      await this.stop();
       const detail = err instanceof Error ? err.message : String(err);
-      throw new Error(
-        `cannot watch ${this.bazelBin} with node:fs.watch (${detail}); ` +
-          'recursive watching requires Node 20+ on Linux.',
-      );
+      throw new Error(`cannot watch ${this.bazelBin} with node:fs.watch (${detail})`);
     }
   }
 
@@ -114,19 +105,158 @@ export class BazelWatcher {
     if (this.attached !== null) {
       this.attached.off?.('add', this.onFileEvent);
       this.attached.off?.('change', this.onFileEvent);
-      this.attached.unwatch?.(this.bazelBin);
+      for (const root of this.watchRoots()) this.attached.unwatch?.(root);
       this.attached = null;
     }
-    if (this.fsWatcher !== null) {
-      this.fsWatcher.close();
-      this.fsWatcher = null;
-    }
+    for (const resource of this.watches.values()) resource.watcher.close();
+    this.watches.clear();
     this.pendingChanges.clear();
   }
 
+  private *watchRoots(): Iterable<string> {
+    yield this.bazelBin;
+    for (const file of Object.values(this.declaredFiles)) {
+      if (!file.isSource && bazelPathToModuleId(file.path, this.bazelBin) === null) yield path.dirname(file.path);
+    }
+  }
+
+  private isWatchPath(filePath: string): boolean {
+    return filePath === this.bazelBin ||
+      bazelPathToModuleId(filePath, this.bazelBin) !== null || this.isDeclaredFile(filePath);
+  }
+
+  private canFollowDirectorySymlink(filePath: string): boolean {
+    for (const root of this.watchRoots()) {
+      if (filePath === root) return true;
+    }
+    const realPath = fs.realpathSync(filePath);
+    return Object.values(this.declaredFiles).some((file) => {
+      if (file.isSource || !file.directory) return false;
+      try {
+        const root = fs.realpathSync(file.path);
+        return realPath === root || realPath.startsWith(root + path.sep);
+      } catch (err) {
+        if (!this.isUnavailableChild(file.path, err)) throw err;
+        return false;
+      }
+    });
+  }
+
+  private hasWatchedAncestor(filePath: string, stat: fs.Stats): boolean {
+    for (let ancestor = filePath; ancestor !== path.dirname(ancestor);) {
+      ancestor = path.dirname(ancestor);
+      const resource = this.watches.get(ancestor);
+      if (resource?.dev === stat.dev && resource.ino === stat.ino) return true;
+    }
+    return false;
+  }
+
+  private watchEntry(filePath: string, notify: boolean): void {
+    const previous = this.watches.get(filePath);
+    try {
+      const entry = fs.lstatSync(filePath, { throwIfNoEntry: false });
+      const stat = entry?.isSymbolicLink()
+        ? fs.statSync(filePath, { throwIfNoEntry: false })
+        : entry;
+      const directory =
+        stat?.isDirectory() === true &&
+        !this.hasWatchedAncestor(filePath, stat) &&
+        (!entry?.isSymbolicLink() || filePath === this.bazelBin || this.canFollowDirectorySymlink(filePath));
+      const needsWatch = stat !== undefined && (directory || (entry?.isSymbolicLink() && stat.isFile()));
+      if (
+        previous &&
+        (!needsWatch || previous.dev !== stat?.dev ||
+          previous.ino !== stat?.ino || previous.directory !== directory)
+      ) {
+        this.unwatchTree(filePath);
+        if (notify && previous.directory) this.enqueueChange(filePath);
+      }
+
+      if (needsWatch && stat && !this.watches.has(filePath)) {
+        const onChange: fs.WatchListener<string> = (_event, filename) => {
+          if (this.watches.get(filePath) !== resource) return;
+          this.watchEntry(filePath, true);
+          if (!resource.directory || this.watches.get(filePath) !== resource) return;
+          if (filename === null) {
+            for (const watched of [...this.watches.keys()]) {
+              if (path.dirname(watched) === filePath) this.watchEntry(watched, true);
+            }
+            this.scanDirectory(filePath, true);
+            this.enqueueChange(filePath);
+          } else {
+            const changed = path.resolve(filePath, filename.toString());
+            // oj's Deno-based plugin host reports a nested change by basename to every ancestor directory watch.
+            const known = this.watches.has(changed) || this.isDeclaredFile(changed) ||
+              fs.lstatSync(changed, { throwIfNoEntry: false }) !== undefined;
+            if (known && this.isWatchPath(changed)) this.watchEntry(changed, true);
+          }
+        };
+        const watcher = fs.watch(filePath, { persistent: true }, onChange);
+        const resource: NativeWatch = { watcher, dev: stat.dev, ino: stat.ino, directory };
+        this.watches.set(filePath, resource);
+        const current = fs.statSync(filePath, { throwIfNoEntry: false });
+        if (current?.dev !== stat.dev || current?.ino !== stat.ino) {
+          this.unwatchTree(filePath);
+          if (filePath === this.bazelBin) {
+            throw new Error(`watch identity changed while attaching to ${filePath}`);
+          }
+          // The parent directory watch observes the replacement and installs its current entry.
+          if (notify) this.enqueueChange(filePath);
+          return;
+        }
+        if (directory) this.scanDirectory(filePath, notify);
+      }
+      if (notify && !directory) this.handleFileEvent(filePath);
+    } catch (err) {
+      if (!this.isUnavailableChild(filePath, err)) throw err;
+      this.unwatchTree(filePath);
+      if (notify) {
+        if (previous?.directory) this.enqueueChange(filePath);
+        else this.handleFileEvent(filePath);
+      }
+    }
+  }
+
+  private isUnavailableChild(filePath: string, err: unknown): boolean {
+    const code = (err as NodeJS.ErrnoException).code;
+    return (
+      filePath !== this.bazelBin &&
+      (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP')
+    );
+  }
+
+  private scanDirectory(directory: string, notify: boolean): void {
+    let names: string[];
+    try {
+      names = fs.readdirSync(directory);
+    } catch (err) {
+      if (!this.isUnavailableChild(directory, err)) throw err;
+      this.unwatchTree(directory);
+      if (notify) this.enqueueChange(directory);
+      return;
+    }
+    for (const name of names) {
+      const child = path.join(directory, name);
+      if (this.isWatchPath(child)) this.watchEntry(child, notify);
+    }
+  }
+
+  private unwatchTree(directory: string): void {
+    for (const [watched, resource] of this.watches) {
+      if (watched === directory || watched.startsWith(directory + path.sep)) {
+        this.watches.delete(watched);
+        resource.watcher.close();
+      }
+    }
+  }
+
   private handleFileEvent(absolutePath: string): void {
-    if (!absolutePath.endsWith('.js')) return;
-    if (bazelPathToModuleId(absolutePath, this.bazelBin) === null) return;
+    if (!absolutePath.endsWith('.js') && !this.isDeclaredFile(absolutePath)) return;
+    this.enqueueChange(absolutePath);
+  }
+
+  private enqueueChange(absolutePath: string): void {
+    if (bazelPathToModuleId(absolutePath, this.bazelBin) === null && !this.isDeclaredFile(absolutePath)) return;
 
     this.pendingChanges.add(absolutePath);
     this.scheduleFlush();

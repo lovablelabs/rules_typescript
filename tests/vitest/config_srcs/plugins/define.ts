@@ -7,6 +7,11 @@ export const defineFromMeta = () => ({
   config: () =>
     mergeConfig(
       {},
-      { define: { __CONFIG_SRCS__: JSON.stringify(meta.value) } },
+      {
+        define: {
+          __CONFIG_SRCS__: JSON.stringify(meta.value),
+          __CONFIG_HELPER_URL__: JSON.stringify(import.meta.url),
+        },
+      },
     ),
 });

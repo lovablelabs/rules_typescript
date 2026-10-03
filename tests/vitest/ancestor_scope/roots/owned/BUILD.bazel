@@ -1,0 +1,13 @@
+load("//ts:defs.bzl", "ts_compile")
+
+# keep
+ts_compile(
+    name = "canonical",
+    srcs = [
+        "leaf.ts",
+        "//tests/vitest/ancestor_scope/roots/kept:marker.ts",
+    ],
+    emit = True,
+    package_scopes = ["package.json"],
+    visibility = ["//tests/vitest/ancestor_scope/roots/consumer:__pkg__"],
+)

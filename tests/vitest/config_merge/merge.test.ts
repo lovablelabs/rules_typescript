@@ -7,6 +7,9 @@ describe("user config merges with the generated config", () => {
   });
 
   it("is found through the include the generated config writes", () => {
-    expect(expect.getState().testPath).toMatch(/\/merge\.test\.js$/);
+    expect(expect.getState().testPath).toMatch(
+      /\/_merge_test\.vitest\/tests\/_main\/tests\/vitest\/config_merge\/merge\.test\.ts$/,
+    );
+    expect(import.meta.url).toMatch(/\/merge\.test\.js$/);
   });
 });

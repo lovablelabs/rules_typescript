@@ -6,6 +6,7 @@ imports declared separately from the linted sources. The real linter is
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("//tests:runnable_actions.bzl", "runnable_action_aspect", "runnable_action_label", "runnable_actions")
 
 _LINT = str(Label("//ts:lint"))
 _PKG = "tests/lint"
@@ -13,7 +14,7 @@ _PKG = "tests/lint"
 def _tslint_actions(env):
     return [
         action
-        for action in analysistest.target_actions(env)
+        for action in runnable_actions(env)
         if action.mnemonic == "TsLint"
     ]
 
@@ -30,7 +31,7 @@ def _lints_impl(ctx):
     stamps = action.outputs.to_list()
     asserts.equals(
         env,
-        [target.label.name + ".tslint"],
+        [runnable_action_label(env).name + ".tslint"],
         [f.basename for f in stamps],
         "the stamp",
     )
@@ -64,8 +65,8 @@ def _lints_impl(ctx):
     inputs = [f.short_path for f in action.inputs.to_list()]
     for path in want:
         asserts.true(env, path in inputs, path + " is an input")
-    asserts.true(env, target.label.name + ".tsconfig.json" in [f.basename for f in action.inputs.to_list()])
-    configs = [f.path for f in action.inputs.to_list() if f.basename == target.label.name + ".tsconfig.json"]
+    asserts.true(env, runnable_action_label(env).name + ".tsconfig.json" in [f.basename for f in action.inputs.to_list()])
+    configs = [f.path for f in action.inputs.to_list() if f.basename == runnable_action_label(env).name + ".tsconfig.json"]
     asserts.true(env, "-discover-tsconfig=" + configs[0] in argv, "automatic discovery uses the generated compiler program")
     asserts.true(env, "types.d.ts" in [f.basename for f in action.inputs.to_list()], "program declarations reach lint")
     if ctx.attr.config:
@@ -99,12 +100,14 @@ _LINTS_ATTRS = {
 strict_lint_test = analysistest.make(
     _lints_impl,
     attrs = _LINTS_ATTRS,
+    extra_target_under_test_aspects = [runnable_action_aspect],
     config_settings = {_LINT: str(Label("//tests/lint:strict"))},
 )
 
 loose_lint_test = analysistest.make(
     _lints_impl,
     attrs = _LINTS_ATTRS,
+    extra_target_under_test_aspects = [runnable_action_aspect],
     config_settings = {_LINT: str(Label("//tests/lint:loose"))},
 )
 
@@ -121,6 +124,7 @@ def _no_lint_impl(ctx):
 no_lint_test = analysistest.make(
     _no_lint_impl,
     config_settings = {_LINT: str(Label("//tests/lint:none"))},
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )
 
 def lint_test_suite(name):

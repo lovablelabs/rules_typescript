@@ -67,10 +67,11 @@ Five things, without program-membership directives.
    tsconfig, existing JavaScript and TypeScript entry points from `exports`,
    `types`, `typings`, `main`, `module` and `browser` seed the same native
    compiler listing with JavaScript enabled.
-4. **The vitest configs** the generated tests name, listed together in one
-   tsgo run when the first `deps` is written: the runner imports the config,
-   so its imports, and those of the first-party modules they reach, are the
-   test's.
+4. **The vitest configs** the generated tests name, listed during generation
+   while Gazelle's native walk can check exclusions for their imports. Each
+   selected config is listed on its first request; tests using the same config
+   share its observed program. Its imports and their source closure supply the
+   test's runtime.
 5. **The hand-written `ts_codegen` rules** in the BUILD files walked: their
    `outs` and every `out_dir`, the target's output whatever a local run of the
    generator left on disk.
@@ -106,33 +107,143 @@ pnpm installs nothing for it, so a bare import under it resolves through
 whatever an importer above hoisted, or not at all. That directory and every
 directory below it, down to the next `package.json` that is an importer, is
 outside the package model: a `tsconfig.json` there is not listed and is no
-package, its files are no src of the package above, a file of it a program
-above lists is unowned, and the run names the manifest once. A project meant
-to build is listed in `pnpm-workspace.yaml`.
+package, and the run names the manifest once. A project meant to build on its
+own is listed in `pnpm-workspace.yaml`.
 
 A file belongs to the nearest package at or above its directory when that
 package's program lists it. A file that package does not list belongs to no
 package: every run from the repository root names each such file with the
 programs that reached it, and so names a listed file under a directory the walk
-did not enter (`# gazelle:exclude`, `.bazelignore`, `# gazelle:ignore`). A file
+did not enter (`# gazelle:exclude`, `.bazelignore`). A file
 two programs list, a parent's and a nested package's, is the nested package's
 alone, and the parent's edge to it is a dep.
+
+An import into a source file with no indexed TypeScript target owner becomes
+a direct `srcs` label in the consumer. This includes declarations-only
+packages that generate no compile target. Gazelle follows that file's
+compiler-observed imports, including transitive source and JSON inputs,
+declarations, and npm type references. The compile rule enforces its supported
+source formats and requires each direct npm dependency's store File to match a
+nearest link on the consumer's chain or a retained source's importer chain.
+Retained inputs whose observed npm lookups use different supplying importers than the consumer retain the source lookup context in `source_node_modules`. An empty intermediate importer adds no requirement; an ancestor importer can supply a declaration companion shadowed on the consumer's chain. Each context keeps its nearest package links and their declaration companions at their original importer paths. Different importer locations may use different versions of the same package; different store Files at the same actual link path are an error. A partial update requires the needed importer target to exist; otherwise, include its package in the Gazelle update. A kept `source_node_modules` must supply the required importer scopes.
+Source-mode compiler owners, including explicit resolve owners, remain
+dependencies while Gazelle follows their compiler-observed implementation imports
+under the consuming target's configuration. Ordinary import traversal stops at
+emitted compiler owners and generated outputs. A reached source kept
+in this compilation's `srcs` still contributes its import closure. Labels use
+the nearest existing Bazel package. Gazelle does not create exports, widen
+visibility or include unrelated neighboring sources. A borrowed authored
+TypeScript, JavaScript or declaration file also retains its nearest
+`package.json` unless a compiler dependency supplies that original scope,
+preserving package-private `imports` and module format. The manifest needs the
+same eligibility and Bazel visibility as the file. Other runtime assets still
+need an existing data owner.
+
+Kept roots contribute the same compiler-observed closure whether discovery starts from a tsconfig or package exports. Gazelle expands direct source labels, literal native `filegroup.srcs`, literal `alias.actual` chains and declared output names from BUILD facts, normalizing each nested label in its own package while retaining the written source label. Generated outputs keep their existing producer boundary; Gazelle does not read stale generated contents to discover their imports.
+
+A literal empty filegroup is known to contain no files. A `glob`, `select`, custom provider, non-default output group or unobserved external membership is unknown. If automatic closure requires it, Gazelle stops before writing BUILD files and names the compiler, forwarding label and unsupported attribute. Use explicit source-file labels, or keep the whole compiler rule (or ignore its package) and maintain its sources and deps manually. A kept attribute alone does not make unknown membership discoverable.
+
+Automatic source and dependency updates also require an observed program under the selected compiler configuration. An external, generated, opaque or unavailable `tsconfig` does not establish an empty closure. Gazelle refuses the update before writing BUILD files, including for generated proto wrappers. Select an authored, readable configuration, or keep the whole rule (or ignore its package) and maintain its complete inputs and dependencies. Keeping every closure attribute also leaves those fields manual; keeping only `tsconfig` leaves them automatically managed.
+
+An implementation import from a compiler owner requires a known `emit` mode to choose between that owner’s source closure and declarations. Gazelle reads absent or literal `emit` values; it does not evaluate expressions such as `select`. An unknown mode stops automatic closure before BUILD publication. Use a literal value, or keep the whole consuming rule and maintain its complete inputs and dependencies. Authored declaration boundaries use their observed closure in either mode; they do not require this mode decision.
+
+Gazelle checks the declared compiler-owner graph for an updated binary or Node test. Each reached compiler owner must establish `emit = True` or expose known sources that need no TypeScript transformation. This applies inside the update too when a keep marker prevents promotion. Dependencies and forwarding labels must be literal BUILD facts; a `select`, variable or other expression cannot establish the closure even for an emitted owner. Gazelle refuses before writing any BUILD file. Use literal labels and emission settings, or keep the whole consuming rule and maintain its runtime closure manually. A borrowed declaration supplies typing; its runtime implementation must be explicitly included or supplied by an owner. An observed consumer outside the update adds no demand until it reaches a regenerated compiler owner.
+
+A borrowed authored module cannot use a generated `package.json` as its
+package scope: the checker reads the module at its source path, while the
+manifest exists at its output path. Gazelle reports this conflict whether or
+not a stale manifest exists in the checkout. Keep the manifest authored, or
+generate the module and manifest together in the same output layout. Explicit
+imports of generated JSON still use the declared output file.
+
+BUILD output declarations are recorded before metadata drives package or emission
+discovery. Generated manifests supply neither authored emission roots nor foreign
+project markers, npm self-reference names or manifest dependency unions. Authored
+programs under such a scope report the same layout conflict with or without a
+checkout copy. Automatic membership also cannot be discovered through a generated
+`tsconfig.json` or generated relative `extends` file: generation reports a conflict
+before writing BUILD files. Use authored discovery metadata, or select a generated
+config under another filename on an explicitly kept compiler rule. The latter
+remains a declared File input; Gazelle does not inspect its checkout copy.
+
+Compiler wildcard discovery excludes generated outputs before choosing between same-stem extensions. Native protobuf outputs participate when the provider index completes, so a checkout copy of `value_pb.ts` cannot hide an authored `value_pb.js` root or its dependencies. Gazelle then reapplies kept roots and refreshes membership from the new compiler observation. The relisted closure still uses Gazelle's native directory and exclusion facts: an excluded or unavailable required input reports a conflict before BUILD files are written.
+
+Discovery understands literal `out`/`outs` names and literal `ts_codegen.out_dir`
+values; implicit outputs hidden inside a macro are outside this discovery contract.
+A computed explicit declaration leaves other paths in its Bazel package unknown;
+Gazelle does not evaluate Starlark. Unknown metadata cannot become authored merely
+because a checkout file appears. Optional discovery is omitted with a diagnostic,
+without creating or withdrawing TypeScript rules. A required config, relative
+`extends`, inherited Vitest config selection, package scope or file input reports a
+conflict, as does discovery that
+would withdraw an existing unkept compiler owner. Explicit producer labels and
+kept or independently named targets retain their existing Bazel contracts.
+A known literal producer remains usable beside an unknown declaration, and a
+separate BUILD package has its own provenance boundary.
+
+Optional application discovery also ignores generated `index.html` checkout
+copies; authored HTML and the existing application entry names still select a
+development server.
+
+When a test's closure adds any label to `srcs`, Gazelle also writes `test_srcs`
+from its original test roots. Only those roots become runner entries
+and shard inputs; the complete helper closure remains available for compilation
+and runtime imports. Removing the extra labels removes the
+redundant `test_srcs` selection.
+
+Direct TypeScript, JavaScript and imported JSON outside the consumer's directory
+tree retain their paths in an all-source closure (`emit = False`) within the workspace. A source-mode consumer of a relocated dependency uses the shared runtime layout while preserving its TypeScript bytes and original compiler source identities.
+A workspace member's npm store rejects published Files outside the member directory,
+where it cannot preserve relative imports. Move those files inside the member
+or import them through a separately published package; adding a compiler owner
+alone does not repair the npm layout. This restriction includes foreign
+passthrough declarations left at their original paths, even when a type import can be
+erased from an implementation. `srcs` has no checker-only declaration mode:
+its declarations are published interface inputs, including possible ambient
+effects and references from the emitted interface. Gazelle retaining such an
+input does not establish that the member can be staged in the npm store.
+Emitted `ts_compile` and `ts_test` programs preserve relative module paths under a common logical source root in the compiler's output namespace. The producer records exact source/runtime and source/declaration File pairs, including generated inputs. Consumers of relocated dependencies place links to their canonical outputs; unbundled binaries execute those published Files. Checked tsgo declarations support the same mixed-source layout. Source-mode consumers follow relocated dependencies without emission; all-source closures retain original paths. See [Shared Source Layout](../rules/ts-compile.md#shared-source-layout).
+
+A workspace member can publish self-contained emitted outputs from its own borrowed sources. Its npm store rejects canonical module and declaration links selected for copying because the copy would lose the dependency's package scope and npm importer. Publish the dependency separately through npm or include its sources in the member.
+
+Only runtime roles constrain runtime placement: a declaration's extra `package.json` in `type_inputs` remains compiler-only. Generated JavaScript, JSON and declarations retain their canonical producer Files when dependency links are placed.
+
+A compiler-observed import of a file excluded by Gazelle stops generation
+unless a declared generator owns it. `# gazelle:ignore` leaves a BUILD file
+untouched: eligible imports from that directory still resolve, but its unimported data files do
+not become inputs of an ancestor TypeScript target.
 
 Within a package, a `*.test.*` or `*.spec.*` file is a test file, a `.d.ts`,
 `.d.mts` or `.d.cts` a declaration, and every other listed file a library
 file. A file tsgo could have listed -- `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs` -- is a src only when the program lists it: one the
 tsconfig's `exclude` leaves out is neither a src nor data. Every other regular
-file under the package's tree -- not a `BUILD.bazel`, not the package's own
-`tsconfig.json`, not under a deeper package -- is a data src of the package: a
-`.json`, a `.css`, an image, a fixture, the `package.json`. A file a
-`ts_codegen` writes -- one its `outs` declare, or anything under its `out_dir`
--- is neither, listed or not: a copy on disk is what a local run of the
-generator left, and the target that reaches it depends on the codegen. The one
-unlisted JavaScript that is a src is the twin beside an owned declaration of
-the same stem (`x.mjs` beside `x.d.mts`): tsc drops it from the program and
+file under the package's tree -- not a `BUILD.bazel`, `BUILD` or `package.json`,
+not the package's own `tsconfig.json`, not under a deeper package -- is a data
+src of the package: a `.json`, a `.css`, an image or a fixture. Metadata-only
+package manifests use `package_scopes` for runtime modules or `type_inputs` for
+declarations; an explicit JSON import keeps the manifest in `srcs`.
+
+A declared scalar output remains generated even when a local run leaves a copy
+on disk. Gazelle leaves outputs declared by `out` or `outs`, including a
+`genrule`'s, out of ordinary compiler membership. An imported output retains its
+existing compiler owner, found through `srcs` or an explicit `gazelle:resolve`.
+Without one, supported
+scalar files can become direct `srcs`; `ts_codegen` dependencies also supply
+their runtime and declaration outputs. Gazelle does not traverse stale generated
+files' imports. Scalar output selection requires the compiler's
+[file probes](../rules/ts-codegen.md); a skipped missing output directory cannot
+supply that identity. The same guide names the supported formats and declaration
+emission constraints.
+
+An eligible JavaScript twin beside an owned declaration is also a src of that
+owner when they share the same stem (`x.mjs` beside `x.d.mts`): tsc drops it from the program and
 resolves `./x.mjs` to the declaration, so the listing never names the module
-itself.
+itself. A retained foreign declaration keeps its twin, with that module's runtime package scope, only when the twin's `exports_files` makes it visible to the consumer. Otherwise Gazelle does not infer runtime imports from an import of a declaration
+or discover independently authored JavaScript hidden behind it. Such runtime
+inputs need compiler-observed membership or an existing declared owner that
+supplies them. Missing implementations are rejected by validation or the runtime
+consumer when required.
 
 Two programs importing each other's files is a dependency cycle between two
 Bazel targets, which Bazel rejects with the loop of labels when it loads them.
@@ -171,11 +282,10 @@ Per package: a `ts_compile` when the program has a library file, holding the
 library files, every owned declaration and the data files; a `ts_test` when it
 has a test file, holding the test files and every owned declaration, and the
 data files when no `ts_compile` is written; `tsconfig = ":tsconfig"` on both,
-naming the `ts_config` over the package's own `tsconfig.json`. A `ts_codegen`
-declared in the package's
-BUILD file is a dep of every target there; Gazelle recognises the kind and
-never writes one. A program listing only declaration files writes neither
-target and says so under `-ts_verbose`. An application with non-test program
+naming the `ts_config` over the package's own `tsconfig.json`. A hand-written
+`ts_codegen` in the package's BUILD file is a dependency of every target Gazelle
+writes there; Gazelle never writes one. A program listing only declaration files
+writes neither target and says so under `-ts_verbose`. An application with non-test program
 sources and a package index.html or listed main.ts[x]/app.ts[x] also gets a
 default oj dev target. Gazelle updates its entry point, npm tree, plugin and
 visibility, and removes a generated dev target when its application entry
@@ -205,10 +315,10 @@ load("@rules_typescript//ts:defs.bzl", "ts_compile", "ts_config", "ts_test")
 ts_compile(
     name = "core",
     srcs = [
-        "package.json",
         "src/index.ts",
         "src/parse.ts",
     ],
+    package_scopes = ["package.json"],
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
     deps = ["@npm//packages/core:zod"],
@@ -250,9 +360,11 @@ Node, so a worker's `defineWorkersConfig` pool becomes no pool and a dependency
 that only resolves through Vite (`test.server.deps.inline`) fails at import
 time. Every import of the config, bare or relative, is a dep of the test: the
 config is listed by tsgo from its own directory, as vitest loads it, and the
-listing is followed through every first-party module it reaches. Those modules
-are the test's `config_srcs`, spelled from the test's package -- a path under
-it, or `//<package>:<file>` for a config an ancestor package exports -- and the
+listing is followed through first-party source modules, stopping at declared
+generated-output owners. A stale generated file's imports contribute no config
+inputs or dependencies. Source modules remain the test's `config_srcs`, spelled
+from the test's package -- a path under it, or `//<package>:<file>` for a config
+an ancestor package exports -- and the
 rule writes each at its own path in the runfiles, where the config's relative
 imports resolve ([A config file](../rules/ts-test.md#a-config-file)). A module
 outside the config's package is said and gets no entry: a config's modules are
@@ -275,7 +387,7 @@ that package in `deps` in the importer's spelling; the pool refuses v8
 coverage, and without the package the run says so and writes neither. The
 filegroup follows the literal and is written when the package generates; the
 attributes follow the pool's edge and are written with `deps`, from the
-combined listing. A config that names a wrangler config and installs no pool
+config's listing. A config that names a wrangler config and installs no pool
 gets the filegroup and no test names it.
 
 ## The tsconfig and Its ts_config
@@ -421,17 +533,31 @@ label:
   file of the member: a first-party file, resolved as any owned file is -- the
   member's `ts_compile` from a `ts_test` or a package below it, nothing from
   the member's own `ts_compile` -- and no line.
-- **A file another package owns**, reached by a relative path or a `paths`
-  alias, is that package's `ts_compile`, or whichever rule holds the file in
-  `srcs`: a hand-written one under `# keep` answers as a generated one does. A
-  file this package's own rules hold is nothing.
+- **An owned file**, reached by a relative path or a `paths` alias, adds no
+  dependency when the importing rule itself owns it. Another `ts_compile`
+  owner exports `TsInfo` and remains a dependency, including within the same
+  package; a hand-written owner under `# keep` answers as a generated one does.
+  Membership in a `ts_test` does not export a library.
 - **A file under a `ts_codegen`'s `out_dir`** is the codegen, matched by the
-  root the path sits under, deepest root first; a file a `ts_codegen` declares
-  in `outs` is that codegen.
-- **A file no package owns** gets no label and one line in the log naming the
-  file, its importer and why: the nearest `tsconfig.json` above it does not
-  list it, no `tsconfig.json` above it lists a file, or it sits under a
-  directory this run did not walk.
+  root the path sits under, deepest root first across indexed providers and
+  observed BUILD declarations. Native providers take precedence at the same root;
+  declared roots remain available with partial indexing or `-index=false`.
+  Ordinary imports and config imports retain that generated
+  identity, so checkout copies and their stale imports never become borrowed
+  source inputs.
+- **A scalar generated output** keeps its declared compiler owner before and
+  after generation, even when excluded. Without one, supported files enter
+  `srcs` directly; declarations and JSON from `ts_codegen` instead
+  reach consumers through its provider. Direct TypeScript and JavaScript inputs
+  from `ts_codegen` retain the producer dependency for its runtime and
+  declaration outputs.
+  Scalar lookup follows compiler extension precedence; see
+  [generated-output resolution](../rules/ts-codegen.md).
+- **An eligible source with no indexed target owner** becomes a direct `srcs`
+  label and contributes its compiler-observed import closure, under the
+  source-mode restriction above. Declaration-only packages can supply these inputs too.
+  Gazelle rejects excluded imports unless a declared generated-output owner
+  supplies them; unsupported or unlabelable files receive a diagnostic.
 - **The compiler's own libs** (`lib.dom.d.ts` and its kin: under `../` from
   the lockfile's binary, which reads them from beside itself, under
   `bundled:///libs/` from the source build, which embeds them) are nothing.
@@ -462,6 +588,12 @@ imports (`vitest`, a pool package, `jsdom`), and none of them needs a `# keep`.
 hand-written value survives every run without `# keep`
 ([Runners](../rules/ts-test.md#runners)).
 
+Gazelle recognizes the built-in Node runner through apparent and canonical
+labels, including aliases. Canonical recognition uses the repository containing
+the extension: build it from your `rules_typescript` module dependency. A prebuilt
+extension from an arbitrary repository does not establish canonical runner
+ownership in another workspace.
+
 ### The Lockfile Gate
 
 Every npm label passes through the root `pnpm-lock.yaml`. An edge the lockfile
@@ -478,10 +610,9 @@ version the importing file's own `package.json` resolved, and the hub declares
 each importer's resolutions under the importer's directory beside the root's:
 `@npm//web:marked` beside `@npm//:marked`. A name is spelled under the nearest
 importer on the chain above the importing file that declares it, the root
-last. A flat label for a name two importers
-resolve differently names a resolution the target's chain does not link, and
-fails analysis. Every `ts_compile` and `ts_test` gets `node_modules`, the
-nearest lockfile importer's target at or above the package -- the root's for a
+last. A flat label fails analysis when no declared importer context selects
+its store File as the nearest binding. Every `ts_compile` and `ts_test` gets
+`node_modules`, the nearest lockfile importer's target at or above the package -- the root's for a
 package under no importer -- which is that chain.
 
 ## Verifying a Run
@@ -546,6 +677,7 @@ and none is drift:
 When ordinary generation creates a child package, existing literal
 `exports_files` entries beneath that boundary move to the canonical child
 owner. Visibility and licenses remain unchanged. Consumers must use the new
-child label; Gazelle does not add compatibility aliases. Kept exports or
-computed visibility and licenses produce a diagnostic instead of a partial
-move.
+child label; Gazelle does not add compatibility aliases. If required exports
+are kept or have computed visibility or licenses, Gazelle refuses the update
+before writing any BUILD files. Remove the keep marker or use literal
+attributes before creating the child package.

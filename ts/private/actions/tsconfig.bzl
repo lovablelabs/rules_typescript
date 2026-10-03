@@ -51,7 +51,8 @@ def tsconfig_action(
         types_deps,
         isolated_declarations,
         lib_check,
-        emit = True):
+        emit = True,
+        declaration_paths = []):
     """Writes <name>.tsconfig.json and <name>.options.json from the chain.
 
     Returns struct(tsconfig, options).
@@ -87,10 +88,15 @@ def tsconfig_action(
 
     # Directory children are unknown until their generator runs.
     for file in dep_dts.to_list():
-        if file.is_source or file.is_directory:
-            retained_types.append(file)
-        else:
+        if not file.is_source and not file.is_directory and file.basename.endswith((".d.ts", ".d.mts", ".d.cts")):
             config_args.add(file, format = "-type_input=%s")
+        else:
+            retained_types.append(file)
+    config_args.add_all(declaration_paths, format_each = "-type_input=%s")
+
+    # A source-mode dependency's JavaScript is typed from its source only under allowJs (TS7016 otherwise).
+    if [file for file in retained_types if file.is_source and file.extension in ["js", "jsx", "mjs", "cjs"]]:
+        config_args.add("-javascript_inputs")
     config_args.add_all(check_srcs)
     ctx.actions.run(
         inputs = depset(

@@ -1,0 +1,14 @@
+load("//ts:defs.bzl", "ts_compile")
+
+# keep
+ts_compile(
+    name = "scope",
+    emit = True,
+    package_scopes = ["package.json"],
+    visibility = ["//tests/vitest/config_srcs/identity:__subpackages__"],
+)
+
+exports_files(
+    ["package.json"],
+    visibility = ["//tests/vitest/config_srcs/identity:__subpackages__"],
+)

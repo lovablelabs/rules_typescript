@@ -3,6 +3,7 @@
     "paths": {
       "@shared/*": ["./shared/*"],
       "@point": ["./shared/value.ts"],
+      "@fallback": ["./shared/absent.ts", "./shared/value.ts"],
       "@math": ["../math.ts"]
     }
   }

@@ -5,6 +5,7 @@ WranglerTestConfig action and the symlink it adds. ts_test reaches it through
 the struct workers_pool_environment returns, and no other file names wrangler.
 """
 
+load("//tools/launcher:launcher.bzl", "runfiles_link_path")
 load("//ts/private:runtime.bzl", "get_js_tool")
 
 WORKERS_POOL_ATTRS = {
@@ -22,35 +23,26 @@ WORKERS_POOL_ATTRS = {
     ),
 }
 
-def _runtime_path(file):
-    return file.short_path
-
-def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_sources, runtime_js):
-    """The pool's half of the test environment, or its absence.
-
-    `chain` is ts_test's struct(dirs, rlocations, npm_files). Returns
-    struct(symlinks, runtime_data_sets): the patched wrangler config over the
-    source's path, and the data sets less that source.
-    """
+def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset_files, runtime_sources, runtime_js):
     symlinks = {}
+    replacements = {}
 
     if ctx.file.wrangler_config:
         src = ctx.file.wrangler_config
+        bindings = {src: True}
+        bindings.update({runtime: True for source, runtime in runtime_files if source == src})
+        bindings.update({published: True for original, _coordinate, published in asset_files if original == src})
+        entries = {}
+        for source, runtime in runtime_files:
+            previous = entries.get(source.short_path)
+            if previous != None and previous != runtime:
+                fail("ts_test {}: source '{}' has conflicting declared runtime owners '{}' and '{}'.".format(ctx.label, source.short_path, previous.path, runtime.path))
+            entries[source.short_path] = runtime
 
-        # A runfiles file at a symlink's path wins over it silently, and the
-        # unpatched `main` with it: the source's copy in data or through a dep.
-        for f in ctx.files.data:
-            if f.short_path == src.short_path:
-                fail(
-                    "ts_test {}: {} is staged through wrangler_config; ".format(
-                        ctx.label,
-                        src.short_path,
-                    ) + "do not list it in data too.",
-                )
         runtime_data_sets = [depset([
             f
             for f in depset(transitive = runtime_data_sets).to_list()
-            if f.short_path != src.short_path
+            if f not in bindings
         ])]
 
         js_tool = get_js_tool(ctx)
@@ -69,8 +61,12 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_sources, run
         args.add("--config", src)
         args.add("--out", patched)
         args.add("--config-path", src.short_path)
-        args.add_all(runtime_sources, before_each = "--runtime-source", map_each = _runtime_path, expand_directories = False)
-        args.add_all(runtime_js, before_each = "--runtime-js", map_each = _runtime_path, expand_directories = False)
+        args.add_all([json.encode([source, runtime.short_path]) for source, runtime in entries.items()], before_each = "--runtime-file")
+
+        # Older owners publish runtime Files without source/runtime pairs.
+        mapped = {runtime: True for _source, runtime in runtime_files}
+        args.add_all([file.short_path for file in runtime_sources.to_list() if file not in mapped and not file.is_directory], before_each = "--runtime-source")
+        args.add_all([file.short_path for file in runtime_js.to_list() if file not in mapped and not file.is_directory], before_each = "--runtime-js")
         args.add_all(chain.dirs, before_each = "--node-modules")
         ctx.actions.run(
             inputs = depset(
@@ -83,9 +79,11 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_sources, run
             mnemonic = "WranglerTestConfig",
             progress_message = "WranglerTestConfig %{label}",
         )
-        symlinks[src.short_path] = patched
+        symlinks[runfiles_link_path(src)] = patched
+        replacements = {file: patched for file in bindings}
 
     return struct(
         symlinks = symlinks,
         runtime_data_sets = runtime_data_sets,
+        replacements = replacements,
     )

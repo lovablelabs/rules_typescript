@@ -1,3 +1,4 @@
+load("//tests/workers_nested/test:wrangler_config_tests.bzl", "previous_worker_owner")
 load("//ts:defs.bzl", "ts_compile", "ts_config")
 
 # The monorepo shape: package.json, the vitest config and the wrangler config at
@@ -20,6 +21,11 @@ ts_config(
 
 exports_files([
     "package.json",
+    "src/environment.ts",
+    "src/greeting.txt",
+    "src/index.ts",
+    "src/layout.ts",
+    "src/text.d.ts",
     "wrangler.jsonc",
 ])
 
@@ -30,34 +36,74 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-# The compiled worker's bare import resolves from the root: no node_modules sits
-# above its realpath. Its data srcs reach a test's runfiles, wrangler.jsonc too.
+ts_compile(
+    name = "worker_assets",
+    srcs = [
+        "src/greeting.txt",
+        "wrangler.jsonc",
+    ],
+)
+
 ts_compile(
     name = "worker",
     srcs = [
         "src/environment.ts",
-        "src/greeting.txt",
         "src/index.ts",
         "src/text.d.ts",
-        "wrangler.jsonc",
     ],
     emit = True,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = ":worker_tsconfig",
-    deps = ["@npm_workers//:zod"],
+    deps = [
+        ":worker_assets",
+        "//tests/workers_nested/moved_source:moving_layout",
+        "@npm_workers//:zod",
+    ],
 )
 
 ts_compile(
     name = "source_worker",
     srcs = [
         "src/environment.ts",
-        "src/greeting.txt",
         "src/index.ts",
+        "src/layout.ts",
         "src/text.d.ts",
-        "wrangler.jsonc",
     ],
     emit = False,  # keep
     node_modules = "//tests/workers:node_modules",
     tsconfig = ":worker_tsconfig",
-    deps = ["@npm_workers//:zod"],
+    deps = [
+        ":worker_assets",
+        "@npm_workers//:zod",
+    ],
+)
+
+# keep
+ts_compile(
+    name = "previous_worker_compiled",
+    srcs = [
+        "src/environment.ts",
+        "src/index.ts",
+        "src/layout.ts",
+        "src/text.d.ts",
+    ],
+    emit = True,
+    node_modules = "//tests/workers:node_modules",
+    tsconfig = ":worker_tsconfig",
+    deps = [
+        ":worker_assets",
+        "@npm_workers//:zod",
+    ],
+)
+
+previous_worker_owner(
+    name = "previous_worker_provider",
+    testonly = True,
+    dep = ":previous_worker_compiled",
+)
+
+alias(
+    name = "previous_worker",
+    testonly = True,
+    actual = ":previous_worker_provider",
 )

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,22 +27,25 @@ func runTsgo(args []string) error {
 	absoluteCopyArgs := flags.Bool("absolute-copy-args", false, "pass copied file arguments as absolute paths")
 	verifyCopies := flags.Bool("verify-copies", false, "fail if the tool changes a copied input")
 	discoverConfig := flags.String("discover-tsconfig", "", "generated program config exposed to tools that discover tsconfig.json beside sources")
-	var sources, copies, importers, overlays, manifests, toolEnv stringList
+	var sources, copies, importers, inherited, overlays, manifests, toolEnv, runtimeScopes stringList
 	flags.Var(&sources, "source",
-		"an input of the action in the source tree, linked at its path under "+
-			"the root (repeatable); the output tree is linked whole")
+		"a declared compiler input linked at its logical source path (repeatable)")
 	flags.Var(&toolEnv, "tool-env", "NAME=executable input path, made absolute before entering the program root (repeatable)")
 	flags.Var(&copies, "copy", "a source input copied at its workspace path for realpath-based module resolution (repeatable)")
 	flags.Var(&importers, "node_modules",
 		"an importer's node_modules directory, nearest first (repeatable); "+
 			"the last is the lockfile's root importer")
+	flags.Var(&inherited, "inherit_node_modules",
+		"a dependency's or source's importer node_modules directory outside the chain, "+
+			"resolving its own links before the chain's (repeatable)")
 	flags.Var(&overlays, "overlay",
-		"the output directory of a dep whose package is at or above this "+
-			"one's; its declarations, manifest and data are laid over that "+
-			"package's sources, never its JavaScript (repeatable)")
+		"a generated compiler input or dependency output directory, laid at "+
+			"its path relative to bin; JavaScript and original source package scopes "+
+			"are not replaced (repeatable)")
 	flags.Var(&manifests, "manifest",
-		"such a dep's package.json as built, laid at its package's "+
-			"package.json over the src (repeatable)")
+		"the as-built package.json of a direct dependency at or above this "+
+			"package, laid at its package's package.json unless an original source scope is present (repeatable)")
+	flags.Var(&runtimeScopes, "runtime_scope", "a package scope and its declared runtime targets as JSON (repeatable)")
 	check := flags.String("check", "",
 		"the ownership manifest the --explainFiles listing is checked against; "+
 			"without it the run's output is relayed and nothing is parsed")
@@ -56,6 +60,9 @@ func runTsgo(args []string) error {
 	if *root == "" || len(cmdline) == 0 {
 		return errors.New("tsgo needs -root=DIR and a command after --")
 	}
+	if err := validateRuntimeScopes(runtimeScopes); err != nil {
+		return err
+	}
 	var own *ownership
 	var chain *tsconfig.Resolved
 	if *check != "" {
@@ -69,7 +76,7 @@ func runTsgo(args []string) error {
 			}
 		}
 	}
-	err := layOutProgramRoot(*root, sources, importers, overlays, manifests)
+	err := layOutProgramRoot(*root, sources, importers, inherited, overlays, manifests)
 	if err != nil {
 		return err
 	}
@@ -102,6 +109,15 @@ func runTsgo(args []string) error {
 		return err
 	}
 	cmdline = append([]string{tool}, cmdline[1:]...)
+	projected := make(map[string]string, len(sources))
+	for _, source := range sources {
+		projected[source] = compilerPath(source)
+	}
+	for i := 1; i < len(cmdline); i++ {
+		if logical, ok := projected[cmdline[i]]; ok {
+			cmdline[i] = logical
+		}
+	}
 	if *absoluteCopyArgs {
 		paths := make(map[string]string, len(copies))
 		for _, file := range copies {
@@ -163,7 +179,7 @@ func discoverProgramConfig(root, configArtifact string, sources []string) error 
 	dir := filepath.Dir(binRelative(configArtifact))
 	configs := map[string]bool{filepath.Join(dir, "tsconfig.json"): true}
 	for _, source := range sources {
-		source = filepath.FromSlash(source)
+		source = filepath.FromSlash(compilerPath(source))
 		if filepath.Base(source) == "tsconfig.json" && (dir == "." || strings.HasPrefix(source, dir+string(filepath.Separator))) {
 			configs[source] = true
 		}
@@ -215,13 +231,66 @@ func checkedRun(dir string, cmdline []string, own *ownership,
 	if err != nil {
 		return err
 	}
-	hits := excludedSrcs(own.own, listing.Files, chain, execroot)
-	if len(hits) > 0 {
-		return errors.New(own.reportExcluded(project, hits))
+	canonicalExecroot, err := filepath.EvalSymlinks(execroot)
+	if err != nil {
+		return err
 	}
 	rootAbs := filepath.Join(execroot, dir)
+	if chain != nil && chain.Exclude != nil {
+		logicalOwn := make(map[string]bool, len(own.own))
+		originals := make(map[string]string, len(own.own))
+		for file := range own.own {
+			logical := compilerPath(file)
+			logicalOwn[logical], originals[logical] = true, file
+		}
+		logicalFiles := make([]string, len(listing.Files))
+		for i, file := range listing.Files {
+			logicalFiles[i] = compilerPath(throughRoot(rootAbs, execroot, canonicalExecroot, file))
+		}
+		logicalChain := *chain
+		logicalChain.ExcludeDir = compilerPath(chain.ExcludeDir)
+		hits := excludedSrcs(logicalOwn, logicalFiles, &logicalChain, execroot)
+		for i := range hits {
+			hits[i].file = originals[hits[i].file]
+		}
+		if len(hits) > 0 {
+			return errors.New(own.reportExcluded(project, hits))
+		}
+	}
+	var npmInputs []npmInput
+edges:
 	for i, e := range listing.Edges {
-		listing.Edges[i].To = throughRoot(rootAbs, execroot, e.To)
+		e.From = throughRoot(rootAbs, execroot, canonicalExecroot, e.From)
+		listing.Edges[i].From = e.From
+		if !own.own[e.From] {
+			continue
+		}
+		at := filepath.FromSlash(e.To)
+		if !filepath.IsAbs(at) {
+			at = filepath.Join(rootAbs, at)
+		}
+		for _, base := range []string{execroot, canonicalExecroot} {
+			if rel, ok := below(base, at); ok {
+				if _, held := own.files[npmPackageRoot(rel)]; held {
+					listing.Edges[i].To = rel
+					continue edges
+				}
+			}
+		}
+		to := throughRoot(rootAbs, execroot, canonicalExecroot, e.To)
+		if filepath.IsAbs(to) {
+			if npmInputs == nil {
+				npmInputs, err = declaredNpmInputs(execroot, own.files)
+				if err != nil {
+					return err
+				}
+			}
+			to, err = throughNpmInputs(npmInputs, to)
+			if err != nil {
+				return err
+			}
+		}
+		listing.Edges[i].To = to
 	}
 	findings, err := own.check(listing)
 	if err != nil {
@@ -233,23 +302,85 @@ func checkedRun(dir string, cmdline []string, own *ownership,
 	return nil
 }
 
+type npmInput struct {
+	file, physical string
+}
+
+func declaredNpmInputs(execroot string, files map[string][]fileOwner) ([]npmInput, error) {
+	inputs := make([]npmInput, 0)
+	for input := range files {
+		if !strings.Contains(input, "/.pnpm/") || npmPackageRoot(input) != input {
+			continue
+		}
+		physical, err := filepath.EvalSymlinks(filepath.Join(execroot, filepath.FromSlash(input)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve npm input %s: %w", input, err)
+		}
+		inputs = append(inputs, npmInput{file: input, physical: physical})
+	}
+	return inputs, nil
+}
+
+func throughNpmInputs(inputs []npmInput, listed string) (string, error) {
+	at := filepath.Clean(filepath.FromSlash(listed))
+	packageRoot := npmPackageRoot(filepath.ToSlash(at))
+	var matched string
+	for _, input := range inputs {
+		member, ok := below(input.physical, at)
+		if !ok {
+			if packageRoot == "" {
+				continue
+			}
+			member = strings.TrimPrefix(filepath.ToSlash(at)[len(packageRoot):], "/")
+		}
+		physical, err := filepath.EvalSymlinks(filepath.Join(input.physical, filepath.FromSlash(member)))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("resolve npm input %s: %w", path.Join(input.file, member), err)
+		}
+		if physical != at {
+			continue
+		}
+		candidate := path.Join(input.file, member)
+		if matched != "" && matched != candidate {
+			return "", fmt.Errorf("%s matches multiple declared npm store inputs", listed)
+		}
+		matched = candidate
+	}
+	if matched == "" {
+		return listed, nil
+	}
+	return matched, nil
+}
+
 // throughRoot is the exec-root path of a listed file the root links, or the
 // store path of a file under a chain link, which tsgo lists at the link.
-func throughRoot(rootAbs, execroot, listed string) string {
-	at := filepath.Join(rootAbs, filepath.FromSlash(listed))
-	if underNodeModules(listed) && storeKeyOf(listed) == "" {
-		real, err := filepath.EvalSymlinks(at)
+func throughRoot(rootAbs, execroot, canonicalExecroot, listed string) string {
+	at := filepath.FromSlash(listed)
+	if !filepath.IsAbs(at) {
+		at = filepath.Join(rootAbs, at)
+	}
+	if root := npmPackageRoot(filepath.ToSlash(at)); root != "" {
+		parent, err := filepath.EvalSymlinks(filepath.Dir(root))
 		if err != nil {
 			return listed
 		}
-		store := filepath.ToSlash(real)
-		if storeKeyOf(store) == "" {
-			return listed
+		packagePath := filepath.Join(parent, filepath.Base(root))
+		// Declared npm links are relative; absolute sandbox tree links retain their File coordinate.
+		if target, err := os.Readlink(packagePath); err == nil && !filepath.IsAbs(target) {
+			packagePath = filepath.Join(parent, target)
 		}
-		if rel, ok := below(execroot, real); ok {
+		member := strings.TrimPrefix(filepath.ToSlash(at)[len(root):], "/")
+		target := filepath.Join(packagePath, filepath.FromSlash(member))
+		if rel, ok := below(canonicalExecroot, target); ok {
 			return rel
 		}
-		return store
+		return filepath.ToSlash(target)
 	}
 	target, err := os.Readlink(at)
 	if err != nil {
@@ -262,6 +393,31 @@ func throughRoot(rootAbs, execroot, listed string) string {
 		return rel
 	}
 	return listed
+}
+
+func npmPackageRoot(p string) string {
+	const marker = "node_modules/"
+	i := strings.LastIndex(p, marker)
+	if i < 0 || (i > 0 && p[i-1] != '/') {
+		return ""
+	}
+	start := i + len(marker)
+	name, _, _ := strings.Cut(p[start:], "/")
+	if name == "" {
+		return ""
+	}
+	end := start + len(name)
+	if strings.HasPrefix(name, "@") {
+		if end == len(p) {
+			return ""
+		}
+		member, _, _ := strings.Cut(p[end+1:], "/")
+		if member == "" {
+			return ""
+		}
+		end += 1 + len(member)
+	}
+	return p[:end]
 }
 
 // below is target relative to dir when target is under it.
@@ -281,10 +437,16 @@ func underNodeModules(p string) bool {
 // Bazel's output tree, the top-level entry every action output is under.
 const outputTree = "bazel-out"
 
-// layOutProgramRoot links each source at its path under real directories, the
-// output tree whole, each importer's node_modules, overlays and manifests.
+func compilerPath(file string) string {
+	if strings.HasPrefix(file, outputTree+"/") {
+		return binRelative(file)
+	}
+	return file
+}
+
+// Generated roots need the original package scope beside their logical compiler path.
 func layOutProgramRoot(
-	root string, sources, importers, overlays, manifests []string,
+	root string, sources, importers, inherited, overlays, manifests []string,
 ) error {
 	execroot, err := os.Getwd()
 	if err != nil {
@@ -296,12 +458,44 @@ func layOutProgramRoot(
 	if err := linkAt(root, execroot, outputTree); err != nil {
 		return err
 	}
+	sourceFiles := map[string]string{}
 	for _, file := range sources {
-		if file == outputTree || strings.HasPrefix(file, outputTree+"/") {
-			return fmt.Errorf("-source=%s is under %s, which the root links "+
-				"whole", file, outputTree)
+		logical := compilerPath(file)
+		if !fs.ValidPath(logical) || logical == "." || logical == outputTree || strings.HasPrefix(logical, outputTree+"/") {
+			return fmt.Errorf("-source=%s has no compiler source coordinate outside %s", file, outputTree)
 		}
-		if err := linkAt(root, execroot, filepath.FromSlash(file)); err != nil {
+		if previous, ok := sourceFiles[logical]; ok {
+			if previous != file {
+				return fmt.Errorf("compiler inputs %q and %q occupy %q; declare one source per compiler path", previous, file, logical)
+			}
+			continue
+		}
+		sourceFiles[logical] = file
+		at := filepath.Join(root, filepath.FromSlash(logical))
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			return err
+		}
+		if err := os.Symlink(filepath.Join(execroot, filepath.FromSlash(file)), at); err != nil {
+			return err
+		}
+	}
+	for _, binDir := range inherited {
+		dir := importerDir(binDir)
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			return err
+		}
+		link := filepath.Join(root, dir, "node_modules")
+		if err := os.RemoveAll(link); err != nil {
+			return err
+		}
+		if len(importers) > 1 {
+			// The root importer stays reachable by the ancestor walk.
+			if err := mergeImporters(link, execroot, append([]string{binDir}, importers[:len(importers)-1]...)); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Symlink(filepath.Join(execroot, binDir), link); err != nil {
 			return err
 		}
 	}
@@ -318,6 +512,12 @@ func layOutProgramRoot(
 		if err := os.RemoveAll(link); err != nil {
 			return err
 		}
+		if i == 0 && len(importers) > 2 && skipsAncestors(importers) {
+			if err := mergeImporters(link, execroot, importers[:len(importers)-1]); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := os.Symlink(filepath.Join(execroot, binDir), link); err != nil {
 			return err
 		}
@@ -326,24 +526,33 @@ func layOutProgramRoot(
 	if err != nil {
 		return err
 	}
-	for _, binDir := range overlays {
-		from := filepath.Join(execroot, filepath.FromSlash(binDir))
-		rel := filepath.FromSlash(binRelative(binDir))
-		if err := overlayDir(root, rootAbs, execroot, from, rel); err != nil {
+	for _, encoded := range overlays {
+		var pair []string
+		if err := json.Unmarshal([]byte(encoded), &pair); err != nil || len(pair) != 2 || pair[0] == "" || (pair[1] != "" && !fs.ValidPath(pair[1])) {
+			return fmt.Errorf("invalid compiler overlay pair %q", encoded)
+		}
+		file, logical := pair[0], pair[1]
+		from := filepath.Join(execroot, filepath.FromSlash(file))
+		rel := filepath.FromSlash(logical)
+		st, err := os.Stat(from)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := overlayPath(root, rootAbs, from, rel, st, sourceFiles, false); err != nil {
 			return err
 		}
 	}
 	for _, file := range manifests {
-		dir := filepath.FromSlash(binRelative(path.Dir(file)))
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
-			return err
-		}
-		at := filepath.Join(root, dir, "package.json")
-		if err := os.RemoveAll(at); err != nil {
-			return err
-		}
 		from := filepath.Join(execroot, filepath.FromSlash(file))
-		if err := os.Symlink(from, at); err != nil {
+		st, err := os.Stat(from)
+		if err != nil {
+			return err
+		}
+		rel := filepath.Join(filepath.FromSlash(binRelative(path.Dir(file))), "package.json")
+		if err := overlayPath(root, rootAbs, from, rel, st, sourceFiles, true); err != nil {
 			return err
 		}
 	}
@@ -361,6 +570,62 @@ func binRelative(binPath string) string {
 	return binPath
 }
 
+// skipsAncestors reports an intermediate chain importer outside the nearest
+// importer's ancestors, which a node_modules walk from its sources never reaches.
+func skipsAncestors(importers []string) bool {
+	nearest := filepath.ToSlash(importerDir(importers[0]))
+	for _, binDir := range importers[1 : len(importers)-1] {
+		dir := filepath.ToSlash(importerDir(binDir))
+		if dir != "" && nearest != dir && !strings.HasPrefix(nearest, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeImporters lays a node_modules directory whose entries follow the
+// importers' order: the first importer linking a name wins.
+func mergeImporters(at, execroot string, importers []string) error {
+	for _, binDir := range importers {
+		if err := mergeEntries(at, filepath.Join(execroot, binDir), true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mergeEntries(at, from string, scopes bool) error {
+	entries, err := os.ReadDir(from)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(at, 0o755); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name, source := entry.Name(), filepath.Join(from, entry.Name())
+		if scopes && strings.HasPrefix(name, "@") && entry.IsDir() {
+			if info, err := os.Lstat(filepath.Join(at, name)); err == nil && !info.IsDir() {
+				continue
+			}
+			if err := mergeEntries(filepath.Join(at, name), source, false); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(at, name)); err == nil {
+			continue
+		}
+		if err := os.Symlink(source, filepath.Join(at, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // importerDir is the importer's directory in the exec root, read off its
 // node_modules' bin-dir path bazel-out/<cfg>/bin/<dir>/node_modules.
 func importerDir(binDir string) string {
@@ -371,9 +636,39 @@ func importerDir(binDir string) string {
 	return dir
 }
 
-// overlayDir links every non-JavaScript file under from into root/rel over a
-// source of the same name; node_modules and the root itself skipped.
-func overlayDir(root, rootAbs, execroot, from, rel string) error {
+// An explicit compiler root must keep the File named by its ownership record.
+func overlayPath(root, rootAbs, from, rel string, st os.FileInfo, sourceFiles map[string]string, replaceManifest bool) error {
+	if !st.IsDir() {
+		if isJavaScript(filepath.Base(from)) || sourceFiles[filepath.ToSlash(rel)] != "" {
+			return nil
+		}
+		at := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			return err
+		}
+		if !replaceManifest && (strings.HasSuffix(rel, ".d.ts") || strings.HasSuffix(rel, ".d.mts") || strings.HasSuffix(rel, ".d.cts") || strings.HasSuffix(rel, ".json")) {
+			if _, err := os.Lstat(at); err == nil {
+				previous, err := filepath.EvalSymlinks(at)
+				if err != nil {
+					return fmt.Errorf("resolve existing compiler input %s: %w", at, err)
+				}
+				canonical, err := filepath.EvalSymlinks(from)
+				if err != nil {
+					return fmt.Errorf("resolve compiler input %s: %w", from, err)
+				}
+				if previous != canonical {
+					return fmt.Errorf("compiler input coordinate %q has distinct publications %q and %q. Did you mean to publish the shared module once and depend on it, or keep the emitted closures in separate consumer programs?", filepath.ToSlash(rel), previous, canonical)
+				}
+				return nil
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("inspect compiler input destination %s: %w", at, err)
+			}
+		}
+		if err := os.RemoveAll(at); err != nil {
+			return err
+		}
+		return os.Symlink(from, at)
+	}
 	entries, err := os.ReadDir(from)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -394,21 +689,8 @@ func overlayDir(root, rootAbs, execroot, from, rel string) error {
 		if err != nil {
 			return err
 		}
-		at := filepath.Join(root, rel, entry.Name())
-		if st.IsDir() {
-			if err := overlayDir(root, rootAbs, execroot, source,
-				filepath.Join(rel, entry.Name())); err != nil {
-				return err
-			}
-			continue
-		}
-		if isJavaScript(entry.Name()) {
-			continue
-		}
-		if err := os.RemoveAll(at); err != nil {
-			return err
-		}
-		if err := os.Symlink(source, at); err != nil {
+		if err := overlayPath(root, rootAbs, source,
+			filepath.Join(rel, entry.Name()), st, sourceFiles, replaceManifest); err != nil {
 			return err
 		}
 	}

@@ -9,9 +9,10 @@ staged from a source repository. The tsconfig step is handed the direct @types
 deps and nothing about the closure."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("//tests:runnable_actions.bzl", "runnable_action_aspect", "runnable_actions")
 
 def _action(env, mnemonic):
-    for action in analysistest.target_actions(env):
+    for action in runnable_actions(env):
         if action.mnemonic == mnemonic:
             return action
     return None
@@ -32,16 +33,13 @@ def _chain_impl(ctx):
         ],
         "the importer chain, nearest first",
     )
-    asserts.equals(
-        env,
-        [ctx.bin_dir.path + "/" + d for d in ctx.attr.overlays],
-        [
-            arg[len("-overlay="):]
-            for arg in tsgo.argv
-            if arg.startswith("-overlay=")
-        ],
-        "the first-party deps at or above the package, laid over its sources",
-    )
+    overlays = [json.decode(arg[len("-overlay="):]) for arg in tsgo.argv if arg.startswith("-overlay=")]
+    package_overlays = [[ctx.bin_dir.path + "/" + directory, directory] for directory in ctx.attr.overlays]
+    asserts.equals(env, package_overlays, overlays[:len(package_overlays)], "first-party package outputs overlay their original logical directories")
+    input_paths = {file.path: True for file in tsgo.inputs.to_list()}
+    for physical, logical in overlays[len(package_overlays):]:
+        asserts.true(env, physical in input_paths, "an exact declaration or JSON overlay reads its published File")
+        asserts.equals(env, physical[len(ctx.bin_dir.path) + 1:] if physical.startswith(ctx.bin_dir.path + "/") else physical, logical, "this unmoved dependency retains its source-origin path")
     asserts.equals(
         env,
         [ctx.bin_dir.path + "/" + m for m in ctx.attr.manifests],
@@ -94,6 +92,7 @@ def _chain_impl(ctx):
 
 chain_test = analysistest.make(
     _chain_impl,
+    extra_target_under_test_aspects = [runnable_action_aspect],
     attrs = {
         "chain": attr.string_list(
             doc = "The importers' node_modules directories, bin-dir " +

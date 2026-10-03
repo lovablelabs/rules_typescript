@@ -145,8 +145,6 @@ def _data_srcs_impl(ctx):
         "TsInfo.transitive_data on a target without deps",
     )
 
-    # The JSON srcs are tsgo inputs -- an import resolves to data.json, and the
-    # manifest decides the module format -- and nothing else among the data is.
     tsgo = _action(env, "TsgoCheck")
     asserts.true(env, tsgo != None, "ts_compile runs no TsgoCheck")
     if tsgo != None:
@@ -199,22 +197,77 @@ transitive_data_test = analysistest.make(_transitive_data_impl)
 
 def _dep_json_inputs_impl(ctx):
     env = analysistest.begin(ctx)
+    info = analysistest.target_under_test(env)[TsInfo]
+    compiler_scopes = [
+        f
+        for owner in info.owners.to_list()
+        for f in owner.type_inputs.to_list()
+        if f.path == _PKG + "/gamma/package.json"
+    ]
+    runtime_scopes = [f for f in info.transitive_data.to_list() if _package_relative(f) == "gamma/package.json"]
+    asserts.equals(env, [True], [f.is_source for f in compiler_scopes], "one original compiler scope File")
+    asserts.equals(env, [False], [f.is_source for f in runtime_scopes], "one runtime scope projected into bin")
+    runtime_data = [f for f in info.transitive_data.to_list() if _package_relative(f) == "gamma/data.json"]
+    asserts.equals(env, [False], [f.is_source for f in runtime_data], "one imported JSON module staged into bin")
 
-    # An import of a dep's .json is typed from the file, so it is an input of
-    # the consumer's program beside the dep's declarations; other data is not.
     tsgo = _action(env, "TsgoCheck")
     asserts.true(env, tsgo != None, "ts_compile runs no TsgoCheck")
     if tsgo != None:
+        inputs = [f for f in tsgo.inputs.to_list() if not f.is_directory and "/gamma/" in f.path]
         asserts.equals(
             env,
-            ["gamma/data.json", "gamma/index.d.ts", "gamma/package.json"],
-            sorted([
-                _package_relative(f)
-                for f in tsgo.inputs.to_list()
-                if not f.is_directory and "/gamma/" in f.path
-            ]),
-            "the consumer's tsgo inputs under the dep's gamma/",
+            compiler_scopes,
+            [f for f in inputs if f.basename == "package.json" and f.is_source],
+            "the compiler retains the original metadata File",
+        )
+        asserts.equals(
+            env,
+            runtime_scopes,
+            [f for f in inputs if f.basename == "package.json" and not f.is_source],
+            "the compiler also reads the exact runtime projection",
+        )
+        asserts.equals(
+            env,
+            ["gamma/data.json", "gamma/index.d.ts"],
+            sorted([_package_relative(f) for f in inputs if f.basename != "package.json"]),
+            "the consumer reads imported JSON and declarations, not unrelated assets",
+        )
+        asserts.equals(
+            env,
+            runtime_data,
+            [f for f in inputs if _package_relative(f) == "gamma/data.json"],
+            "the imported JSON retains its runtime File identity",
         )
     return analysistest.end(env)
 
 dep_json_inputs_test = analysistest.make(_dep_json_inputs_impl)
+
+def _sibling_scope_inputs_impl(ctx):
+    env = analysistest.begin(ctx)
+    scope = _PKG + "/sibling_scope/lib/package.json"
+    tsgo = _action(env, "TsgoCheck")
+    asserts.true(env, tsgo != None, "ts_compile runs no TsgoCheck")
+    if tsgo != None:
+        asserts.true(
+            env,
+            "-source=" + scope in tsgo.argv,
+            "an emitted sibling owner's borrowed declarations resolve '#contract' only through its original scope",
+        )
+    return analysistest.end(env)
+
+sibling_scope_inputs_test = analysistest.make(_sibling_scope_inputs_impl)
+
+def _joined_scope_inputs_impl(ctx):
+    env = analysistest.begin(ctx)
+    tsgo = _action(env, "TsgoCheck")
+    asserts.true(env, tsgo != None, "the joined program runs no TsgoCheck")
+    if tsgo != None:
+        for source in ["lib.ts", "package.json"]:
+            asserts.true(
+                env,
+                "-source=" + _PKG + "/joined_scope/" + source in tsgo.argv,
+                "a joined consumer compiles its owner's sources under their original scope: " + source,
+            )
+    return analysistest.end(env)
+
+joined_scope_inputs_test = analysistest.make(_joined_scope_inputs_impl)

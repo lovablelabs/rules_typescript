@@ -1,0 +1,18 @@
+load("//ts:defs.bzl", "ts_compile")
+
+exports_files(
+    [
+        "helper.ts",
+        "package.json",
+    ],
+    visibility = ["//tests/vitest/ancestor_scope/roots/imported:__pkg__"],
+)
+
+# keep
+ts_compile(
+    name = "canonical",
+    srcs = ["leaf.ts"],
+    emit = True,
+    package_scopes = ["package.json"],
+    visibility = ["//tests/vitest/ancestor_scope/roots/imported:__pkg__"],
+)

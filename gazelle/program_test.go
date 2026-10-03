@@ -12,6 +12,7 @@ import (
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
+	"github.com/bazelbuild/bazel-gazelle/resolve"
 
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
@@ -55,6 +56,36 @@ func TestProgram_ArgvPinsPrettyFalse(t *testing.T) {
 	}
 }
 
+func TestKeptManifestRootsPreserveDiscoveryIdentityAndCompilerFlags(t *testing.T) {
+	root := t.TempDir()
+	argv := filepath.Join(root, "argv")
+	bin := filepath.Join(root, "tsgo")
+	listing := "app/index.ts\n  Root file specified for compilation\napp/extra.ts\n  Root file specified for compilation\n"
+	listingFile := filepath.Join(root, "listing")
+	writeFile(t, listingFile, listing)
+	writeFile(t, bin, fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\ncat %q\n", argv, listingFile))
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := emptyConfig()
+	c.RepoRoot = root
+	s := getConfig(c).programs
+	s.tsgoFlag = bin
+	original := &program{config: "app/package.json", dir: "app", manifest: true, Listing: explainfiles.Listing{Files: []string{"app/index.ts"}, Roots: []string{"app/index.ts"}}}
+	listed := s.withSources(c, original, []string{"app/extra.ts", "app/extra.ts", "app/index.ts"})
+	if listed.config != original.config || listed.dir != original.dir || !listed.manifest {
+		t.Fatalf("manifest discovery identity changed: %+v", listed)
+	}
+	got, err := os.ReadFile(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--noEmit", "--listFilesOnly", "--explainFiles", "--ignoreConfig", "--allowJs", "--module", "preserve", "--types", "*", "--skipLibCheck", "--pretty", "false", "app/extra.ts", "app/index.ts", "--traceResolution", "--locale", "en"}
+	if !slices.Equal(strings.Split(strings.TrimSpace(string(got)), "\n"), want) {
+		t.Fatalf("manifest relisting argv = %q, want %q", string(got), want)
+	}
+}
+
 // The exit policy, through a stand-in binary: what tsgo listed is kept whatever
 // it exited with; nothing listed and a diagnostic beyond TS18003 is a refusal.
 func TestProgram_ExitCodePolicy(t *testing.T) {
@@ -67,6 +98,9 @@ func TestProgram_ExitCodePolicy(t *testing.T) {
 	}
 	if len(p.Roots) != 0 || p.dir != "pkg" || p.refused != "" {
 		t.Errorf("program = %+v, want pkg with no roots and no refusal", p)
+	}
+	if err := compilerClosureError(p, "//pkg:pkg", "tsconfig.json"); err != nil {
+		t.Fatalf("observed empty program cannot establish its closure: %v", err)
 	}
 
 	if _, err := listProgram(root, "pkg",
@@ -119,6 +153,144 @@ func TestProgram_ExitCodePolicy(t *testing.T) {
 	if len(p.Roots) != 0 || len(p.Files) != 0 {
 		t.Errorf("a refused program kept roots %q and files %q", p.Roots, p.Files)
 	}
+	if err := compilerClosureError(p, "//pkg:pkg", "tsconfig.json"); err == nil || !strings.Contains(err.Error(), "TS1005") {
+		t.Fatalf("refused program established an empty compiler closure: %v", err)
+	}
+}
+
+func TestProgram_CompilerReachabilityKeepsOwnedTwinMembership(t *testing.T) {
+	const declaration = "pkg/value.d.mts"
+	const companion = "pkg/value.mjs"
+	const private = "pkg/private.mjs"
+	ordinaryImport := importEdge("pkg/index.ts", "./value.mjs", declaration)
+	for _, test := range []struct {
+		name   string
+		roots  []string
+		edges  []explainfiles.Edge
+		types  []explainfiles.TypeEntry
+		direct bool
+	}{
+		{name: "reference", edges: []explainfiles.Edge{{From: "pkg/index.ts", To: declaration, Kind: explainfiles.Reference}}},
+		{name: "type reference", edges: []explainfiles.Edge{{From: "pkg/index.ts", To: declaration, Kind: explainfiles.TypeReference}}},
+		{name: "augmentation", edges: []explainfiles.Edge{{From: "pkg/index.ts", To: declaration, Kind: explainfiles.Augmentation, Specifier: "./value.mjs"}}},
+		{name: "declaration importer", roots: []string{"pkg/index.d.ts"}, edges: []explainfiles.Edge{importEdge("pkg/index.d.ts", "./value.mjs", declaration)}},
+		{name: "configured types", types: []explainfiles.TypeEntry{{Entry: "./value.d.mts", File: declaration}}},
+		{name: "explicit declaration root", roots: []string{declaration}},
+		{name: "import", edges: []explainfiles.Edge{ordinaryImport}},
+		{name: "reference then import", edges: []explainfiles.Edge{{From: "pkg/index.ts", To: declaration, Kind: explainfiles.Reference}, ordinaryImport}},
+		{name: "import then reference", edges: []explainfiles.Edge{ordinaryImport, {From: "pkg/index.ts", To: declaration, Kind: explainfiles.Reference}}},
+		{name: "augmentation then import", edges: []explainfiles.Edge{{From: "pkg/index.ts", To: declaration, Kind: explainfiles.Augmentation, Specifier: "./value.mjs"}, ordinaryImport}},
+		{name: "import then augmentation", edges: []explainfiles.Edge{ordinaryImport, {From: "pkg/index.ts", To: declaration, Kind: explainfiles.Augmentation, Specifier: "./value.mjs"}}},
+		{name: "JavaScript root", roots: []string{companion}, direct: true},
+		{name: "direct JavaScript import", edges: []explainfiles.Edge{{From: "pkg/index.ts", To: declaration, Kind: explainfiles.Reference}, importEdge("pkg/index.ts", "./value.mjs", companion)}, direct: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, tc := edgeRepo(t, nil)
+			s := tc.programs
+			s.visit("pkg", []string{"index.ts", "index.d.ts", "value.d.mts", "value.mjs"})
+			s.walked["pkg"] = true
+			roots := test.roots
+			if roots == nil {
+				roots = []string{"pkg/index.ts"}
+			}
+			p := &program{dir: "pkg", Listing: explainfiles.Listing{
+				Files: append(slices.Clone(roots), declaration), Roots: roots,
+				Edges: slices.Clone(test.edges), Types: test.types,
+			}}
+			for _, edge := range test.edges {
+				if edge.Kind.ModuleSpecifier() {
+					p.candidates = append(p.candidates, resolutionCandidate{from: edge.From, specifier: edge.Specifier, path: edge.To, resolved: edge.To, file: true})
+				}
+			}
+			p.Files = append(p.Files, companion, private)
+			p.Edges = append(p.Edges, importEdge(companion, "./private.mjs", private))
+			s.selectProgram(c, p)
+			for _, file := range []string{companion, private} {
+				if slices.Contains(p.Files, file) != test.direct {
+					t.Errorf("reached %s=%t, want %t", file, slices.Contains(p.Files, file), test.direct)
+				}
+			}
+			s.record(p)
+			if got := s.srcs("pkg", tc); !slices.Contains(got.library, companion) {
+				t.Errorf("owned declaration lost its eligible twin: %+v", got)
+			}
+		})
+	}
+}
+
+func TestProgram_TypeProbesKeepGeneratedRootsAndUnresolvedReasons(t *testing.T) {
+	const declaration = "foreign/companion.d.ts"
+	for _, origin := range []string{"source", "configured", "implicit", "config module"} {
+		for _, state := range []struct {
+			name, resolved string
+			producer       bool
+		}{
+			{name: "absent", producer: true},
+			{name: "present", resolved: declaration, producer: true},
+			{name: "stale fallback", resolved: "fallback/value.d.ts", producer: true},
+			{name: "authored", resolved: declaration},
+			{name: "unresolved nonproducer"},
+		} {
+			t.Run(origin+"/"+state.name, func(t *testing.T) {
+				c := emptyConfig()
+				s := getConfig(c).programs
+				if state.producer {
+					s.index = buildIndex(t, c, indexedRule{kind: "ts_codegen", name: "types", pkg: "foreign", outs: []string{"companion.d.ts"}})
+				}
+				p := &program{config: "app/tsconfig.json", Listing: explainfiles.Listing{
+					Files: []string{"app/index.ts"}, Roots: []string{"app/index.ts"},
+				}}
+				if origin == "config module" {
+					p.config = "app/index.ts"
+				}
+				from := p.config
+				if origin == "source" {
+					from = "app/index.ts"
+				}
+				edge := explainfiles.Edge{From: from, To: state.resolved, Specifier: "../foreign/companion", Kind: explainfiles.TypeReference}
+				if state.resolved != "" {
+					p.Files = append(p.Files, state.resolved, "foreign/private.js")
+					p.Edges = append(p.Edges, importEdge(state.resolved, "./private.js", "foreign/private.js"))
+					entry := explainfiles.TypeEntry{Entry: edge.Specifier, File: edge.To}
+					switch origin {
+					case "source", "config module":
+						p.Edges = append(p.Edges, edge)
+					case "configured":
+						p.Types = []explainfiles.TypeEntry{entry}
+					case "implicit":
+						p.Implicit = []explainfiles.TypeEntry{entry}
+					}
+				}
+				p.candidates = []resolutionCandidate{{from: from, specifier: edge.Specifier, path: declaration, file: true, kind: explainfiles.TypeReference, resolved: state.resolved}}
+				if state.resolved != "" && state.resolved != declaration {
+					p.candidates = append(p.candidates, resolutionCandidate{from: from, specifier: edge.Specifier, path: state.resolved, file: true, kind: explainfiles.TypeReference, resolved: state.resolved})
+				}
+				s.selectProgram(c, p)
+				var want []explainfiles.Edge
+				if state.producer || state.resolved != "" {
+					if state.producer {
+						edge.To = declaration
+					}
+					want = []explainfiles.Edge{edge}
+				}
+				got := sourceEdges(p.edgesBySource(), []string{from})
+				if origin != "source" {
+					got = p.typeEdges()
+				}
+				if !slices.Equal(got, want) {
+					t.Fatalf("selected type roots = %+v, want %+v", got, want)
+				}
+				for _, file := range []string{"foreign/private.js", "fallback/value.d.ts"} {
+					if state.producer && slices.Contains(p.Files, file) {
+						t.Errorf("selected declaration retained stale closure %s", file)
+					}
+				}
+				if state.name == "authored" && !slices.Contains(p.Files, "foreign/private.js") {
+					t.Error("authored type root lost its observed dependency")
+				}
+			})
+		}
+	}
 }
 
 // What tsgo 7.0.2 prints, before the listing, for a tsconfig.json whose types
@@ -136,8 +308,9 @@ func TestProgram_DiagnosticsAreSaidUnderVerboseOnly(t *testing.T) {
 			"pkg/tsconfig.json": `{"compilerOptions":{"types":["./worker-configuration.d.ts"]},"include":["src/**/*.ts"]}` + "\n",
 			"pkg/src/index.ts":  "export const a = 1;\n",
 		})
-		c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
-		configureTsConfig(c, "", nil)
+		c := config.New()
+		c.RepoRoot = root
+		configureTsConfig(c, "", nil, nil)
 		store := getConfig(c).programs
 		store.tsgoFlag = fakeTsgo(t, t.TempDir(), "tsgo", listing, 1)
 		store.verbose = verbose
@@ -174,6 +347,9 @@ func TestProgram_InputsOverTheExtendsChain(t *testing.T) {
 		"solution/tsconfig.json": `{"files":[],"references":[{"path":"./src"}]}` + "\n",
 		"broken/tsconfig.json":   `{"include": [` + "\n",
 	})
+	c := emptyConfig()
+	c.RepoRoot = root
+	s := getConfig(c).programs
 	for rel, want := range map[string]bool{
 		"":         false,
 		"pkg":      true,
@@ -182,16 +358,17 @@ func TestProgram_InputsOverTheExtendsChain(t *testing.T) {
 		"orphan":   false,
 		"solution": true,
 	} {
-		inputs, ok := programNamesInputs(filepath.Join(root, rel, "tsconfig.json"))
-		if !ok {
-			t.Errorf("%s/tsconfig.json: not readable", rel)
+		resolved, _ := s.resolveCompilerConfig(c, tsconfigIn(rel), nil)
+		if resolved == nil {
+			t.Fatalf("%s/tsconfig.json: not readable", rel)
 		}
+		inputs := resolved.Inputs()
 		if inputs != want {
 			t.Errorf("%s/tsconfig.json: inputs = %v, want %v", rel, inputs, want)
 		}
 	}
 	captureLog(t, func() {
-		if _, ok := programNamesInputs(filepath.Join(root, "broken", "tsconfig.json")); ok {
+		if resolved, err := s.resolveCompilerConfig(c, "broken/tsconfig.json", nil); resolved != nil || err == nil {
 			t.Error("a tsconfig.json that does not parse was read as a program")
 		}
 	})
@@ -201,6 +378,7 @@ func TestProgram_InputsOverTheExtendsChain(t *testing.T) {
 func generateDir(t *testing.T, c *config.Config, root, rel string) string {
 	t.Helper()
 	cc := c.Clone()
+	(&resolve.Configurer{}).RegisterFlags(nil, "", cc)
 	dir := filepath.Join(root, rel)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -215,7 +393,8 @@ func generateDir(t *testing.T, c *config.Config, root, rel string) string {
 		}
 	}
 	return captureLog(t, func() {
-		configureTsConfig(cc, rel, nil)
+		configureTsConfig(cc, rel, nil, nil)
+		getConfig(cc).programs.visit(rel, files)
 		generateRules(language.GenerateArgs{Config: cc, Dir: dir, Rel: rel, RegularFiles: files, Subdirs: subdirs})
 	})
 }
@@ -235,8 +414,9 @@ func TestProgram_GenerateRulesRecordsThePrograms(t *testing.T) {
 		"alias/tsconfig.json":  `{"compilerOptions":{"lib":["es2022"],"paths":{"#x/*":["./*"]}}}` + "\n",
 		"alias/x.ts":           "export const x = 1;\n",
 	})
-	c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
-	configureTsConfig(c, "", nil)
+	c := config.New()
+	c.RepoRoot = root
+	configureTsConfig(c, "", nil, nil)
 	store := getConfig(c).programs
 	if _, err := store.binary(); err != nil {
 		t.Skipf("no tsgo binary: %v", err)
@@ -308,8 +488,9 @@ func TestProgram_NoBinarySkipsTheListing(t *testing.T) {
 	tsgoRlocationpath = ""
 	t.Cleanup(func() { tsgoRlocationpath = saved })
 	t.Setenv("TSGO", "")
-	c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
-	configureTsConfig(c, "", nil)
+	c := config.New()
+	c.RepoRoot = root
+	configureTsConfig(c, "", nil, nil)
 
 	var logged string
 	for _, rel := range []string{"pkg", "other", ""} {
@@ -338,7 +519,8 @@ func TestProgram_FilesInNoProgramAreReported(t *testing.T) {
 		"stray/notes.md":      "not a source\n",
 	})
 	l := NewLanguage().(*tsLang)
-	c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
+	c := config.New()
+	c.RepoRoot = root
 	fs := flag.NewFlagSet("gazelle", flag.ContinueOnError)
 	l.RegisterFlags(fs, "update", c)
 	if err := fs.Parse([]string{"-ts_verbose"}); err != nil {
@@ -347,7 +529,8 @@ func TestProgram_FilesInNoProgramAreReported(t *testing.T) {
 	if _, err := getConfig(c).programs.binary(); err != nil {
 		t.Skipf("no tsgo binary: %v", err)
 	}
-	l.Configure(c, "", nil)
+	configureTsConfig(c, "", nil, nil)
+	l.programs = getConfig(c).programs
 
 	var logged string
 	for _, rel := range []string{"pkg/src", "pkg/scripts", "pkg", "stray", ""} {
@@ -370,8 +553,6 @@ func TestProgram_FilesInNoProgramAreReported(t *testing.T) {
 		t.Errorf("DoneGeneratingRules said:\n%s\nwant:\n%s", done, strings.Join(want, "\n"))
 	}
 }
-
-// ---- the combined vitest run, the foreign project, the install ------------
 
 // A stand-in tsgo writing its argv, one per line, to a file beside it.
 func argvTsgo(t *testing.T, root string) (bin, argv string) {
@@ -399,8 +580,9 @@ func TestProgram_AForeignProjectIsNotListed(t *testing.T) {
 		"pkg/tsconfig.json":     `{"include":["*.ts"]}` + "\n",
 		"pkg/a.ts":              "export const p = 1;\n",
 	})
-	c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
-	configureTsConfig(c, "", nil)
+	c := config.New()
+	c.RepoRoot = root
+	configureTsConfig(c, "", nil, nil)
 	store := getConfig(c).programs
 	store.tsgoFlag = bin
 	store.verbose = true
@@ -438,13 +620,11 @@ func TestProgram_AForeignProjectIsNotListed(t *testing.T) {
 	}
 }
 
-// The combined run's flags: --ignoreConfig, or tsgo refuses with TS5112 when
-// the root holds a tsconfig.json; --allowJs, or a .mjs config is TS6504.
-func TestProgram_CombinedVitestRunArgv(t *testing.T) {
+// --ignoreConfig avoids TS5112 beside a tsconfig.json; --allowJs avoids TS6504 for .mjs.
+func TestProgram_VitestConfigFlagsAllowStandaloneJavaScript(t *testing.T) {
 	root := t.TempDir()
 	bin, argv := argvTsgo(t, root)
-	configs := []string{"a/vitest.config.mts", "b/vitest.workers.config.mjs"}
-	if _, err := listVitestConfigs(root, bin, configs); err != nil {
+	if _, err := listVitestConfig(root, bin, "b/vitest.workers.config.mjs"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(argv)
@@ -453,16 +633,14 @@ func TestProgram_CombinedVitestRunArgv(t *testing.T) {
 	}
 	want := "--noEmit\n--listFilesOnly\n--explainFiles\n--ignoreConfig\n" +
 		"--allowJs\n--module\nesnext\n--moduleResolution\nbundler\n" +
-		"--skipLibCheck\n--pretty\nfalse\na/vitest.config.mts\n" +
+		"--skipLibCheck\n--pretty\nfalse\n" +
 		"b/vitest.workers.config.mjs\n--traceResolution\n--locale\nen\n"
 	if string(got) != want {
 		t.Errorf("tsgo argv:\n%s\nwant:\n%s", got, want)
 	}
 }
 
-// One run over every registered config at the first ask, edges by from-file,
-// over the ruleset's own two: a plugin object with no import, a .mjs with one.
-func TestProgram_CombinedVitestRunEdgesPerConfig(t *testing.T) {
+func TestProgram_VitestConfigsDiscoveredAfterFirstListing(t *testing.T) {
 	root := t.TempDir()
 	const (
 		configured = "tests/integration/gazelle_roundtrip/configured/" +
@@ -487,81 +665,22 @@ func TestProgram_CombinedVitestRunEdgesPerConfig(t *testing.T) {
 		files[cfg] = string(data)
 	}
 	writeWorkspace(t, root, files)
-	s := newProgramStore()
+	c := emptyConfig()
+	c.RepoRoot = root
+	s := getConfig(c).programs
 	if _, err := s.binary(); err != nil {
 		t.Skipf("no tsgo binary: %v", err)
 	}
-	s.vitestConfig(configured)
-	s.vitestConfig(workers)
-
-	want := []explainfiles.Edge{{Kind: explainfiles.Import, From: workers,
-		To: pool, Specifier: "@cloudflare/vitest-pool-workers"}}
-	if got := s.configEdges(root, workers); !slices.Equal(got, want) {
-		t.Errorf("edges of %s = %+v, want %+v", workers, got, want)
-	}
-	if got := s.configEdges(root, configured); len(got) != 0 {
+	if got := s.configProgram(root, configured).edgesBySource()[configured]; len(got) != 0 {
 		t.Errorf("edges of %s = %+v, want none: it imports nothing", configured, got)
 	}
-	if got := s.configEdges(root, "tests/other/vitest.config.ts"); got != nil {
-		t.Errorf("an unregistered config has edges %+v", got)
+	want := []explainfiles.Edge{{Kind: explainfiles.Import, From: workers,
+		To: pool, Specifier: "@cloudflare/vitest-pool-workers"}}
+	if got := s.configProgram(root, workers).edgesBySource()[workers]; !slices.Equal(got, want) {
+		t.Errorf("edges of %s = %+v, want %+v", workers, got, want)
 	}
-}
-
-// A config's edges are its closure's: the config imports its plugin module,
-// the module a bare package and a JSON sibling; the first-party ones are srcs.
-func TestProgram_ConfigEdgesAndSrcsAreTheClosure(t *testing.T) {
-	root := t.TempDir()
-	const (
-		cfg    = "pkg/vitest.config.mts"
-		plugin = "pkg/plugins/define.ts"
-		meta   = "pkg/plugins/meta.json"
-		pool   = "node_modules/@cloudflare/vitest-pool-workers/index.d.ts"
-	)
-	writeWorkspace(t, root, map[string]string{
-		"package.json": `{"name":"w","type":"module"}` + "\n",
-		"tsconfig.json": `{"compilerOptions":{"types":[]},` +
-			`"include":["nothing/**/*"]}` + "\n",
-		"node_modules/@cloudflare/vitest-pool-workers/package.json": `{"name":` +
-			`"@cloudflare/vitest-pool-workers","version":"0.18.4",` +
-			`"types":"index.d.ts"}` + "\n",
-		pool: "export declare function cloudflareTest(o: unknown): unknown;\n",
-		cfg: "import { define } from \"./plugins/define\";\n" +
-			"export default { plugins: [define()] };\n",
-		plugin: "import { cloudflareTest } from " +
-			"\"@cloudflare/vitest-pool-workers\";\n" +
-			"import meta from \"./meta.json\";\n" +
-			"export const define = () => ({ name: meta.name, cloudflareTest });\n",
-		meta: `{"name":"define"}` + "\n",
-	})
-	s := newProgramStore()
-	if _, err := s.binary(); err != nil {
-		t.Skipf("no tsgo binary: %v", err)
-	}
-	s.vitestConfig(cfg)
-
-	want := []explainfiles.Edge{
-		{Kind: explainfiles.Import, From: cfg, To: plugin,
-			Specifier: "./plugins/define"},
-		{Kind: explainfiles.Import, From: plugin, To: meta,
-			Specifier: "./meta.json"},
-		{Kind: explainfiles.Import, From: plugin, To: pool,
-			Specifier: "@cloudflare/vitest-pool-workers"},
-	}
-	byTarget := func(a, b explainfiles.Edge) int {
-		return strings.Compare(a.To, b.To)
-	}
-	got := s.configEdges(root, cfg)
-	slices.SortFunc(got, byTarget)
-	slices.SortFunc(want, byTarget)
-	if !slices.Equal(got, want) {
-		t.Errorf("edges of %s = %+v, want %+v", cfg, got, want)
-	}
-	srcs := []string{plugin, meta}
-	if got := s.configSrcs(root, cfg); !slices.Equal(got, srcs) {
-		t.Errorf("srcs of %s = %v, want %v", cfg, got, srcs)
-	}
-	if got := s.configSrcs(root, "tests/other/vitest.config.ts"); got != nil {
-		t.Errorf("an unregistered config has srcs %v", got)
+	if got := s.configProgram(root, configured).edgesBySource()[configured]; len(got) != 0 {
+		t.Errorf("edges of %s = %+v, want none: it imports nothing", configured, got)
 	}
 }
 

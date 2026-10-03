@@ -1,0 +1,57 @@
+# The consumer table owns this fixture's deliberately different runtime closures.
+# gazelle:ignore
+
+load("//npm:defs.bzl", "node_modules")
+load("//ts:defs.bzl", "ts_binary", "ts_compile")
+load(":fixtures.bzl", "data_closure_tests", "esbuild_adapter")
+
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = ["@npm//:minimatch"],
+)
+
+ts_compile(
+    name = "source_leaf",
+    srcs = ["source_leaf.ts"],
+    emit = False,
+)
+
+ts_compile(
+    name = "source_data",
+    srcs = ["source_data.ts"],
+    emit = False,
+    deps = [":source_leaf"],
+)
+
+ts_compile(
+    name = "check",
+    srcs = ["check.mjs"],
+    emit = True,
+    node_modules = ":node_modules",
+    deps = [
+        "@npm//:minimatch",
+        "@npm//:types_node",
+    ],
+)
+
+ts_compile(
+    name = "entry",
+    srcs = ["binary.mjs"],
+    emit = True,
+    node_modules = ":node_modules",
+    deps = [":check"],
+)
+
+ts_binary(
+    name = "bundler_tool",
+    entry_point = "bundler.mjs",
+    node_modules = "//vite:node_modules",
+)
+
+esbuild_adapter(
+    name = "bundler",
+    binary = ":bundler_tool",
+)
+
+data_closure_tests()

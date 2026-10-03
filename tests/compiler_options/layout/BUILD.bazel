@@ -1,0 +1,38 @@
+load("//ts:defs.bzl", "ts_compile")
+
+package(default_visibility = ["//tests/compiler_options/analysis:__pkg__"])
+
+genrule(
+    name = "runtime_inputs",
+    outs = [
+        "value.ts",
+        "value.js",
+        "value.json",
+    ],
+    cmd = "echo 'export const value = 42;' > $(location value.ts); " +
+          "echo 'export const value = 42;' > $(location value.js); " +
+          "echo '{\"value\":42}' > $(location value.json)",
+)
+
+exports_files([
+    "a.ts",
+    "authored.json",
+])
+
+filegroup(
+    name = "runtime_json",
+    srcs = ["authored.json"],
+)
+
+ts_compile(
+    name = "dep",
+    srcs = ["b.ts"],
+    emit = True,
+)
+
+ts_compile(
+    name = "coherent_owned_import",
+    srcs = ["a.ts"],
+    emit = True,
+    deps = [":dep"],
+)

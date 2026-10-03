@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -452,6 +451,10 @@ func handAuthoredCases() []handAuthoredCase {
 		{
 			workspace: "plain", pkg: "src", kind: "ts_compile", target: "src",
 			attr: "tsconfig", shape: "scalar", value: "//:tsconfig_build",
+			extra: map[string]string{
+				"BUILD.bazel": loadDefs + "\"ts_config\")\nts_config(name = \"tsconfig_build\", src = \"build.json\")\n",
+				"build.json":  `{"extends":"./tsconfig.json","include":["src/**/*"]}`,
+			},
 		},
 	}
 }
@@ -682,19 +685,8 @@ func TestTypesEntryIsADepOnTheTargetStagingIt(t *testing.T) {
 			r.Kind(), r.Name(), deps,
 			indent(buildFileText(t, checkedIn, "worker/test")))
 	}
-	for _, pkg := range []string{"worker", "worker/test"} {
-		for _, r := range loadRules(t, checkedIn, pkg) {
-			if r.Kind() != "ts_compile" && r.Kind() != "ts_test" {
-				continue
-			}
-			for _, attr := range attrsBeyondTheRule(r) {
-				t.Errorf("%s(%s) in //%s carries %s while the declaration is "+
-					"checked in; the tsconfig names it and the rule reads the "+
-					"tsconfig:\n%s", r.Kind(), r.Name(), pkg, attr,
-					indent(buildFileText(t, checkedIn, pkg)))
-			}
-		}
-	}
+	wantLabels(t, "config retains its module scope", r.AttrStrings("config_srcs"), []string{"//worker:package.json"})
+	wantLabels(t, "compiler dependency supplies the test scope", r.AttrStrings("package_scopes"), nil)
 	requireNoTsConfigTypesFilegroup(t, checkedIn)
 
 	// Both programs name a declaration only the codegen writes.
@@ -713,9 +705,9 @@ func TestTypesEntryIsADepOnTheTargetStagingIt(t *testing.T) {
 				r.Kind(), r.Name(), program.pkg, deps, program.want,
 				indent(buildFileText(t, generated, program.pkg)))
 		}
-		for _, attr := range attrsBeyondTheRule(r) {
-			t.Errorf("%s(%s) in //%s carries %s = %v; the rule has no such attribute:\n%s",
-				r.Kind(), r.Name(), program.pkg, attr, attrValues(r, attr), indent(buildFileText(t, generated, program.pkg)))
+		if program.kind == "ts_test" {
+			wantLabels(t, "config retains its module scope", r.AttrStrings("config_srcs"), []string{"//worker:package.json"})
+			wantLabels(t, "codegen dependency leaves the test scope explicit", r.AttrStrings("package_scopes"), []string{"//worker:package.json"})
 		}
 	}
 	requireNoTsConfigTypesFilegroup(t, generated)
@@ -728,18 +720,34 @@ func TestTypesEntryIsADepOnTheTargetStagingIt(t *testing.T) {
 	}
 }
 
-// attrsBeyondTheRule is every attribute on r that ts_compile and ts_test do not
-// have: srcs, deps, tsconfig, visibility and a ts_test's config are theirs.
-func attrsBeyondTheRule(r *rule.Rule) []string {
-	own := map[string]bool{"name": true, "srcs": true, "deps": true, "tsconfig": true, "visibility": true, "config": true}
-	var beyond []string
-	for _, key := range r.AttrKeys() {
-		if !own[key] {
-			beyond = append(beyond, key)
+// Failed analysis in gazelle_roundtrip: the authored scope staged over //pooled's rewritten package.json.
+func TestConfigScopeFollowsAnEmittedPublisher(t *testing.T) {
+	requireTsgo(t)
+	root := t.TempDir()
+	writeWorkspace(t, root, convergeFixture(t, "worker").files)
+	captureLog(t, func() { convergeGazelle(t, root) })
+	build := filepath.Join(root, "worker", "BUILD.bazel")
+	f, err := rule.LoadFile(build, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted := false
+	for _, r := range f.Rules {
+		if r.Kind() == "ts_compile" && r.Name() == "worker" {
+			r.SetAttr("emit", true)
+			emitted = true
 		}
 	}
-	sort.Strings(beyond)
-	return beyond
+	if !emitted {
+		t.Fatalf("no ts_compile(worker) to emit:\n%s", indent(buildFileText(t, root, "worker")))
+	}
+	writeFile(t, build, strings.Replace(string(f.Format()), "emit = True,", "emit = True,  # keep", 1))
+	captureLog(t, func() { convergeGazelle(t, root) })
+	r := onlyRuleOfKind(t, root, "worker/test", "ts_test")
+	wantLabels(t, "the emitted publisher owns the config scope", r.AttrStrings("config_srcs"), nil)
+	if deps := r.AttrStrings("deps"); !contains(deps, "//worker") {
+		t.Errorf("deps = %v, want the scope publisher //worker:\n%s", deps, indent(buildFileText(t, root, "worker/test")))
+	}
 }
 
 func onlyRuleOfKind(t *testing.T, root, pkg, kind string) *rule.Rule {

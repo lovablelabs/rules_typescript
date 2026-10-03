@@ -7,7 +7,7 @@ vitest runs ES modules whatever the program's module; node:test the package's
 format. docs/rules/ts-test.md § Runners.
 """
 
-load("//tools/launcher:launcher.bzl", "rlocation_path")
+load("//tools/launcher:launcher.bzl", "rlocation_path", "runfiles_link_path", "runfiles_root_path")
 load("//ts/private:providers.bzl", "TsTestRunnerInfo")
 load(
     "//ts/private/actions:vitest.bzl",
@@ -16,29 +16,55 @@ load(
 )
 load("//ts/private/actions:workers_pool.bzl", "workers_pool_environment")
 
-# A dep tsgo emits runs as the ES modules oxc emitted from the same sources:
-# each twin at its .js's runfiles path, in place of the .js.
-def _es_twins_in_place(test):
-    twins = {js.short_path: es for js, es in test.es_twins.to_list()}
-    if not twins:
-        return test.transitive_js, {}
-    return depset([
-        f
-        for f in test.transitive_js.to_list()
-        if f.short_path not in twins
-    ]), twins
+def _vitest_discovery(ctx, test, selected):
+    name = getattr(ctx.attr, "public_name", ctx.label.name)
+    prefix = "/".join([part for part in [ctx.label.package, "_{}.vitest/tests".format(name)] if part])
+    entries = {}
+    links = {}
+    for source, runtime in test.runtime_inputs.items():
+        link = prefix + "/" + rlocation_path(ctx, source)
+        path = runfiles_root_path(ctx, link)
+        pair = (source, runtime, selected.get(runtime, runtime))
+        previous = entries.get(path)
+        if previous != None and previous != pair:
+            fail("ts_test {}: test discovery path '{}' has conflicting requested inputs or runtimes. Did you mean to give each requested input a distinct discovery path?".format(ctx.label, path))
+        entries[path] = pair
+        links[link] = pair[2]
+    files_list = ctx.actions.declare_file("_{}.vitest/test_files.txt".format(name))
+    ctx.actions.write(files_list, "\n".join(sorted(entries)) + "\n")
+    return struct(
+        root = runfiles_root_path(ctx, prefix),
+        entries = entries,
+        extensions = sorted({source.extension: True for source in test.runtime_inputs}),
+        files_list = files_list,
+        symlinks = links,
+    )
 
 def _vitest_launch(ctx, test):
-    program_js, twins = _es_twins_in_place(test)
-    pool = workers_pool_environment(ctx, test.chain, test.runtime_data_sets, test.runtime_sources, test.transitive_js)
+    selected = {js: es for js, es in test.es_twins.to_list()}
+    pool = workers_pool_environment(ctx, test.chain, test.runtime_data_sets, test.runtime_files, test.asset_files, test.runtime_sources, test.transitive_js)
+    selected.update(pool.replacements)
+    replacement_links = {runfiles_link_path(original): replacement for original, replacement in selected.items()}
+    discovery = _vitest_discovery(ctx, test, selected)
+    aliases = {link: selected.get(canonical, canonical) for link, canonical in test.canonical_links}
+    program_js = depset([file for file in test.transitive_js.to_list() if file not in selected])
+    runtime_data = depset([file for file in depset(transitive = pool.runtime_data_sets).to_list() if file not in aliases and file not in selected])
+    package_sources = test.package_sources
+    if selected:
+        package_sources = [depset([file for file in depset(transitive = package_sources).to_list() if file not in selected])]
     tsconfig_paths = tsconfig_paths_action(ctx)
     written = vitest_config_action(
         ctx,
         test_entry_points = test.entry_points,
-        entry_extensions = test.entry_extensions,
+        runtime_files = test.runtime_files,
+        selected = selected,
+        source_sets = package_sources,
+        entry_extensions = discovery.extensions,
+        discovery_root = discovery.root,
+        discovery_entries = discovery.entries,
         tsconfig_paths = tsconfig_paths,
         inline_members = test.inline_members,
-        overlays = pool.symlinks | twins | test.placed,
+        overlays = pool.symlinks | replacement_links,
     )
 
     # Every path is a runfiles path; the launcher resolves them through the
@@ -47,7 +73,7 @@ def _vitest_launch(ctx, test):
         "config_file": written.entry,
         "root_rel": written.root_rel,
         "stage": written.stage,
-        "test_files_list": rlocation_path(ctx, test.test_files_list),
+        "test_files_list": rlocation_path(ctx, discovery.files_list),
         "reads_hook": rlocation_path(ctx, test.runner.hook),
     }
     if test.chain.rlocations:
@@ -62,17 +88,22 @@ def _vitest_launch(ctx, test):
     env = dict(ctx.attr.env)
     env.setdefault("CI", "true")
 
-    files = [written.config, test.runner.hook]
+    files = [written.config, discovery.files_list, test.runner.hook]
     if tsconfig_paths:
         files.append(tsconfig_paths)
+    symlinks = pool.symlinks | written.symlinks | replacement_links | {runfiles_link_path(link): target for link, target in aliases.items()}
+    for path, file in discovery.symlinks.items():
+        if symlinks.setdefault(path, file) != file:
+            fail("ts_test {}: private test discovery path '{}' conflicts with another runner input. Did you mean to relocate that input outside the test's private discovery directory?".format(ctx.label, path))
     return struct(
         mode = "vitest",
         section = section,
         env = env,
         files = files,
-        symlinks = pool.symlinks | written.symlinks | twins,
+        symlinks = symlinks,
+        replacements = selected,
         transitive_files = depset(transitive = (
-            [program_js] + pool.runtime_data_sets + test.package_sources
+            [program_js, runtime_data] + package_sources
         )),
         # The config vitest ran with, for debugging and for the tests that pin
         # the layering.

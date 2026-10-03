@@ -19,14 +19,16 @@ node_modules(
 ts_compile(
     name = "shared",
     srcs = [
-        "package.json",
         "src/banner.json",
         "src/index.ts",
         "src/wire/index.ts",
-        "src/wire/package.json",
     ],
     emit = True,  # keep
     node_modules = ":node_modules",
+    package_scopes = [
+        "package.json",
+        "src/wire/package.json",
+    ],
     visibility = ["//visibility:public"],
     deps = ["@npm//packages/shared:zod"],
 )

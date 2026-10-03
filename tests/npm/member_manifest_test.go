@@ -6,20 +6,18 @@ import (
 	"github.com/mikn/rules_typescript/tests/verify"
 )
 
-// A package.json src is staged as written; the manifest as built beside it,
-// <name>.package.json, names the emitted files, a .tsx the .jsx it declares.
-func TestManifestAsWrittenAndAsBuilt(t *testing.T) {
+func TestWorkspaceManifestsDoNotRetainSourceEntryPoints(t *testing.T) {
 	tree := verify.New(t)
 	tree.File("packages/shared/package.json").Contains(
-		`"./src/index.ts"`,
-		`"./src/wire/index.ts"`,
+		`"./src/index.js"`,
+		`"./src/wire/index.js"`,
 	)
 	tree.File("packages/shared/shared.package.json").Contains(
 		`"exports":{".":"./src/index.js","./wire":"./src/wire/index.js"}`,
 		`"type":"module"`,
 	)
 	tree.File("tests/jsx_preserve/member/package.json").Contains(
-		`"exports": "./view.tsx"`,
+		`"exports":"./view.jsx"`,
 	)
 	tree.File("tests/jsx_preserve/member/member.package.json").Contains(
 		`"exports":"./view.jsx"`,

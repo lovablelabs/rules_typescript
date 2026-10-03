@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, realpathSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, posix, resolve } from "node:path";
 
@@ -12,10 +12,16 @@ const names = {
   "--out": "out",
   "--config-path": "configPath",
   "--node-modules": "nodeModules",
+  "--runtime-file": "runtimeFiles",
   "--runtime-source": "runtimeSources",
   "--runtime-js": "runtimeJs",
 };
-const flags = { nodeModules: [], runtimeSources: [], runtimeJs: [] };
+const flags = {
+  nodeModules: [],
+  runtimeFiles: [],
+  runtimeSources: [],
+  runtimeJs: [],
+};
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i += 2) {
   const name = names[argv[i]] ?? argv[i];
@@ -45,28 +51,43 @@ try {
 }
 const { experimental_readRawConfig, experimental_patchConfig } = wrangler;
 
-const COMPILED = { ".ts": ".js", ".tsx": ".js", ".mts": ".mjs", ".cts": ".cjs" };
-const compiledEntry = (main) => {
-  const m = /\.(mts|cts|tsx|ts)$/.exec(main);
-  return m ? main.slice(0, -m[0].length) + COMPILED[m[0]] : main;
-};
-
-const sources = new Set(flags.runtimeSources);
-const javascript = new Set(flags.runtimeJs);
+const runtimeFiles = new Map();
+for (const pair of flags.runtimeFiles) {
+  const [source, runtime] = JSON.parse(pair);
+  const selected = runtimeFiles.get(source) ?? new Set();
+  selected.add(runtime);
+  runtimeFiles.set(source, selected);
+}
+const runtimeSources = new Set(flags.runtimeSources);
+const runtimeJs = new Set(flags.runtimeJs);
+const compiledExtensions = { ts: "js", tsx: "js", mts: "mjs", cts: "cjs" };
 const runtimeEntry = (main) => {
   const source = posix.normalize(posix.join(posix.dirname(configPath), main));
-  const emitted = compiledEntry(source);
-  const ownsSource = sources.has(source);
-  const ownsEmitted = javascript.has(emitted);
-  if (ownsSource && ownsEmitted && source !== emitted) {
+  let selected = runtimeFiles.get(source);
+  if (!selected) {
+    const emitted = source.replace(
+      /\.(ts|tsx|mts|cts)$/,
+      (_, ext) => `.${compiledExtensions[ext]}`,
+    );
+    selected = new Set();
+    if (runtimeSources.has(source)) selected.add(source);
+    if (runtimeJs.has(emitted)) selected.add(emitted);
+    if (selected.size === 0) return main;
+  }
+  if (selected.size !== 1) {
     fail(
-      `${configPath}: ${main} has both source and emitted runtime owners; use one runtime identity in the test dependencies`,
+      `${configPath}: ${main} has conflicting declared runtime owners; use one runtime identity in the test dependencies`,
     );
   }
-  return ownsEmitted && !ownsSource ? compiledEntry(main) : main;
+  const [runtime] = selected;
+  return runtime === source
+    ? main
+    : posix.relative(posix.dirname(configPath), runtime);
 };
 
 copyFileSync(config, out);
+// A sandboxed or cached input is read-only, and copyFile keeps that mode.
+chmodSync(out, 0o644);
 const { rawConfig } = experimental_readRawConfig({ config: out });
 const patch = {};
 if (typeof rawConfig.main === "string") patch.main = runtimeEntry(rawConfig.main);

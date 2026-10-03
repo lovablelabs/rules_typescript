@@ -47,9 +47,7 @@ func run() int {
 		return 1
 	}
 	if dump {
-		if plan.Cleanup != nil {
-			defer plan.Cleanup()
-		}
+		defer plan.Cleanup()
 		if err := Dump(plan, cfgPath, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1

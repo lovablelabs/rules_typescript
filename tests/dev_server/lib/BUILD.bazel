@@ -8,6 +8,14 @@ package(default_visibility = ["//tests/dev_server:__pkg__"])
 ts_compile(
     name = "lib",
     srcs = ["index.ts"],
+    data = [
+        "settings.mjs",
+        "theme.css",
+        "//tests/dev_server_assets:helper.mjs",
+        "//tests/dev_server_assets:nested.css",
+        "//tests/dev_server_assets:payload.svg",
+        "//tests/dev_server_assets:style.css",
+    ],  # keep
     emit = True,  # keep
     visibility = ["//visibility:public"],
 )

@@ -14,7 +14,6 @@ ts_compile(
         "LICENSE",
         "README.md",
         "docs/rules/require-explicit-types.md",
-        "package.json",
         "package-lock.json",
         "src/index.ts",
         "src/rules/require-explicit-types.ts",
@@ -22,6 +21,7 @@ ts_compile(
     ],
     # keep
     node_modules = "//tests/eslint:node_modules",
+    package_scopes = [":package.json"],
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
     # keep
@@ -32,6 +32,7 @@ ts_test(
     name = "eslint-plugin_test",
     srcs = ["src/rules/__tests__/require-explicit-types.test.ts"],
     config = "vitest.config.ts",
+    config_srcs = ["package.json"],
     # keep
     node_modules = "//tests/eslint:node_modules",
     tsconfig = ":tsconfig",

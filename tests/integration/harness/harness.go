@@ -461,7 +461,7 @@ func (it *IT) BazelStdout(args ...string) string {
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		it.Fail("bazel %s exited non-zero: %v", strings.Join(args, " "), err)
+		it.Fail("bazel %s exited non-zero: %v\n%s", strings.Join(args, " "), err, out.String())
 	}
 	return out.String()
 }

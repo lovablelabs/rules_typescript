@@ -6,16 +6,31 @@ load(
     "declare_launcher",
     "rlocation_path",
 )
-load("//ts/private:node_modules.bzl", "runfiles_dir")
-load("//ts/private:providers.bzl", "DevServerInfo", "NodeModulesInfo", "TsInfo")
+load("//ts/private:node_modules.bzl", "check_dev_server_npm_contexts")
+load("//ts/private:providers.bzl", "DevServerInfo", "NodeModulesInfo", "TsInfo", "canonical_runtime_file", "runtime_links", "runtime_scope_destinations")
 load("//ts/private:runtime.bzl", "JS_RUNTIME_TOOLCHAIN_TYPE", "get_js_runtime")
 load("//ts/private:vite_config.bzl", "LOAD_USER_CONFIG_JS", "VITE_CONFIG_EXTENSIONS", "VITE_CONFIG_SRCS_DOC", "stage_vite_config")
 
-def _bin_relative(f):
-    """The path of a generated file relative to the bazel-bin symlink."""
+def _logical_path(f):
     if f.short_path.startswith("../"):
         return "external/" + f.short_path[3:]
     return f.short_path
+
+def _file_path_js(ctx, source):
+    if source.is_source and not source.short_path.startswith("../"):
+        return "path.resolve(workspaceRoot, {})".format(json.encode(source.short_path))
+    if source.path.startswith(ctx.bin_dir.path + "/"):
+        relative = source.path[len(ctx.bin_dir.path) + 1:]
+    else:
+        relative = "../" * len(ctx.bin_dir.path.split("/")) + source.path
+    return "path.resolve(fs.realpathSync(bazelBin), {})".format(json.encode(relative))
+
+def _add_declared_file(files, logical, original, selected, context):
+    previous = files.get(logical)
+    if previous != None and previous[0] != original:
+        fail(("ts_dev_server: input '{}' has distinct source Files '{}' and '{}'. " +
+              "Did you mean to give these inputs separate logical paths?").format(logical, previous[0].path, original.path))
+    files[logical] = (original, selected, context)
 
 def _server_config_input_js(server_info, server_binary_rl):
     """The restart input naming whichever dev server is actually serving.
@@ -52,11 +67,13 @@ def _server_config_input_js(server_info, server_binary_rl):
 
 def _generate_dev_config(
         ctx,
-        node_modules_rl,
+        has_node_modules,
         plugin_rl,
         react_refresh,
         runtime_rl,
         server_input_js,
+        declared_files,
+        npm_contexts,
         user_config_rl = ""):
     """Generates a vite.config.mjs for dev server mode.
 
@@ -72,8 +89,7 @@ def _generate_dev_config(
 
     Args:
         ctx: The rule context.
-        node_modules_rl: Runfiles-tree-relative path to the importer's
-            node_modules directory, or empty string if node_modules is not set.
+        has_node_modules: Whether an importer was declared.
         plugin_rl: Runfiles-tree-relative path to the compiled
             vite_plugin_bazel.mjs, or empty string if not set.
         react_refresh: bool, whether to import and use @vitejs/plugin-react
@@ -90,6 +106,27 @@ def _generate_dev_config(
     Returns:
         The generated vite.config.mjs File.
     """
+    scopes = [original for original, _selected, context in declared_files.values() if context == "source" and original.basename == "package.json"]
+    declared_paths = []
+    for logical, (original, selected, context) in sorted(declared_files.items()):
+        source_scope = ""
+        importer = ""
+        if context == "source" and not original.is_directory:
+            for scope in runtime_scope_destinations(scopes, original, original.path):
+                source_scope = ", scope: " + _file_path_js(ctx, scope)
+                if not original.is_source and scope.is_source:
+                    relative = "/".join(original.short_path.split("/")[len(scope.short_path.split("/")) - 1:])
+                    importer = ", importer: path.resolve(path.dirname({}), {})".format(_file_path_js(ctx, scope), json.encode(relative))
+        declared_paths.append(
+            "[{}]: {{ path: {}, context: {}, isSource: {}{}{}{} }}".format(json.encode(logical), _file_path_js(ctx, selected), json.encode(context), json.encode(selected.is_source), ", directory: true" if selected.is_directory else "", source_scope, importer),
+        )
+
+    npm_paths = [
+        "[{}, {}]".format(json.encode(logical), json.encode(npm_contexts[original]))
+        for logical, (original, _selected, _context) in sorted(declared_files.items())
+        if original in npm_contexts
+    ]
+
     port = ctx.attr.port
     host = ctx.attr.host
     open_browser = ctx.attr.open
@@ -131,6 +168,57 @@ def _generate_dev_config(
         "\n" +
         "// The importer's node_modules directory, absolute, in runfiles.\n" +
         "const nodeModulesPath = process.env['NODE_MODULES_PATH'] || null;\n" +
+        "\n" +
+        "const declaredFiles = {" + ", ".join(declared_paths) + "};\n" +
+        "const npmContexts = [" + ", ".join(npm_paths) + "];\n" +
+        "const admittedNpmPaths = new Set();\n" +
+        "const npmStores = new Map();\n" +
+        "const realpath = file => {\n" +
+        "  try { return fs.realpathSync(file); } catch (error) {\n" +
+        "    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;\n" +
+        "  }\n" +
+        "};\n" +
+        "// A sandbox may rebuild a store directory from per-file links; the manifest's\n" +
+        "// realpath names the same package either way.\n" +
+        "const npmStore = directory => {\n" +
+        "  const manifest = realpath(path.join(directory, 'package.json'));\n" +
+        "  return manifest === undefined ? realpath(directory) : path.dirname(manifest);\n" +
+        "};\n" +
+        "for (const [logical, names] of npmContexts) {\n" +
+        "  const file = declaredFiles[logical];\n" +
+        "  const directories = new Set();\n" +
+        "  for (const source of [file.path, file.importer]) {\n" +
+        "    if (source === undefined) continue;\n" +
+        "    directories.add(file.directory ? source : path.dirname(source));\n" +
+        "    const resolved = realpath(source);\n" +
+        "    if (resolved !== undefined) directories.add(file.directory ? resolved : path.dirname(resolved));\n" +
+        "  }\n" +
+        "  for (const directory of [...directories]) {\n" +
+        "    const resolved = realpath(directory);\n" +
+        "    if (resolved !== undefined) directories.add(resolved);\n" +
+        "  }\n" +
+        "  for (const name of names) {\n" +
+        "    if (!npmStores.has(name)) npmStores.set(name, npmStore(path.join(nodeModulesPath, name)) ?? fs.realpathSync(path.join(nodeModulesPath, name)));\n" +
+        "    const expected = npmStores.get(name);\n" +
+        "    for (const source of directories) {\n" +
+        "      for (let directory = source; ; directory = path.dirname(directory)) {\n" +
+        "        if (path.basename(directory) !== 'node_modules') {\n" +
+        "          const candidate = path.join(directory, 'node_modules', name);\n" +
+        "          if (admittedNpmPaths.has(candidate)) break;\n" +
+        "          const actual = npmStore(candidate);\n" +
+        "          if (actual !== undefined && actual !== expected) {\n" +
+        "            throw new Error('[ts_dev_server] conflicting npm installation for ' + name + ' from ' + source +\n" +
+        "              ': ' + candidate + ' resolves to ' + actual + ', but the declared app store is ' + expected +\n" +
+        "              '. Remove the conflicting installation yourself or link this package to the declared store before restarting.');\n" +
+        "          }\n" +
+        "          admittedNpmPaths.add(candidate);\n" +
+        "          if (actual !== undefined) break;\n" +
+        "        }\n" +
+        "        if (path.dirname(directory) === directory) break;\n" +
+        "      }\n" +
+        "    }\n" +
+        "  }\n" +
+        "}\n" +
         "\n"
     )
 
@@ -142,7 +230,7 @@ def _generate_dev_config(
         "const configInputs = [\n" +
         "  {\n" +
         "    label: 'the generated vite config',\n" +
-        "    path: path.join(bazelBin, " + json.encode(_bin_relative(config_file)) + "),\n" +
+        "    path: path.join(bazelBin, " + json.encode(_logical_path(config_file)) + "),\n" +
         "    digest: 'content',\n" +
         "    remedy: 'restart',\n" +
         "  },\n" +
@@ -257,7 +345,7 @@ def _generate_dev_config(
         "\n"
     )
 
-    if node_modules_rl:
+    if has_node_modules:
         config_content += (
             "// A fallback, not the mechanism: the launcher links the\n" +
             "// importer's node_modules in as <workspace>/node_modules, so\n" +
@@ -303,12 +391,13 @@ def _generate_dev_config(
             "  plugins.push(bazelPluginFn({\n" +
             "    bazelBin: bazelBin,\n" +
             "    workspaceRoot: workspaceRoot,\n" +
+            "    declaredFiles,\n" +
             "    nodeModules: nodeModulesPath || undefined,\n" +
             "    configInputs: bazelConfigInputs,\n" +
             "  }));\n" +
             "}\n"
         )
-    if node_modules_rl:
+    if has_node_modules:
         config_content += "plugins.push(bazelNpmResolve);\n"
     config_content += "\n"
 
@@ -339,7 +428,7 @@ def _generate_dev_config(
         "  // node_modules/.vite is the default, and the launcher just pointed that\n" +
         "  // name at a read-only Bazel output. Pre-bundling is not optional here:\n" +
         "  // react and friends ship CJS, and the browser needs the ESM it writes.\n" +
-        "  cacheDir: path.join(bazelBin, " + json.encode(_bin_relative(config_file).rsplit("/", 1)[0] + "/vite-cache") + "),\n" +
+        "  cacheDir: path.join(bazelBin, " + json.encode(_logical_path(config_file).rsplit("/", 1)[0] + "/vite-cache") + "),\n" +
         "\n" +
         "  publicDir: false,\n" +
         "\n" +
@@ -435,10 +524,8 @@ def _ts_dev_server_impl(ctx):
 
     node_modules = ctx.attr.node_modules
     node_modules_files = depset()
-    node_modules_rl = ""
     if node_modules:
         node_modules_files = node_modules[DefaultInfo].files
-        node_modules_rl = runfiles_dir(ctx, node_modules.label)
 
     plugin_files = ctx.files.plugin
     plugin_rl = ""
@@ -460,13 +547,42 @@ def _ts_dev_server_impl(ctx):
     server_binary_rl = ""
     if server_info.server_binary:
         server_binary_rl = rlocation_path(ctx, server_info.server_binary)
+    live_data = {file: True for file in entry.transitive_data.to_list()}
+    live_runtime = live_data | {file: True for file in depset(transitive = [entry.transitive_js, entry.transitive_runtime_sources]).to_list()}
+    declared_files = {}
+    original_sources = []
+    owners = entry.owners.to_list()
+    links = runtime_links(owners)
+    for owner in owners:
+        for original, logical, published in getattr(owner, "asset_files", ()):
+            if published not in live_data:
+                continue
+            _add_declared_file(declared_files, logical, original, canonical_runtime_file(published, links), "asset")
+    for owner in owners:
+        for source, runtime in getattr(owner, "runtime_files", ()):
+            if runtime not in live_runtime:
+                continue
+            original_sources.append(source)
+
+            _add_declared_file(declared_files, _logical_path(source), source, source, "source")
+        for source, runtime in getattr(owner, "runtime_scopes", ()):
+            if runtime in live_data:
+                original_sources.append(source)
+                _add_declared_file(declared_files, _logical_path(source), source, source, "source")
+
+    # Prior owner records expose member links through npm_files without binding metadata.
+    npm_files = entry.npm_files.to_list()
+    npm_contexts = check_dev_server_npm_contexts(ctx, owners, live_runtime, node_modules[NodeModulesInfo] if node_modules else None, npm_files)
+
     config_file = _generate_dev_config(
         ctx,
-        node_modules_rl,
+        bool(node_modules),
         plugin_rl,
         react_refresh,
         rlocation_path(ctx, runtime_binary),
         _server_config_input_js(server_info, server_binary_rl),
+        declared_files,
+        npm_contexts.contexts,
         user_config_rl,
     )
 
@@ -480,14 +596,18 @@ def _ts_dev_server_impl(ctx):
         "port": ctx.attr.port,
         # The same directory the generated config points cacheDir at: one place
         # under bazel-bin for whatever a dev server insists on writing.
-        "scratch_dir": _bin_relative(config_file).rsplit("/", 1)[0],
+        "scratch_dir": _logical_path(config_file).rsplit("/", 1)[0],
     }
     if server_info.server_in_tree:
         dev_server["server_in_tree"] = server_info.server_in_tree
     else:
         dev_server["server_binary"] = server_binary_rl
     if node_modules:
-        dev_server["node_modules"] = node_modules_rl
+        config_key = rlocation_path(ctx, config_file)
+        view_name = "/".join(["part/" + part for part in config_key.split("/")])
+
+        # Canonical repository names exclude @; this private root owns dev npm views.
+        dev_server["node_modules"] = "@rules_typescript_dev/" + view_name + "/node_modules"
     if plugin_files:
         dev_server["plugin"] = plugin_rl
     if user_config:
@@ -506,22 +626,40 @@ def _ts_dev_server_impl(ctx):
     explicit_runfiles.extend(plugin_files)
     explicit_runfiles.extend(staged_config.files)
 
-    # Data srcs as well as JS: a generated one has no copy in the source tree.
+    transitive_runfiles = depset(
+        [runtime_binary],
+        transitive = [
+            entry.transitive_js,
+            entry.transitive_runtime_sources,
+            depset(original_sources, transitive = [entry.sources], order = "postorder"),
+            entry.transitive_js_maps,
+            entry.transitive_data,
+            entry.npm_files,
+            server_info.runtime_deps,
+            node_modules_files,
+            npm_contexts.files,
+        ],
+        order = "postorder",
+    )
+    root_symlinks = dict(launcher.root_symlinks)
+    for name, binding in npm_contexts.links.items():
+        path = dev_server["node_modules"] + "/" + name
+        target = binding.target
+        if target.is_symlink:
+            alias = ctx.actions.declare_symlink("_rules_typescript_dev/" + view_name + "/node_modules/" + name)
+
+            # Bazel republishes unresolved link text here; private and canonical roots share no path components.
+            ctx.actions.symlink(output = alias, target_path = "../" * (len(path.split("/")) - 1) + rlocation_path(ctx, target))
+
+            # Bazel reads unresolved-link metadata only from runfiles.files.
+            explicit_runfiles.append(alias)
+            target = alias
+        root_symlinks[path] = target
+
     runfiles = ctx.runfiles(
         files = explicit_runfiles,
-        root_symlinks = launcher.root_symlinks,
-        transitive_files = depset(
-            [runtime_binary],
-            transitive = [
-                entry.transitive_js,
-                entry.transitive_runtime_sources,
-                entry.transitive_js_maps,
-                entry.transitive_data,
-                entry.npm_files,
-                server_info.runtime_deps,
-                node_modules_files,
-            ],
-        ),
+        root_symlinks = root_symlinks,
+        transitive_files = transitive_runfiles,
     )
 
     return [

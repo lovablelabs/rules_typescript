@@ -1,0 +1,62 @@
+load("//npm:defs.bzl", "node_modules")
+load("//tests/node_test/analysis:analysis_tests.bzl", "data_symlink_inputs")
+load("//ts:defs.bzl", "ts_test")
+
+data_symlink_inputs(name = "fixture_links")
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = ["@npm//:minimatch_9_0_9"],
+)
+
+# keep
+ts_test(
+    name = "borrowed_importer_test",
+    srcs = [
+        "borrowed_importer.test.ts",
+        "identity.ts",
+        "selected_package_error.test.ts",
+        "//tests/node_test/importer_identity/foreign:borrowed.ts",
+        "//tests/node_test/importer_identity/foreign:nested/borrowed.ts",
+    ],
+    data = [":fixture_links"],
+    emit = True,
+    node_modules = ":node_modules",
+    runner = "//ts/runners:node_test",
+    source_node_modules = ["//tests/node_test/importer_identity/foreign:node_modules"],
+    test_srcs = [
+        "borrowed_importer.test.ts",
+        "selected_package_error.test.ts",
+    ],
+    deps = [
+        "//tests/node_test/importer_identity/foreign:private_dependency",
+        "@npm//:magic-string",
+        "@npm//:minimatch_9_0_9",
+        "@npm//:types_node",
+    ],
+)
+
+# keep
+ts_test(
+    name = "borrowed_importer_vitest_test",
+    srcs = [
+        "borrowed_importer_vitest.test.ts",
+        "identity.ts",
+        "//tests/node_test/importer_identity/foreign:borrowed.ts",
+        "//tests/node_test/importer_identity/foreign:nested/borrowed.ts",
+    ],
+    data = [":fixture_links"],
+    emit = False,
+    node_modules = ":node_modules",
+    source_node_modules = ["//tests/node_test/importer_identity/foreign:node_modules"],
+    test_srcs = ["borrowed_importer_vitest.test.ts"],
+    deps = [
+        "//tests/node_test/importer_identity/foreign:private_dependency",
+        "@npm//:magic-string",
+        "@npm//:minimatch_9_0_9",
+        "@npm//:types_node",
+        "@npm//:vitest",
+    ],
+)

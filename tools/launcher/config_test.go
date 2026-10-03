@@ -1,11 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bazelbuild/rules_go/go/runfiles"
 )
+
+func TestParseConfigAcceptsVitestContextsWithoutRequiringNewFields(t *testing.T) {
+	for _, context := range []string{"", `,"npm_contexts":[{"module":"_main/main.js","source":"shared/main.ts","bindings":{"pkg":"_main/store/pkg"}}]`, `,"npm_contexts":[{"module":"_main/nested/main.js","source":"shared/nested/main.ts","bindings":{},"package_scope":{"manifest":"_main/package.json","bindings":{"pkg":"_main/store/pkg"}}}]`} {
+		if _, err := ParseConfig([]byte(`{"mode":"vitest","vitest":{"test_files_list":"_main/tests.txt","config_file":"_main/config.mjs"` + context + `}}`)); err != nil {
+			t.Fatalf("optional Vitest context rejected: %v", err)
+		}
+	}
+}
 
 func TestParseConfigRejectsBadDocuments(t *testing.T) {
 	cases := map[string]string{
@@ -103,5 +114,107 @@ func TestConfigPathFindsTheRootSymlinkInRunfiles(t *testing.T) {
 	}
 	if got != real["app_launcher.json"] {
 		t.Errorf("configPath = %q, want %q", got, real["app_launcher.json"])
+	}
+}
+
+func TestNativeViewCannotFollowDetachedConfigAliases(t *testing.T) {
+	const canonical = "+npm+fixture/pkg/app_launcher.json"
+	const view = "+npm+fixture/pkg/app_launcher.runtime/view"
+	const entry = "_main/app/main.js"
+	for _, mode := range []string{ModeNode, ModeNodeTest} {
+		for _, layout := range []string{"directory", "manifest"} {
+			for _, discovery := range []string{"root", "sibling", "environment"} {
+				t.Run(mode+"/"+layout+"/"+discovery, func(t *testing.T) {
+					t.Setenv(ConfigEnvVar, "")
+					t.Setenv("COVERAGE_DIR", "")
+					cfg := &Config{
+						Mode:             mode,
+						Workspace:        "_main",
+						NativeViewAnchor: canonical,
+						RuntimeModules:   []string{entry},
+						Node:             &NodeConfig{Entry: entry},
+						NodeTest:         &NodeTestConfig{TestFilesList: "_main/tests.txt"},
+					}
+					data, err := json.Marshal(cfg)
+					if err != nil {
+						t.Fatal(err)
+					}
+					base := t.TempDir()
+					group := filepath.Join(base, "outputs")
+					for path, contents := range map[string]string{
+						canonical:                 string(data),
+						view + "/" + entry:        "export {};",
+						view + "/_main/tests.txt": entry + "\n",
+					} {
+						path = filepath.Join(group, filepath.FromSlash(path))
+						if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					alias := filepath.Join(base, "app_launcher.json")
+					if discovery == "root" {
+						alias = filepath.Join(group, "app_launcher.json")
+					}
+					if err := os.WriteFile(alias, data, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					argv0 := strings.TrimSuffix(alias, ".json")
+					if discovery == "root" {
+						argv0 = "bazel-out/k8-opt-exec/bin/external/pkg/app_launcher"
+					} else if discovery == "environment" {
+						t.Setenv(ConfigEnvVar, alias)
+						argv0 = "unused_launcher"
+					}
+					for _, relocated := range []bool{false, true} {
+						if relocated {
+							moved := filepath.Join(base, "relocated")
+							if err := os.Rename(group, moved); err != nil {
+								t.Fatal(err)
+							}
+							group = moved
+							if discovery == "root" {
+								alias = filepath.Join(group, "app_launcher.json")
+							}
+						}
+						var r *Resolver
+						if layout == "directory" {
+							r, err = directoryResolver(group)
+						} else {
+							manifest := filepath.Join(base, "MANIFEST")
+							contents := canonical + " " + filepath.Join(group, canonical) + "\n"
+							if discovery == "root" {
+								contents += "app_launcher.json " + alias + "\n"
+							}
+							if err := os.WriteFile(manifest, []byte(contents), 0o644); err != nil {
+								t.Fatal(err)
+							}
+							r, err = newResolver(runfiles.ManifestFile(manifest))
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+						loaded, path, err := LoadConfig(argv0, r)
+						if err != nil || path != alias {
+							t.Fatalf("LoadConfig = %q, %v; want detached alias %q", path, err, alias)
+						}
+						plan, err := MakePlan(loaded, r, nil, Shard{Total: 1})
+						if err != nil {
+							t.Fatalf("relocated=%t: %v", relocated, err)
+						}
+						want := filepath.Join(resolvedPath(t, group), view, entry)
+						if got := plan.Argv[len(plan.Argv)-1]; got != want {
+							t.Fatalf("entry = %q, want canonical grouped output %q", got, want)
+						}
+						plan.Cleanup()
+						if _, err := os.Stat(want); err != nil {
+							t.Fatal(err)
+						}
+					}
+				})
+			}
+		}
 	}
 }

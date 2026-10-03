@@ -1,0 +1,23 @@
+# gazelle:ignore
+
+load("//npm:defs.bzl", "node_modules")
+load("//ts:defs.bzl", "ts_compile")
+
+package(default_visibility = ["//tests/node_test/data_closure/adapter:__pkg__"])
+
+exports_files(["helper.ts"])
+
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = ["@npm//:minimatch_9_0_9"],
+)
+
+ts_compile(
+    name = "dependency",
+    srcs = ["dependency.ts"],
+    data = ["note.txt"],
+    emit = True,
+    node_modules = ":node_modules",
+    deps = ["@npm//:types_node"],
+)

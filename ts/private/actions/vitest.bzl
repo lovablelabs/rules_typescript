@@ -5,7 +5,7 @@ Layers, lowest precedence first: Bazel, the user's `config`,
 vitest Config.
 """
 
-load("//tools/launcher:launcher.bzl", "rlocation_path")
+load("//tools/launcher:launcher.bzl", "rlocation_path", "runfiles_link_path", "runfiles_root_path")
 load("//ts/private:providers.bzl", "TsConfigInfo")
 load("//ts/private:toolchain.bzl", "get_tools_toolchain")
 
@@ -18,9 +18,7 @@ const snapshotBase = (testPath) => {
   return null;
 };
 
-// The test vitest runs is the compiled .js in bazel-out, so vitest's own
-// answer -- a __snapshots__ dir beside the test file -- points at the build
-// tree. Every snapshot path below is rebuilt from the .ts source instead.
+// Vitest's default follows the runtime file; Bazel snapshots belong to the source.
 const vitestDefaultSnapshotPath = (testPath, ext) =>
   join(dirname(testPath), '__snapshots__', basename(testPath) + ext);
 
@@ -72,6 +70,64 @@ const compiledForms = (spec) => {
 };
 const compiledSibling = (dir, spec) =>
   compiledForms(spec).find((c) => existsSync(resolve(dir, c))) ?? spec;
+const moduleReferences = MODULE_REFERENCES.map(([logical, source, runtime, selected, extension]) => ({
+  logical: resolve(WORKSPACE_DIR, logical),
+  source: resolve(RUNFILES_ROOT, source),
+  sourceRoot: resolve(RUNFILES_ROOT, source.split('/')[0]),
+  runtime: resolve(RUNFILES_ROOT, runtime),
+  selected: resolve(RUNFILES_ROOT, selected),
+  extension,
+}));
+const runtimeModulePaths = new Map();
+const exactModuleReferences = new Map();
+const moduleLookups = new Map();
+for (const entry of moduleReferences) {
+  for (const path of [entry.runtime, entry.selected]) {
+    const previous = runtimeModulePaths.get(path);
+    runtimeModulePaths.set(path, previous !== undefined && previous !== entry ? null : entry);
+  }
+  for (const [source, sourceRoot] of [[entry.logical, WORKSPACE_DIR], [entry.source, entry.sourceRoot]]) {
+    exactModuleReferences.set(source, entry.runtime);
+    const place = (target) => {
+      const candidate = resolve(dirname(entry.runtime), relative(dirname(source), target));
+      const previous = moduleLookups.get(target);
+      moduleLookups.set(target, previous !== undefined && previous !== candidate ? null : candidate);
+    };
+    place(source.slice(0, -entry.extension.length));
+    for (let directory = dirname(source); directory.startsWith(sourceRoot + '/') || directory === sourceRoot; directory = dirname(directory)) {
+      place(directory);
+      if (directory === sourceRoot) break;
+    }
+  }
+}
+const moduleReference = (target, allowLookup = false) => {
+  const cut = target.search(/[?#]/);
+  const file = cut < 0 ? target : target.slice(0, cut);
+  const suffix = cut < 0 ? '' : target.slice(cut);
+  if (/[?&](?:raw|url)(?:[=&]|$)/.test(suffix)) return null;
+  let selected = exactModuleReferences.get(file);
+  if (!selected && allowLookup) {
+    selected = moduleLookups.get(file);
+    const directory = moduleLookups.get(dirname(file));
+    const placed = directory && resolve(directory, basename(file));
+
+    // A named file absent beside its directory's modules is no reference, so a paths list tries its next candidate.
+    if (!selected && placed && (!/\\.[cm]?[jt]sx?$/.test(placed) || existsSync(placed))) selected = placed;
+  }
+  return selected ? selected + suffix : null;
+};
+const isRuntimeModule = (resolved) => {
+  const id = resolved?.id;
+  if (!id) return false;
+  const cut = id.search(/[?#]/);
+  return runtimeModulePaths.has(cut < 0 ? id : id.slice(0, cut));
+};
+const resolveModuleReference = async (context, target, importer, opts, allowLookup = false) => {
+  const projected = moduleReference(target, allowLookup);
+  if (projected === null) return null;
+  const resolved = await context.resolve(projected, importer, { ...opts, skipSelf: true });
+  return isRuntimeModule(resolved) ? resolved : null;
+};
 // Relative or bare: a `.ts` subpath into a workspace member names a source
 // the member's view holds as its compiled file.
 const compiledImports = {
@@ -88,26 +144,47 @@ const compiledImports = {
     return null;
   },
 };
-// The run is the compiled tests in the root the launcher staged; a config's
-// `include` and `dir`, written for the sources in the runfiles, are not read.
 const FILES_ROOT = process.env.TS_TEST_FILES_ROOT;
 if (!FILES_ROOT) {
   throw new Error('rules_typescript: TS_TEST_FILES_ROOT is unset; the ' +
     'generated config runs under the ts_test launcher');
 }
-const withCompiledRun = (config) => {
-  const root = resolve(config.root ?? '.');
-  const rewrite = (entry) => compiledSibling(root, entry);
+const DISCOVERY_ROOT = resolve(FILES_ROOT, DISCOVERY_PREFIX);
+const withCompiledRun = (config, inheritedRoot = ROOT, defaultRoot = true) => {
+  const root = resolve(inheritedRoot, config.root ?? '.');
+  const dir = resolve(DISCOVERY_ROOT, relative(RUNFILES_ROOT, root));
+  const includeRoot = defaultRoot && config.root == null ? DISCOVERY_ROOT : dir;
+  const ancestorCount = relative(dir, includeRoot).split(sep).filter(Boolean).length;
+  const explicit = (entry) => isAbsolute(entry) || /^\\.{1,2}(?:[\\\\/]|$)/.test(entry);
+  const bareReferences = new Set(['setupFiles', 'globalSetup']
+    .flatMap((key) => [config.test?.[key]].flat())
+    .filter((entry) => typeof entry === 'string' && !explicit(entry))
+    .map((entry) => resolve(root, entry))
+    .filter((entry) => {
+      const projected = moduleReference(entry);
+      return projected !== null && projected !== entry;
+    }));
+  const rewrite = (entry) => explicit(entry)
+    ? moduleReference(resolve(root, entry), true) ?? compiledSibling(root, entry)
+    : entry;
   const test = {
     ...config.test,
-    include: INCLUDE,
-    dir: resolve(FILES_ROOT, relative(RUNFILES_ROOT, root)),
+    include: Array.from({ length: ancestorCount + 1 }, (_, level) =>
+      INCLUDE.map((pattern) => '../'.repeat(level) + pattern)).flat(),
+    dir,
   };
   for (const key of ['setupFiles', 'globalSetup']) {
     if (Array.isArray(test[key])) test[key] = test[key].map(rewrite);
     else if (typeof test[key] === 'string') test[key] = rewrite(test[key]);
   }
-  return { ...config, test };
+  const plugins = bareReferences.size ? [...(config.plugins ?? []), {
+    name: 'rules_typescript:setup-references',
+    enforce: 'pre',
+    async resolveId(id, importer, opts) {
+      return bareReferences.has(id) ? resolveModuleReference(this, id, importer, opts) : null;
+    },
+  }] : config.plugins;
+  return { ...config, root, plugins, test };
 };
 """
 
@@ -150,10 +227,16 @@ const tsconfigPaths = (dir, paths) => {
       if (!m) return null;
       for (const value of m.e.values) {
         const target = resolve(dir, value.replace('*', m.captured));
-        const resolved = await this.resolve(
-          compiledSibling(dir, target), importer, { ...opts, skipSelf: true },
-        );
-        if (resolved) return resolved;
+        const projected = await resolveModuleReference(this, target, importer, opts, true);
+        if (projected) return projected;
+        const sibling = compiledSibling(dir, target);
+        if (/\\.[cm]?[jt]sx?$/.test(sibling) && !existsSync(resolve(dir, sibling))) continue;
+        const resolved = await this.resolve(sibling, importer, { ...opts, skipSelf: true });
+        if (resolved) {
+          return isRuntimeModule(resolved)
+            ? resolved
+            : await resolveModuleReference(this, resolved.id, importer, opts) ?? resolved;
+        }
       }
       return null;
     },
@@ -185,6 +268,7 @@ const BIN_DIR = (() => {
 })();
 const FS_ALLOW = BIN_DIR ? [WORKSPACE_DIR, BIN_DIR] : [WORKSPACE_DIR];
 const runfilesPath = (file) => {
+  if (isAbsolute(file) && existsSync(file)) file = realpathSync(file);
   const out = /^.*?\\/bazel-out\\/[^/]+\\/bin\\/(.*)$/.exec(file);
   if (out) {
     const ext = /^external\\/([^/]+)\\/(.*)$/.exec(out[1]);
@@ -202,14 +286,33 @@ const moduleIds = {
   async resolveId(id, importer, opts) {
     if (id.startsWith('\\0')) return null;
     const nested = { ...opts, skipSelf: true };
-    const resolved = await this.resolve(id, importer, nested);
+    const request = id.startsWith(DISCOVERY_ROOT + '/')
+      ? moduleReference(id) ?? id
+      : id;
+    const importerFile = importer?.split(/[?#]/, 1)[0];
+    const origin = importerFile && /^\\.{1,2}\\//.test(id)
+      ? runtimeModulePaths.get(importerFile)
+      : null;
+    const projected = origin
+      ? await resolveModuleReference(this, resolve(dirname(origin.source), id), importer, opts, true)
+      : null;
+    const resolved = projected ?? await this.resolve(request, importer, nested);
     if (resolved?.external) return resolved;
     const moduleId = resolved?.id ?? id;
     const cut = moduleId.search(/[?#]/);
     const file = cut < 0 ? moduleId : moduleId.slice(0, cut);
     const held = file.startsWith(RUNFILES_ROOT + '/');
     if (file.includes('/node_modules/')) return resolved;
-    const staged = held ? file : runfilesPath(file);
+    const requestFile = request.split(/[?#]/, 1)[0];
+    const requestPath = importerFile && /^\\.{1,2}\\//.test(requestFile)
+      ? resolve(dirname(importerFile), requestFile)
+      : requestFile.startsWith('/') && !requestFile.startsWith(RUNFILES_ROOT + '/')
+        ? resolve(this.environment.config.root, '.' + requestFile)
+        : requestFile;
+    const staged = held ? file
+      : requestPath.startsWith(RUNFILES_ROOT + '/') && existsSync(requestPath) && realpathSync(requestPath) === file
+        ? requestPath
+        : runfilesPath(file);
     if (staged === null) return resolved;
     if (!existsSync(staged)) {
       this.error(
@@ -226,8 +329,8 @@ const moduleIds = {
 """
 
 def _test_file_include(extensions):
-    """vitest's default include over the compiled extensions."""
-    return "**/*.{test,spec}.{" + ",".join(extensions) + "}"
+    suffix = extensions[0] if len(extensions) == 1 else "{" + ",".join(extensions) + "}"
+    return "**/*.{test,spec}." + suffix
 
 def _relative_dir(from_dir, to_dir):
     """Relative path from one workspace directory to another, "." when equal."""
@@ -306,11 +409,14 @@ def _vitest_config_content(
         inline_members = [],
         source_probe = "",
         overlays = {},
+        module_references = [],
+        discovery_root = "",
+        discovery_files = {},
         workspace_name = ""):
     """Builds the entry config that layers Bazel's config under the user's."""
-    path_imports = "dirname, relative, resolve"
+    path_imports = "basename, dirname, isAbsolute, relative, resolve, sep"
     if snapshot_bases:
-        path_imports = "basename, dirname, join, relative, resolve, sep"
+        path_imports = "basename, dirname, isAbsolute, join, relative, resolve, sep"
     lines = [
         "// AUTO-GENERATED by rules_typescript ts_test. Do not edit.",
         "//",
@@ -333,8 +439,10 @@ def _vitest_config_content(
         "const ROOT = resolve(HERE, {});".format(_js(root_rel)),
         "const WORKSPACE_DIR = resolve(HERE, {});".format(_js(workspace_rel)),
         "const RUNFILES_ROOT = dirname(WORKSPACE_DIR);",
+        "const DISCOVERY_PREFIX = {};".format(_js(discovery_root)),
         "const WORKSPACE = {};".format(_js(workspace_name)),
         "const OVERLAYS = {};".format(_js(overlays)),
+        "const MODULE_REFERENCES = {};".format(_js(module_references)),
         "const SOURCE_PROBE = {};".format(_js(source_probe)),
         "const BIN_PROBE = {};".format(_js(bin_probe)),
         "const INCLUDE = {};".format(
@@ -351,6 +459,12 @@ def _vitest_config_content(
     lines += [
         _CONFIG_MERGE_HELPERS,
         _SETUP_HELPERS,
+    ]
+    lines += [
+        "exactModuleReferences.set(resolve(FILES_ROOT, {}), resolve(RUNFILES_ROOT, {}));".format(_js(path), _js(discovery_files[path]))
+        for path in sorted(discovery_files)
+    ]
+    lines += [
         _PATHS_HELPERS,
         _IDS_HELPERS,
     ]
@@ -372,7 +486,6 @@ def _vitest_config_content(
         # A file under test is a build output, so its realpath lies outside the
         # vite root -- which the coverage default drops before instrumenting.
         "const bazelLayer = {",
-        "  root: ROOT,",
         # Vite's cache and the pool's deps optimizer write under the root
         # otherwise, which is the runfiles tree.
         "  ...(process.env.TEST_TMPDIR ? " +
@@ -430,7 +543,7 @@ def _vitest_config_content(
         "    merged.test = {",
         "      ...merged.test,",
         "      projects: projects.map((p) =>",
-        "        isPlainObject(p) ? withCompiledRun(merge(bazelLayer, p))" +
+        "        isPlainObject(p) ? withCompiledRun(merge(bazelLayer, p), merged.root, user.root == null)" +
         " : p,",
         "      ),",
         "    };",
@@ -441,28 +554,16 @@ def _vitest_config_content(
     ]
     return "\n".join(lines)
 
-def _snapshot_bases(srcs, compiled):
-    """Maps each compiled test file to the .snap path its .ts source implies.
-
-    Keyed by the compiled path so the generated config can match the file
-    vitest reports, whatever prefix the runfiles layout gives it.
-    """
-    compiled_by_stem = {}
-    for f in compiled:
-        compiled_by_stem[f.short_path[:-(len(f.extension) + 1)]] = f.short_path
+def _snapshot_bases(ctx, discovery_entries):
     bases = {}
-    for src in srcs:
-        if src.extension not in ("ts", "tsx", "mts", "cts"):
-            continue
-        stem = src.short_path[:-(len(src.extension) + 1)]
-        if stem not in compiled_by_stem:
-            continue
-        parent = stem[:stem.rfind("/")] if "/" in stem else ""
-        bases[compiled_by_stem[stem]] = "{}/__snapshots__/{}".format(
-            parent,
-            src.basename,
-        )
-    return bases
+    for path, (source, runtime, selected) in discovery_entries.items():
+        parent = source.short_path[:-(len(source.basename) + 1)] if "/" in source.short_path else ""
+        base = "/".join([part for part in [parent, "__snapshots__", source.basename] if part])
+        bases[path] = base
+        for file in [runtime, selected]:
+            bases[rlocation_path(ctx, file)] = base
+            bases[file.short_path] = base
+    return {path: bases[path] for _length, path in sorted([(-len(path), path) for path in bases])}
 
 def tsconfig_paths_action(ctx):
     """Writes the `paths` of the `tsconfig` chain for the generated config.
@@ -472,7 +573,7 @@ def tsconfig_paths_action(ctx):
     if not ctx.file.tsconfig:
         return None
     tsconfig_paths = ctx.actions.declare_file(
-        "_{}.vitest/tsconfig_paths.json".format(ctx.label.name),
+        "_{}.vitest/tsconfig_paths.json".format(getattr(ctx.attr, "public_name", ctx.label.name)),
     )
     chain = [ctx.file.tsconfig]
     if TsConfigInfo in ctx.attr.tsconfig:
@@ -494,8 +595,8 @@ def tsconfig_paths_action(ctx):
     return tsconfig_paths
 
 # The source root, at run time, is where this file's realpath ends.
-def _source_probe(ctx):
-    for f in ctx.files.srcs:
+def _source_probe(source_sets):
+    for f in depset(transitive = source_sets).to_list():
         if f.is_source:
             return f.short_path
     return ""
@@ -509,13 +610,18 @@ def _package_path(ctx, name):
 def vitest_config_action(
         ctx,
         test_entry_points,
+        source_sets,
         entry_extensions,
+        discovery_root,
+        discovery_entries,
         tsconfig_paths,
         inline_members,
-        overlays):
+        overlays,
+        runtime_files = (),
+        selected = {}):
     """Writes the entry config for `ctx`'s test.
 
-    `entry_extensions` are the extensions a compiled test file has, the
+    `entry_extensions` are the selected source extensions, the
     generated `test.include`'s; `tsconfig_paths` is the file
     tsconfig_paths_action wrote or None; `overlays`
     the runfiles symlinks, runfiles path to File, whose build outputs are held
@@ -529,7 +635,7 @@ def vitest_config_action(
     if ctx.attr.config_srcs and not ctx.file.config:
         fail(("ts_test {}: config_srcs names the modules `config` imports; " +
               "there is no `config`.").format(ctx.label))
-    name = ctx.label.name
+    name = getattr(ctx.attr, "public_name", ctx.label.name)
     vitest_config = ctx.actions.declare_file(
         "_{}.vitest/config.mjs".format(name),
     )
@@ -545,9 +651,9 @@ def vitest_config_action(
     user_config_rf = None
     if ctx.file.config:
         for f in [ctx.file.config] + ctx.files.config_srcs:
-            key = private + "/" + f.short_path
+            key = private + "/" + runfiles_link_path(f)
             symlinks[key] = f
-            stage[ctx.workspace_name + "/" + key] = rlocation_path(ctx, f)
+            stage[runfiles_root_path(ctx, key)] = rlocation_path(ctx, f)
         user_config_rf = rlocation_path(ctx, ctx.file.config)
     paths_rf = None
     if tsconfig_paths:
@@ -561,6 +667,16 @@ def vitest_config_action(
         root_dir = ctx.file.config.short_path.rpartition("/")[0]
         root_rel = _relative_dir(ctx.label.package, root_dir)
     bin_probe = test_entry_points[0].short_path if test_entry_points else ""
+    module_references = {}
+    for source, runtime in runtime_files:
+        if source.is_directory or runtime.is_directory:
+            continue
+        coordinate = runfiles_link_path(source)
+        reference = [coordinate, rlocation_path(ctx, source), rlocation_path(ctx, runtime), rlocation_path(ctx, selected.get(runtime, runtime)), "." + source.extension]
+        previous = module_references.get(coordinate)
+        if previous != None and previous != reference:
+            fail("ts_test {}: config module '{}' has conflicting runtime owners. Did you mean to retain one compiler owner for this source?".format(ctx.label, coordinate))
+        module_references[coordinate] = reference
 
     ctx.actions.write(
         output = vitest_config,
@@ -568,18 +684,24 @@ def vitest_config_action(
             config_rf = entry,
             user_config_rf = user_config_rf,
             coverage_provider = ctx.attr.coverage_provider,
-            snapshot_bases = _snapshot_bases(ctx.files.srcs, test_entry_points),
+            snapshot_bases = _snapshot_bases(ctx, discovery_entries),
             snapshot_root = ctx.workspace_name,
             entry_extensions = entry_extensions,
+            discovery_root = discovery_root,
+            discovery_files = {
+                path: rlocation_path(ctx, runtime)
+                for path, (_source, runtime, _selected) in discovery_entries.items()
+            },
             bin_probe = bin_probe,
             tsconfig_paths_rf = paths_rf,
             root_rel = root_rel,
             workspace_rel = _relative_dir(ctx.label.package, ""),
             inline_members = inline_members,
-            source_probe = _source_probe(ctx),
+            source_probe = _source_probe(source_sets),
+            module_references = module_references.values(),
             workspace_name = ctx.workspace_name,
             overlays = {
-                rlocation_path(ctx, f): ctx.workspace_name + "/" + link
+                rlocation_path(ctx, f): runfiles_root_path(ctx, link)
                 for link, f in overlays.items()
                 if not f.is_source
             },

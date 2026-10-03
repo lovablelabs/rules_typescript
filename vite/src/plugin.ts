@@ -10,7 +10,7 @@
  * `vite dev`: Bazel is out of the inner loop. Checked-in source is handed to
  * Vite, which transforms it in memory — save-to-HMR without a Bazel analysis
  * and action cycle in between. bazel-bin is still the source of truth for what
- * Vite cannot produce: `ts_codegen` output, generated assets, and the npm tree.
+ * Vite cannot produce: `ts_codegen` output, published assets, and the npm tree.
  *
  * Serving source means the dev server no longer typechecks. That is native
  * parity, not a regression — Vite has never typechecked, tsserver does — but it
@@ -37,9 +37,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Plugin, ResolvedConfig, ViteDevServer, UserConfig, ConfigEnv } from 'vite';
-import { BazelResolver, type ResolverMode } from './resolver.js';
-import { BazelWatcher, ConfigWatcher, bazelPathToModuleId, type ConfigInput } from './watcher.js';
+import { resolve as resolvePackage } from 'resolve.exports';
+import type {
+  Plugin,
+  ResolvedConfig,
+  ViteDevServer,
+  UserConfig,
+  ConfigEnv,
+  ModuleNode,
+} from 'vite';
+import { BazelResolver, type ResolverMode, type ResolverOptions } from './resolver.js';
+import { BazelWatcher, ConfigWatcher, type ConfigInput } from './watcher.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -47,6 +55,8 @@ import { BazelWatcher, ConfigWatcher, bazelPathToModuleId, type ConfigInput } fr
 
 export interface BazelPluginOptions {
   workspaceRoot?: string;
+
+  declaredFiles?: ResolverOptions['declaredFiles'];
 
   bazelBin?: string;
 
@@ -122,6 +132,32 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
     return path.isAbsolute(nm) ? nm : path.resolve(options.workspaceRoot ?? root, nm);
   }
 
+  function resolveRequest(
+    activeResolver: BazelResolver,
+    id: string,
+    importer: string | undefined,
+    extensions: readonly string[] | undefined,
+    root: string | undefined,
+  ) {
+    let request = id;
+    let serveRoot = activeResolver.mode === 'serve' && id.startsWith('/') && !id.startsWith('//')
+      && !id.startsWith('/virtual:') && !id.includes('\0')
+      ? root
+      : undefined;
+    if (activeResolver.mode === 'serve' && id.startsWith('/@fs/')) {
+      const cut = id.search(/[?#]/);
+      const suffix = cut < 0 ? '' : id.slice(cut);
+      const filePath = cut < 0 ? id.slice(5) : id.slice(5, cut);
+      const file = path.posix.normalize(path.sep === '\\' ? filePath.replace(/\\/g, '/') : filePath);
+      request = (file.startsWith('/') || /^[a-z]:/i.test(file) ? file : '/' + file) + suffix;
+      serveRoot = undefined;
+    }
+    const result = activeResolver.resolveId(request, importer, extensions, serveRoot);
+    // Vite resolves an undeclared /@fs URL to the canonical id its own file watcher covers.
+    if (request !== id && result !== null && !activeResolver.isDeclaredFile(result.filePath)) return null;
+    return result;
+  }
+
   // ── Plugin object ─────────────────────────────────────────────────────────
 
   return {
@@ -148,6 +184,7 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
               root,
               ...(options.workspaceRoot != null ? [options.workspaceRoot] : []),
               bazelBin,
+              ...Object.values(options.declaredFiles ?? {}).map((file) => file.path),
               ...(nodeModules != null ? [nodeModules] : []),
             ],
           },
@@ -173,6 +210,7 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
         workspaceRoot: options.workspaceRoot ?? config.root,
         bazelBin: bazelBinAbsolute,
         workspace: options.workspace,
+        declaredFiles: options.declaredFiles,
         mode,
       });
 
@@ -194,25 +232,99 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
     // ── resolveId ─────────────────────────────────────────────────────────
     resolveId: {
       filter: { id: /.*/ },
-      handler(id: string, importer?: string): string | null {
-        const result = resolver.resolveId(id, importer);
-        return result === null ? null : result.filePath;
+      handler(id, importer, resolveOptions) {
+        const extensions = this.environment?.config.resolve.extensions;
+        let request = id;
+        let from = importer;
+        let packageRequest = false;
+        const source =
+          importer !== undefined && !id.startsWith('.') && !path.isAbsolute(id)
+            ? resolver.sourcePackage(importer)
+            : undefined;
+        if (source !== undefined) {
+          const [specifier, suffix] = splitSuffix(id);
+          const metadata = JSON.parse(
+            fs.readFileSync(source.manifest, 'utf8').replace(/^\uFEFF/, ''),
+          );
+          if (
+            specifier.startsWith('#') ||
+            (metadata.exports != null &&
+              typeof metadata.name === 'string' &&
+              (specifier === metadata.name || specifier.startsWith(metadata.name + '/')))
+          ) {
+            const config = this.environment.config;
+            const conditions = config.resolve.conditions.map((condition) =>
+              condition === 'development|production'
+                ? config.isProduction
+                  ? 'production'
+                  : 'development'
+                : condition,
+            );
+            conditions.push(resolveOptions.kind === 'require-call' ? 'require' : 'import');
+            this.addWatchFile(source.manifest);
+            let target: string | undefined;
+            try {
+              target = resolvePackage(metadata, specifier, { conditions, unsafe: true })?.[0];
+            } catch {
+              // resolve.exports throws when the manifest maps no target; native resolution reports that.
+            }
+            request = target === undefined ? id : target + suffix;
+            if (target?.startsWith('.')) {
+              const selected = resolver.resolveId(request, source.manifest, extensions);
+              request = selected?.directoryRequest ?? selected?.filePath ??
+                path.resolve(path.dirname(source.manifest), target) + suffix;
+            }
+            from = source.importer;
+            packageRequest = true;
+          }
+        }
+        const result = resolveRequest(resolver, request, from, extensions, this.environment?.config.root);
+        const directory = result === null ? undefined : resolver.declaredDirectory(result.filePath);
+        if (mode === 'build' || (directory === undefined && result?.directoryRequest === undefined && !packageRequest)) {
+          return result === null ? null : result.filePath;
+        }
+        // Vite normalizes a query's `/../` into the selected path, so only the file part is delegated.
+        const [file, suffix] = result === null ? [request, ''] : splitSuffix(result.directoryRequest ?? result.filePath);
+        return this.resolve(file, from, { ...resolveOptions, skipSelf: true }).then((resolved) => {
+          if (resolved === null) {
+            if (result?.directoryRequest !== undefined && !resolver.isDeclaredFile(result.filePath)) return null;
+            return result?.filePath ?? null;
+          }
+          if (directory !== undefined && resolver.declaredDirectory(resolved.id) !== directory) {
+            throw new Error(
+              `Bazel module ${file} resolved outside declared directory: ${resolved.id}`,
+            );
+          }
+          if (
+            result !== null &&
+            directory === undefined &&
+            result.directoryRequest === undefined &&
+            resolver.isDeclaredFile(result.filePath)
+          ) {
+            return { ...resolved, id: result.filePath };
+          }
+          if (resolved.external) return resolved;
+          const selected = resolver.resolveId(resolved.id, undefined, extensions);
+          return { ...resolved, id: (selected?.filePath ?? resolved.id) + suffix };
+        });
       },
     },
 
     // ── load ──────────────────────────────────────────────────────────────
     load(id: string): { code: string; map?: string | null } | null {
-      // Only handle files that live under bazel-bin.
-      if (!id.startsWith(bazelBinAbsolute + path.sep) && id !== bazelBinAbsolute) {
+      if (/[?#]/.test(id)) return null;
+      const declared = resolver.isDeclaredFile(id);
+      if (!id.endsWith('.js') || !resolver.isBazelOutput(id)) {
+        // Vite reports a missing file as ERR_LOAD_URL and falls through to serving the checkout path.
+        if (declared) fs.statSync(id);
         return null;
       }
-      // Only handle .js files — let Vite's default loader handle everything else.
-      if (!id.endsWith('.js')) return null;
 
       let code: string;
       try {
         code = fs.readFileSync(id, 'utf8');
-      } catch {
+      } catch (error) {
+        if (declared) throw error;
         // File doesn't exist yet (build hasn't run for this target).
         return null;
       }
@@ -246,8 +358,17 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
       watcher = new BazelWatcher({
         bazelBin: bazelBinAbsolute,
         debounceMs: options.hmrDebounceMs ?? 50,
+        // Undeclared bazel-bin files the server already loaded, such as generated .ts, refresh too.
+        isDeclaredFile: (file) =>
+          resolver.isDeclaredOutput(file) || (server.moduleGraph.getModulesByFile(file)?.size ?? 0) > 0,
+        declaredFiles: options.declaredFiles,
         onRebuild: (changedAbsolutePaths: Set<string>) => {
-          handleRebuild(server, changedAbsolutePaths, bazelBinAbsolute);
+          handleRebuild(server, changedAbsolutePaths).catch((err: unknown) => {
+            server.ws.send({
+              type: 'error',
+              err: { message: String(err), stack: err instanceof Error ? err.stack ?? '' : '' },
+            });
+          });
         },
       });
 
@@ -319,59 +440,42 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
 // HMR: handle a completed ibazel rebuild
 // ---------------------------------------------------------------------------
 
-/**
- * Called after the debounce window expires with the set of .js files that
- * changed in bazel-bin.
- *
- * Strategy:
- *  1. For each changed .js path, compute its Vite module ID.
- *  2. Look up the module in Vite's module graph.
- *  3. Invalidate any matching modules so Vite knows they are stale.
- *  4. Send an HMR update to the browser.
- *
- * If a changed module has no HMR boundary in its import chain Vite will
- * trigger a full-page reload.  This is the correct safe fallback.
- */
-function handleRebuild(
+async function handleRebuild(
   server: ViteDevServer,
   changedAbsolutePaths: Set<string>,
-  bazelBin: string,
-): void {
-  const modulesToUpdate = new Set<string>();
+): Promise<void> {
+  const cacheDir = canonicalPath(server.config.cacheDir);
+  const modulesToUpdate = new Set<ModuleNode>();
 
   for (const absPath of changedAbsolutePaths) {
-    const moduleId = bazelPathToModuleId(absPath, bazelBin);
-    if (moduleId === null) continue;
-
-    const modules = server.moduleGraph.getModulesByFile(absPath);
-    if (modules != null) {
-      for (const mod of modules) {
-        server.moduleGraph.invalidateModule(mod);
-        modulesToUpdate.add(mod.url);
-      }
-    }
-
-    if (modules == null || modules.size === 0) {
-      // Module not in the graph yet — it was probably loaded but not yet
-      // registered (e.g. a new file from a new target).  Invalidate by
-      // absolute path anyway; Vite will pick it up on the next request.
+    const realPath = canonicalPath(absPath);
+    if (realPath === cacheDir || realPath.startsWith(cacheDir + path.sep)) continue;
+    // The resolved path is an alias only when the graph lacks the watched one: oj
+    // synthesizes a node, with a second URL, for any existing file it is asked about.
+    let modules = server.moduleGraph.getModulesByFile(absPath) ?? new Set<ModuleNode>();
+    if (modules.size === 0) modules = server.moduleGraph.getModulesByFile(realPath) ?? new Set<ModuleNode>();
+    if (modules.size === 0) {
       server.moduleGraph.invalidateAll();
-      // A full reload is the safest option when we can't find the module.
       server.ws.send({ type: 'full-reload' });
       return;
     }
+    for (const mod of modules) modulesToUpdate.add(mod);
   }
 
-  if (modulesToUpdate.size === 0) return;
-
-  // Send HMR updates for all invalidated modules in a single batch.
+  if (typeof server.reloadModule === 'function') {
+    for (const mod of modulesToUpdate) await server.reloadModule(mod);
+    return;
+  }
+  // oj's ViteDevServer stand-in has no reloadModule.
+  const timestamp = Date.now();
+  for (const mod of modulesToUpdate) server.moduleGraph.invalidateModule(mod);
   server.ws.send({
     type: 'update',
-    updates: [...modulesToUpdate].map((url) => ({
+    updates: [...modulesToUpdate].map((mod) => ({
       type: 'js-update' as const,
-      path: url,
-      acceptedPath: url,
-      timestamp: Date.now(),
+      path: mod.url,
+      acceptedPath: mod.url,
+      timestamp,
       explicitImportRequired: false,
       isWithinCircularImport: false,
     })),
@@ -381,3 +485,21 @@ function handleRebuild(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function splitSuffix(request: string): [string, string] {
+  const cut = request.slice(1).search(/[?#]/);
+  return cut < 0 ? [request, ''] : [request.slice(0, cut + 1), request.slice(cut + 1)];
+}
+
+function canonicalPath(file: string): string {
+  for (let ancestor = file; ; ancestor = path.dirname(ancestor)) {
+    try {
+      return path.resolve(fs.realpathSync(ancestor), path.relative(ancestor, file));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== 'ENOENT' && code !== 'ENOTDIR') || path.dirname(ancestor) === ancestor) {
+        throw error;
+      }
+    }
+  }
+}

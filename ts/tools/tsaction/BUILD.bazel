@@ -1,7 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("//ts/private:toolchain.bzl", "TOOLS_TOOLCHAIN_TYPE", "tools_toolchain")
 
-# gazelle:ignore
 # gazelle:exclude testdata
 
 go_library(
@@ -12,6 +11,7 @@ go_library(
         "exclude.go",
         "main.go",
         "manifest.go",
+        "native_view.go",
         "paths.go",
         "showconfig.go",
         "tsgo.go",
@@ -20,6 +20,7 @@ go_library(
     visibility = ["//visibility:private"],
     deps = [
         "//ts/tools/explainfiles",
+        "//ts/tools/runtimeview",
         "//ts/tools/tsconfig",
     ],
 )
@@ -48,7 +49,11 @@ go_test(
     data = glob(["testdata/**"]) + ["//ts/toolchain:tsgo_resolved"],
     embed = [":tsaction_lib"],
     env = {"TSGO_RLOCATION": "$(rlocationpath //ts/toolchain:tsgo_resolved)"},
-    deps = ["@io_bazel_rules_go//go/runfiles"],
+    deps = [
+        "//ts/tools/explainfiles",
+        "//ts/tools/tsconfig",
+        "@io_bazel_rules_go//go/runfiles:go_default_library",
+    ],
 )
 
 tools_toolchain(

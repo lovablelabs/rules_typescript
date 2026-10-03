@@ -3,7 +3,10 @@
 `./plugins/define` resolves beside the config, its JSON sibling beside it, and
 a bare import in either walks up to the runfiles tree's `node_modules`."""
 
+load("//tests/node_test/analysis:analysis_tests.bzl", "config_json_staging_case", "config_scope_change_test", "data_symlink_inputs")
 load("//ts:defs.bzl", "ts_test")
+
+data_symlink_inputs(name = "fixture_links")
 
 # keep
 ts_test(
@@ -11,10 +14,67 @@ ts_test(
     srcs = ["config_srcs.test.ts"],
     config = "vitest.config.mts",
     config_srcs = [
+        "package.json",
         "plugins/define.ts",
         "plugins/meta.json",
     ],
-    emit = True,  # keep
+    data = [":fixture_links"],
     node_modules = "//tests/npm:node_modules",
+    package_scopes = ["package.json"],
+    deps = [
+        "@npm//:types_node",
+        "@npm//:vitest",
+    ],
+)
+
+# This incompatible staging subject runs only through its analysis test.
+# keep
+ts_test(
+    name = "projected_scope_config_subject",
+    srcs = ["config_srcs.test.ts"],
+    config = "vitest.config.mts",
+    config_srcs = [
+        "package.json",
+        "plugins/define.ts",
+        "plugins/meta.json",
+    ],
+    emit = True,
+    node_modules = "//tests/npm:node_modules",
+    package_scopes = ["package.json"],
+    tags = ["manual"],
     deps = ["@npm//:vitest"],
+)
+
+config_scope_change_test(
+    name = "config_cannot_restore_source_scope_test",
+    target_under_test = ":projected_scope_config_subject",
+)
+
+# This scope-addition subject runs only through its analysis test.
+# keep
+ts_test(
+    name = "undeclared_scope_config_subject",
+    srcs = ["config_srcs.test.ts"],
+    config = "vitest.config.mts",
+    config_srcs = [
+        "package.json",
+        "plugins/define.ts",
+        "plugins/meta.json",
+    ],
+    node_modules = "//tests/npm:node_modules",
+    tags = ["manual"],
+    deps = ["@npm//:vitest"],
+)
+
+config_scope_change_test(
+    name = "config_cannot_add_nearer_scope_test",
+    runtime_path = "from no package scope to '",
+    target_under_test = ":undeclared_scope_config_subject",
+)
+
+config_json_staging_case(name = "config_scope_beside_json_keeps_runtime_identity")
+
+config_json_staging_case(
+    name = "config_cannot_replace_published_json",
+    shadow_json = "plugins/meta.json",
 )

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -141,14 +142,12 @@ func TestTsgoStep_RunsFromAProgramRootOfTheSourcesNamed(t *testing.T) {
 	}
 }
 
-// A -source under the output tree would be written into the tree the root
-// links whole; the step refuses it before tsgo runs.
-func TestTsgoStep_ASourceUnderTheOutputTreeIsRefused(t *testing.T) {
+func TestTsgoStep_ASourceWithoutALogicalCoordinateCannotWriteThroughTheOutputTree(t *testing.T) {
 	_, argv := newTsgoExecroot(t, "echo ran\n")
 
-	err := runTsgo(tsgoArgs("-source="+binDir+"/pkg/lib.d.ts", "--",
+	err := runTsgo(tsgoArgs("-source=bazel-out/unplaced.ts", "--",
 		"external/tsgo/tsc"))
-	if err == nil || !strings.Contains(err.Error(), binDir+"/pkg/lib.d.ts") {
+	if err == nil || !strings.Contains(err.Error(), "bazel-out/unplaced.ts") {
 		t.Errorf("runTsgo = %v, want the output-tree source refused", err)
 	}
 	if _, err := os.Stat(argv); !errors.Is(err, os.ErrNotExist) {
@@ -156,35 +155,299 @@ func TestTsgoStep_ASourceUnderTheOutputTreeIsRefused(t *testing.T) {
 	}
 }
 
-// -overlay lays a dep's declarations over its package and -manifest its
-// manifest as built; the dep's sources, importer links and the root are left.
-func TestTsgoStep_LaysADepsOutputsOverItsDirectory(t *testing.T) {
-	root, argv := newTsgoExecroot(t,
-		"readlink pkg/package.json >> \"$0.argv\"\n"+
-			"readlink pkg/lib.d.ts >> \"$0.argv\"\n"+
-			"test -e pkg/lib.ts || echo lib-source-absent >> \"$0.argv\"\n"+
-			"readlink pkg/sub/node_modules >> \"$0.argv\"\n"+
-			"test -e pkg/app.program && echo root-linked >> \"$0.argv\" || "+
-			"echo root-skipped >> \"$0.argv\"\n"+
-			"test -d pkg/sub -a ! -L pkg/sub && echo sub-is-real >> \"$0.argv\"\n")
+func TestProgramRoot_GeneratedSourcesKeepDeclaredIdentityAndRejectDuplicateCoordinates(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	var sources []string
+	for _, file := range []string{"pkg/input.ts", "pkg/helper.mjs", "pkg/data.json", "pkg/package.json"} {
+		generated := binDir + "/" + file
+		writeFile(t, generated, "declared generated input")
+		writeFile(t, file, "undeclared checkout twin")
+		sources = append(sources, generated)
+		writeFile(t, binDir+"/dependency/"+filepath.Base(file), "dependency publication")
+	}
+	dependency := overlayArg(t, binDir+"/dependency", "pkg")
+	if err := layOutProgramRoot(programRoot, sources, nil, nil, []string{dependency[len("-overlay="):]}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range sources {
+		logical := strings.TrimPrefix(file, binDir+"/")
+		if actual := throughRoot(filepath.Join(root, programRoot), root, root, logical); actual != file {
+			t.Fatalf("%s resolves to %s, want declared File %s", logical, actual, file)
+		}
+		body, err := os.ReadFile(filepath.Join(programRoot, logical))
+		if err != nil || string(body) != "declared generated input" {
+			t.Fatalf("%s reads checkout bytes: %q, %v", logical, body, err)
+		}
+	}
+	err := layOutProgramRoot(programRoot, append(sources, "pkg/input.ts"), nil, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "declare one source") {
+		t.Fatalf("two declared Files claimed the same coordinate: %v", err)
+	}
+}
 
-	err := runTsgo(tsgoArgs("-overlay="+binDir+"/pkg",
-		"-manifest="+binDir+"/pkg/app.package.json",
-		"--", "external/tsgo/tsc"))
-	if err != nil {
-		t.Fatalf("runTsgo: %v", err)
+func TestProgramRoot_EachInheritedImporterResolvesItsOwnLinksBeforeTheChain(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	nearest, chainRoot := binDir+"/pkg/app/node_modules", binDir+"/node_modules"
+	first, second := binDir+"/libs/a/node_modules", binDir+"/libs/b/node_modules"
+	for importer, names := range map[string][]string{
+		nearest:   {"conflict", "chain-only"},
+		chainRoot: {"zod"},
+		first:     {"conflict", "first-only"},
+		second:    {"second-only"},
+	} {
+		for _, name := range names {
+			writeFile(t, importer+"/"+name+"/index.d.ts", importer)
+		}
 	}
-	got := recordedArgs(t, argv)[1:]
-	want := []string{
-		filepath.Join(root, binDir, "pkg/app.package.json"),
-		filepath.Join(root, binDir, "pkg/lib.d.ts"),
-		"lib-source-absent",
-		filepath.Join(root, subImporter),
-		"root-skipped",
-		"sub-is-real",
+	if err := layOutProgramRoot(programRoot, nil, []string{nearest, chainRoot}, []string{first, second}, nil, nil); err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("the program root reads\n%q\nwant\n%q", got, want)
+	for at, want := range map[string]string{
+		"libs/a/node_modules/conflict":    first,
+		"libs/a/node_modules/first-only":  first,
+		"libs/a/node_modules/chain-only":  nearest,
+		"libs/b/node_modules/second-only": second,
+		"libs/b/node_modules/conflict":    nearest,
+		"libs/b/node_modules/chain-only":  nearest,
+		"pkg/app/node_modules/conflict":   nearest,
+		"node_modules/zod":                chainRoot,
+	} {
+		body, err := os.ReadFile(filepath.Join(programRoot, at, "index.d.ts"))
+		if err != nil || string(body) != want {
+			t.Errorf("%s resolves to %q (%v), want %s", at, body, err, want)
+		}
+	}
+	for _, at := range []string{"libs/a/node_modules/zod", "libs/b/node_modules/zod"} {
+		if _, err := os.Lstat(filepath.Join(programRoot, at)); err == nil {
+			t.Errorf("%s copies the root importer the ancestor walk already reaches", at)
+		}
+	}
+	if info, err := os.Lstat(filepath.Join(programRoot, "pkg/app/node_modules")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the chain's nearest importer is no longer a plain link: %v", err)
+	}
+}
+
+func TestTsgoStep_ExcludedGeneratedRootCannotEscapeValidation(t *testing.T) {
+	_, _ = newTsgoExecroot(t, "echo pkg/a.ts\n")
+	generated := binDir + "/pkg/generated.ts"
+	writeFile(t, generated, "const unchecked: never = 0;\n")
+	writeFile(t, "pkg/tsconfig.json", `{"exclude":["generated.ts"]}`)
+	writeFile(t, manifest, "label\t//pkg:app\nown\t"+generated+"\n")
+	err := runTsgo(tsgoArgs("-source="+generated, "-tsconfig=pkg/tsconfig.json", "--", "external/tsgo/tsc"))
+	if err == nil || !strings.Contains(err.Error(), "excluded by") || !strings.Contains(err.Error(), generated) {
+		t.Fatalf("generated source was left unchecked: %v", err)
+	}
+}
+
+func TestTsgoStep_GeneratedImporterCannotBypassStrictDeps(t *testing.T) {
+	root, _ := newTsgoExecroot(t, "cat <<'LISTING'\npkg/helper.ts\n   Imported via \"./helper\" from file 'pkg/generated.ts'\npkg/generated.ts\nLISTING\n")
+	generated := binDir + "/pkg/generated.ts"
+	writeFile(t, generated, "import './helper';\n")
+	writeFile(t, "pkg/helper.ts", "export {};\n")
+	writeFile(t, manifest, "label\t//pkg:app\nown\t"+generated+"\nfile\t//pkg:helper\tpkg/helper.ts\n")
+	err := runTsgo(tsgoArgs("-source="+generated, "-source=pkg/helper.ts", "--", "external/tsgo/tsc"))
+	var undeclared *undeclaredDeps
+	if !errors.As(err, &undeclared) || !strings.Contains(err.Error(), generated) || !strings.Contains(err.Error(), "//pkg:helper") {
+		t.Fatalf("logical generated importer skipped ownership checking: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, generated)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTsgoStep_GeneratedLintArgumentsUseTheCompilerNamespace(t *testing.T) {
+	_, argv := newTsgoExecroot(t, "readlink \"$1\" >> \"$0.argv\"\n")
+	generated := binDir + "/pkg/generated.mjs"
+	writeFile(t, generated, "export const value = 42;\n")
+	args := tsgoArgs("-source="+generated, "--", "external/tsgo/tsc", generated)
+	args = slices.DeleteFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "-check=") })
+	if err := runTsgo(args); err != nil {
+		t.Fatal(err)
+	}
+	got := recordedArgs(t, argv)
+	if len(got) != 2 || got[0] != "pkg/generated.mjs" || !strings.HasSuffix(got[1], "/"+generated) {
+		t.Fatalf("lint input does not use the compiler namespace and exact File: %q", got)
+	}
+}
+
+func TestProgramRoot_OverlayOriginDoesNotDependOnOutputFilename(t *testing.T) {
+	for _, file := range []string{"value.d.ts", "value.d.mts", "value.d.cts", "value.json", "package.json"} {
+		for _, tc := range []struct {
+			name         string
+			second       string
+			directory    bool
+			reverse      bool
+			protected    bool
+			wantConflict bool
+		}{
+			{name: "original source coordinate"},
+			{name: "distinct file cannot replace occupied origin", second: "distinct", wantConflict: true},
+			{name: "reversed files cannot replace occupied origin", second: "distinct", reverse: true, wantConflict: true},
+			{name: "expanded tree cannot replace occupied origin", second: "distinct", directory: true, wantConflict: true},
+			{name: "reversed tree cannot replace occupied origin", second: "distinct", directory: true, reverse: true, wantConflict: true},
+			{name: "canonical alias coalesces", second: "alias"},
+			{name: "expanded canonical alias coalesces", second: "alias", directory: true},
+			{name: "explicit root keeps precedence", second: "distinct", protected: true},
+			{name: "explicit root keeps precedence over tree", second: "distinct", directory: true, protected: true},
+		} {
+			t.Run(file+"/"+tc.name, func(t *testing.T) {
+				root := t.TempDir()
+				t.Chdir(root)
+				output := binDir + "/app/private-output-" + file
+				logical := "foreign/" + file
+				body, otherBody := "export declare const value: 42;\n", "export declare const value: 42;\n"
+				if strings.HasSuffix(file, ".json") {
+					body, otherBody = `{"value":42}`, `{"other":"second"}`
+				}
+				writeFile(t, output, body)
+				overlays := []string{overlayArg(t, output, logical)[len("-overlay="):]}
+				next := "bazel-out/other-fastbuild/bin/foreign/" + file
+				if tc.second != "" {
+					if tc.second == "alias" {
+						if err := os.MkdirAll(filepath.Dir(next), 0o755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(filepath.Join(root, output), next); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						writeFile(t, next, otherBody)
+					}
+					from, to := next, logical
+					if tc.directory {
+						from, to = filepath.Dir(next), filepath.Dir(logical)
+					}
+					overlays = append(overlays, overlayArg(t, from, to)[len("-overlay="):])
+				}
+				var sources []string
+				selected := output
+				if tc.reverse {
+					slices.Reverse(overlays)
+					selected = next
+				}
+				if tc.protected {
+					writeFile(t, logical, body)
+					sources = []string{logical}
+					selected = logical
+				}
+				err := layOutProgramRoot(programRoot, sources, nil, nil, overlays, nil)
+				if tc.wantConflict {
+					if err == nil {
+						t.Fatal("distinct compiler inputs silently selected the last overlay")
+					}
+					for _, want := range []string{logical, filepath.FromSlash(output), filepath.FromSlash(next), "publish the shared module once"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Fatalf("compiler input conflict = %v, want %q", err, want)
+						}
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				actual, err := os.Readlink(filepath.Join(programRoot, logical))
+				if err != nil || actual != filepath.Join(root, selected) {
+					t.Fatalf("overlay origin selected %q, %v; want exact output %q", actual, err, selected)
+				}
+				if resolved := throughRoot(filepath.Join(root, programRoot), root, root, logical); resolved != selected {
+					t.Fatalf("overlay ownership = %q, want exact artifact %q", resolved, selected)
+				}
+			})
+		}
+	}
+	t.Run("dangling occupied declaration is not an empty destination", func(t *testing.T) {
+		root := t.TempDir()
+		t.Chdir(root)
+		output, next, logical := binDir+"/app/value.d.ts", binDir+"/other/value.d.ts", "foreign/value.d.ts"
+		writeFile(t, output, "export {};\n")
+		writeFile(t, next, "export {};\n")
+		if err := layOutProgramRoot(programRoot, nil, nil, nil, []string{overlayArg(t, output, logical)[len("-overlay="):]}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(output); err != nil {
+			t.Fatal(err)
+		}
+		from := filepath.Join(root, next)
+		st, err := os.Stat(from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = overlayPath(programRoot, filepath.Join(root, programRoot), from, filepath.FromSlash(logical), st, nil, false)
+		if !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "resolve existing") {
+			t.Fatalf("dangling declaration was overwritten: %v", err)
+		}
+		if target, err := os.Readlink(filepath.Join(programRoot, logical)); err != nil || target != filepath.Join(root, output) {
+			t.Fatalf("failed admission changed the declaration link: %q, %v", target, err)
+		}
+	})
+
+}
+
+func TestTsgoStep_OriginalScopeSurvivesRuntimeAndPublicationOverlays(t *testing.T) {
+	for _, selectedFiles := range []bool{false, true} {
+		for _, explicitManifest := range []bool{false, true} {
+			name := "directory/original compiler scope"
+			if selectedFiles {
+				name = "selected files/original compiler scope"
+			}
+			if explicitManifest {
+				name = strings.Replace(name, "original compiler scope", "explicit as-built manifest", 1)
+			}
+			t.Run(name, func(t *testing.T) {
+				root, argv := newTsgoExecroot(t,
+					"readlink pkg/package.json >> \"$0.argv\"\n"+
+						"readlink pkg/lib.d.ts >> \"$0.argv\"\n"+
+						"readlink pkg/child/value.d.ts >> \"$0.argv\"\n"+
+						"readlink pkg/child/data.json >> \"$0.argv\"\n"+
+						"for f in package.json runtime-only.json value.js; do test -e pkg/child/$f && echo $f >> \"$0.argv\"; done\n"+
+						"test -e pkg/lib.ts || echo lib-source-absent >> \"$0.argv\"\n"+
+						"readlink pkg/sub/node_modules >> \"$0.argv\"\n"+
+						"test -e pkg/app.program && echo root-linked >> \"$0.argv\" || "+
+						"echo root-skipped >> \"$0.argv\"\n"+
+						"test -d pkg/sub -a ! -L pkg/sub && echo sub-is-real >> \"$0.argv\"\n")
+
+				writeFile(t, filepath.Join(root, binDir, "pkg/package.json"), `{"exports":"./lib.js"}`)
+				for file, contents := range map[string]string{
+					"value.d.ts":        "export declare const value: number;\n",
+					"data.json":         `{"value":42}`,
+					"package.json":      `{"type":"module"}`,
+					"runtime-only.json": `{"private":true}`,
+					"value.js":          "export const value = 42;\n",
+				} {
+					writeFile(t, filepath.Join(root, binDir, "pkg/child", file), contents)
+				}
+				args := []string{overlayArg(t, binDir+"/pkg", "pkg")}
+				if selectedFiles {
+					args = nil
+					for _, file := range []string{"package.json", "lib.d.ts", "child/value.d.ts", "child/data.json", "child/value.js"} {
+						args = append(args, overlayArg(t, binDir+"/pkg/"+file, "pkg/"+file))
+					}
+				}
+				wantScope := filepath.Join(root, "pkg/package.json")
+				if explicitManifest {
+					args = append(args, "-manifest="+binDir+"/pkg/app.package.json")
+				}
+				args = append(args, "--", "external/tsgo/tsc")
+				err := runTsgo(tsgoArgs(args...))
+				if err != nil {
+					t.Fatalf("runTsgo: %v", err)
+				}
+				got := recordedArgs(t, argv)[1:]
+				want := []string{
+					wantScope,
+					filepath.Join(root, binDir, "pkg/lib.d.ts"),
+					filepath.Join(root, binDir, "pkg/child/value.d.ts"),
+					filepath.Join(root, binDir, "pkg/child/data.json"),
+				}
+				if !selectedFiles {
+					want = append(want, "package.json", "runtime-only.json")
+				}
+				want = append(want, "lib-source-absent", filepath.Join(root, subImporter), "root-skipped", "sub-is-real")
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("the program root reads\n%q\nwant\n%q", got, want)
+				}
+			})
+		}
 	}
 }
 
@@ -201,7 +464,7 @@ func TestTsgoStep_LaysNoJavaScriptOverThePackage(t *testing.T) {
 		writeFile(t, filepath.Join(root, binDir, "pkg", rel), "\n")
 	}
 
-	err := runTsgo(tsgoArgs("-overlay="+binDir+"/pkg", "--", "external/tsgo/tsc"))
+	err := runTsgo(tsgoArgs(overlayArg(t, binDir+"/pkg", "pkg"), "--", "external/tsgo/tsc"))
 	if err != nil {
 		t.Fatalf("runTsgo: %v", err)
 	}
@@ -223,7 +486,7 @@ func TestTsgoStep_ChecksAnOverlaidFileByItsOutput(t *testing.T) {
 		"label\t//pkg:app\nown\tpkg/a.ts\ndirect\t//pkg:lib\n"+
 			"file\t//pkg:lib\t"+binDir+"/pkg/lib.d.ts\n")
 
-	err := runTsgo(tsgoArgs("-overlay="+binDir+"/pkg", "--", "external/tsgo/tsc"))
+	err := runTsgo(tsgoArgs(overlayArg(t, binDir+"/pkg", "pkg"), "--", "external/tsgo/tsc"))
 	if err != nil {
 		t.Errorf("runTsgo with the dep overlaid: %v", err)
 	}
@@ -243,8 +506,9 @@ func TestTsgoStep_ChecksALaidOverManifestByItsOutput(t *testing.T) {
 	writeFile(t, filepath.Join(root, binDir, "pkg/listing.txt"), listing)
 	asWritten := "label\t//pkg:app\nown\tpkg/a.ts\ndirect\t//pkg:lib\n" +
 		"file\t//pkg:lib\t" + binDir + "/pkg/package.json\n"
-	args := tsgoArgs("-manifest="+binDir+"/pkg/lib.package.json",
-		"--", "external/tsgo/tsc")
+	args := tsgoArgs(overlayArg(t, binDir+"/pkg/package.json", "pkg/package.json"),
+		"-manifest="+binDir+"/pkg/lib.package.json", "--", "external/tsgo/tsc")
+	args = slices.DeleteFunc(args, func(arg string) bool { return arg == "-source=pkg/package.json" })
 
 	writeFile(t, filepath.Join(root, manifest),
 		asWritten+"file\t//pkg:lib\t"+binDir+"/pkg/lib.package.json\n")
@@ -259,59 +523,177 @@ func TestTsgoStep_ChecksALaidOverManifestByItsOutput(t *testing.T) {
 }
 
 func TestTsgoStep_ChecksAFileUnderALinkByItsStoreTree(t *testing.T) {
-	const key = "qs@6.14.0"
-	storeFile := filepath.Join(rootImporter, ".pnpm", key,
-		"node_modules/qs/lib/utils.d.ts")
-	listing := "pkg/sub/node_modules/qs/lib/utils.d.ts\n" +
-		"   Imported via \"./sub/node_modules/qs/lib/utils.js\"" +
-		" from file 'pkg/a.ts'\n" +
-		"pkg/a.ts\n   Root file specified for compilation\n"
-	for name, sandboxed := range map[string]bool{
-		"real": false, "sandboxed": true,
+	for _, layout := range []struct{ name, pkg, sandbox, spelling string }{
+		{"real", "shared", "", "link"},
+		{"memberSandbox", "shared", "member", "link"},
+		{"physicalMemberSandbox", "shared", "member", "physical"},
+		{"scopedPhysicalMemberSandbox", "@types/shared", "member", "physical"},
+		{"scopedRelativePhysicalMemberSandbox", "@types/shared", "member", "physicalRelative"},
+		{"scopedTreeSandbox", "@scope/shared", "tree", "link"},
+		{"scopedPhysicalTreeSandbox", "@types/shared", "tree", "physical"},
+		{"scopedOuterImporter", "@types/shared", "importer", "link"},
+		{"relativeStore", "shared", "", "relative"},
+		{"absoluteStore", "shared", "", "absolute"},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(layout.name, func(t *testing.T) {
 			root, _ := newTsgoExecroot(t, "cat "+binDir+"/pkg/listing.txt\n")
-			writeFile(t, filepath.Join(root, binDir, "pkg/listing.txt"), listing)
-			at := filepath.Join(root, storeFile)
-			if sandboxed {
-				real := filepath.Join(t.TempDir(), storeFile)
-				writeFile(t, real, "export {};\n")
+			key := strings.ReplaceAll(layout.pkg, "/", "+") + "@0.0.0"
+			storeA := rootImporter + "/.pnpm/" + key + "/node_modules/" + layout.pkg
+			storeB := subImporter + "/.pnpm/" + key + "/node_modules/" + layout.pkg
+			for importer, tree := range map[string]string{rootImporter: storeA, subImporter: storeB} {
+				at := filepath.Join(root, tree, "lib/index.d.ts")
+				if layout.sandbox == "" || layout.sandbox == "importer" {
+					writeFile(t, at, "export {};\n")
+				} else {
+					real := filepath.Join(t.TempDir(), tree, "lib/index.d.ts")
+					writeFile(t, real, "export {};\n")
+					if layout.sandbox == "tree" {
+						at = filepath.Join(root, tree)
+						real = filepath.Dir(filepath.Dir(real))
+					}
+					if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(real, at); err != nil {
+						t.Fatal(err)
+					}
+				}
+				link := filepath.Join(root, importer, layout.pkg)
+				if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				target, err := filepath.Rel(filepath.Dir(link), filepath.Join(root, tree))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				if layout.sandbox == "importer" {
+					at := filepath.Join(root, importer)
+					real := filepath.Join(t.TempDir(), importer)
+					if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(at, real); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(real, at); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			own := "label\t//pkg:app\nown\tpkg/a.ts\nown\tpkg/sub/b.ts\n"
+			ownership := own + "npm-direct\t" + layout.pkg + "\t" + storeA + "\n" +
+				"npm\t" + layout.pkg + "\t@npm//:shared\t" + storeB + "\n"
+			writeFile(t, filepath.Join(root, manifest), ownership)
+			for _, c := range []struct{ name, from, tree, link string }{
+				{"allowedA", "pkg/a.ts", storeA, "node_modules/" + layout.pkg},
+				{"rejectedB", "pkg/sub/b.ts", storeB, "pkg/sub/node_modules/" + layout.pkg},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					to := c.link + "/lib/index.d.ts"
+					switch layout.spelling {
+					case "relative":
+						var err error
+						to, err = filepath.Rel(programRoot, c.tree+"/lib/index.d.ts")
+						if err != nil {
+							t.Fatal(err)
+						}
+					case "absolute":
+						to = filepath.Join(root, c.tree, "lib/index.d.ts")
+					case "physical", "physicalRelative":
+						to = realpath(t, filepath.Join(root, c.tree, "lib/index.d.ts"))
+						if layout.spelling == "physicalRelative" {
+							var err error
+							to, err = filepath.Rel(filepath.Join(root, programRoot), to)
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					listing := filepath.ToSlash(to) + "\n   Imported via \"" + layout.pkg + "\" from file '" + c.from + "'\n" +
+						c.from + "\n   Root file specified for compilation\n"
+					writeFile(t, filepath.Join(root, binDir, "pkg/listing.txt"), listing)
+					err := runTsgo(tsgoArgs("-source=pkg/sub/b.ts", "--", "external/tsgo/tsc"))
+					if c.name == "allowedA" {
+						if err != nil {
+							t.Fatalf("selected store A was rejected: %v", err)
+						}
+					} else if err == nil || !strings.Contains(err.Error(), "add @npm//:shared to deps") {
+						t.Fatalf("undeclared same-key store B = %v, want its owner", err)
+					}
+				})
+			}
+			writeFile(t, filepath.Join(root, manifest), ownership+"npm-direct\t"+layout.pkg+"\t"+storeB+"\n")
+			if err := runTsgo(tsgoArgs("-source=pkg/sub/b.ts", "--", "external/tsgo/tsc")); err != nil {
+				t.Fatalf("declared store B was rejected: %v", err)
+			}
+			writeFile(t, filepath.Join(root, manifest), own+"npm-direct\t"+layout.pkg+"\t"+storeA+"\n")
+			err := runTsgo(tsgoArgs("-source=pkg/sub/b.ts", "--", "external/tsgo/tsc"))
+			if err == nil || !strings.Contains(err.Error(), "npm closure does not hold") {
+				t.Fatalf("foreign same-key store B = %v, want a closure error", err)
+			}
+			writeFile(t, filepath.Join(root, manifest), own)
+			err = runTsgo(tsgoArgs("-source=pkg/sub/b.ts", "--", "external/tsgo/tsc"))
+			if err == nil || !strings.Contains(err.Error(), "npm closure does not hold") {
+				t.Fatalf("unowned store B = %v, want a closure error", err)
+			}
+		})
+	}
+}
+
+func TestTsgoStep_RejectsAmbiguousPhysicalStoreWithoutLosingFileIdentity(t *testing.T) {
+	for _, layout := range []string{"tree", "member"} {
+		t.Run(layout, func(t *testing.T) {
+			root, _ := newTsgoExecroot(t, "cat "+binDir+"/pkg/listing.txt\n")
+			const pkg = "@types/shared"
+			storeA := rootImporter + "/.pnpm/@types+shared@0.0.0/node_modules/" + pkg
+			storeB := subImporter + "/.pnpm/@types+shared@0.0.0/node_modules/" + pkg
+			physicalStore := filepath.Join(t.TempDir(), ".pnpm")
+			physical := filepath.Join(physicalStore, "@types+shared@0.0.0/node_modules", pkg)
+			writeFile(t, filepath.Join(physical, "index.d.ts"), "export {};\n")
+			for importer, tree := range map[string]string{rootImporter: storeA, subImporter: storeB} {
+				at, target := filepath.Join(root, importer, ".pnpm"), physicalStore
+				if layout == "member" {
+					at, target = filepath.Join(root, tree, "index.d.ts"), filepath.Join(physical, "index.d.ts")
+				}
 				if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(real, at); err != nil {
+				if err := os.Symlink(target, at); err != nil {
 					t.Fatal(err)
 				}
-			} else {
-				writeFile(t, at, "export {};\n")
-				t.Chdir(realpath(t, root))
 			}
-			err := os.Symlink("../../../node_modules/.pnpm/"+key+"/node_modules/qs",
-				filepath.Join(root, subImporter, "qs"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			args := tsgoArgs("--", "external/tsgo/tsc")
-			own := "label\t//pkg:app\nown\tpkg/a.ts\n"
-
-			writeFile(t, filepath.Join(root, manifest),
-				own+"npm-direct\tqs\t"+key+"\n")
-			if err := runTsgo(args); err != nil {
-				t.Errorf("runTsgo with the link's package in deps: %v", err)
-			}
-			writeFile(t, filepath.Join(root, manifest),
-				own+"npm\tqs\t@npm//:qs\t"+key+"\n")
-			err = runTsgo(args)
-			if err == nil || !strings.Contains(err.Error(), "add @npm//:qs to deps") {
-				t.Errorf("runTsgo with the package in the closure alone = %v, "+
-					"want the label to add", err)
-			}
-			writeFile(t, filepath.Join(root, manifest), own)
-			err = runTsgo(args)
-			if err == nil ||
-				!strings.Contains(err.Error(), "npm closure does not hold") {
-				t.Errorf("runTsgo with the tree outside the closure = %v, "+
-					"want the closure error", err)
+			writeFile(t, filepath.Join(root, manifest), "label\t//pkg:app\nown\tpkg/a.ts\n"+
+				"npm-direct\t"+pkg+"\t"+storeA+"\n"+
+				"npm\t"+pkg+"\t@npm//:shared\t"+storeB+"\n")
+			for _, c := range []struct{ name, tree, want string }{
+				{"directFile", storeA, ""},
+				{"indirectFile", storeB, "add @npm//:shared to deps"},
+				{"ambiguousPhysical", physical, "multiple declared npm store inputs"},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					to := filepath.Join(c.tree, "index.d.ts")
+					if !filepath.IsAbs(to) {
+						var err error
+						to, err = filepath.Rel(programRoot, to)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					listing := filepath.ToSlash(to) + "\n   Imported via \"" + pkg + "\" from file 'pkg/a.ts'\n" +
+						"pkg/a.ts\n   Root file specified for compilation\n"
+					writeFile(t, filepath.Join(root, binDir, "pkg/listing.txt"), listing)
+					err := runTsgo(tsgoArgs("--", "external/tsgo/tsc"))
+					if c.want == "" {
+						if err != nil {
+							t.Fatalf("known File identity was rejected: %v", err)
+						}
+					} else if err == nil || !strings.Contains(err.Error(), c.want) {
+						t.Fatalf("runTsgo = %v, want %q", err, c.want)
+					}
+				})
 			}
 		})
 	}
@@ -579,7 +961,7 @@ func TestLintDiscoveryDoesNotReenterOriginalOrNestedConfigs(t *testing.T) {
 			nested := `{"compilerOptions":{"module":"CommonJS"}}`
 			writeFile(t, filepath.Join(root, "pkg/nested/tsconfig.json"), nested)
 			sources := []string{original, "base.json", "pkg/a.ts", "pkg/nested/tsconfig.json"}
-			if err := layOutProgramRoot(programRoot, sources, nil, nil, nil); err != nil {
+			if err := layOutProgramRoot(programRoot, sources, nil, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := discoverProgramConfig(programRoot, generated, sources); err != nil {
@@ -607,9 +989,33 @@ func TestLintDiscoveryDoesNotReenterOriginalOrNestedConfigs(t *testing.T) {
 			if resolved.Module != "ESNext" || resolved.Types == nil || !reflect.DeepEqual(*resolved.Types, []string{"node"}) || resolved.Include == nil || !reflect.DeepEqual(*resolved.Include, []string{"../../../../pkg/**/*.ts"}) {
 				t.Fatalf("lost generated or original compiler configuration: %+v", resolved)
 			}
-			nestedResolved, err := tsconfig.Resolve(filepath.Join(programRoot, "pkg/nested/tsconfig.json"))
-			if err != nil || !reflect.DeepEqual(nestedResolved, resolved) {
-				t.Fatalf("nearer declared config bypassed the target program: %+v, %v", nestedResolved, err)
+			nestedShim := filepath.Join(programRoot, "pkg/nested/tsconfig.json")
+			nestedResolved, err := tsconfig.Resolve(nestedShim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(nestedResolved.Extends) != 1 {
+				t.Fatalf("nested discovery must reference one canonical program: %+v", nestedResolved)
+			}
+			nestedTarget, ok := tsconfig.ResolveExtends(filepath.Dir(nestedShim), nestedResolved.Extends[0])
+			if !ok {
+				t.Fatalf("nested discovery cannot resolve %q", nestedResolved.Extends[0])
+			}
+			nestedInfo, err := os.Stat(nestedTarget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			generatedInfo, err := os.Stat(generated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(nestedInfo, generatedInfo) {
+				t.Fatalf("nested discovery references %q instead of %q", nestedTarget, generated)
+			}
+			want := *resolved
+			want.Extends = nestedResolved.Extends
+			if !reflect.DeepEqual(nestedResolved, &want) {
+				t.Fatalf("nearer declared config bypassed the target program: %+v", nestedResolved)
 			}
 			for file, want := range map[string]string{"base.json": base, original: project, generated: generatedBody, "pkg/nested/tsconfig.json": nested} {
 				got, err := os.ReadFile(file)
@@ -681,4 +1087,29 @@ func TestFormatterPathsStayAbsoluteInsideProgramRoot(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "validation changed input pkg/a.ts") {
 		t.Fatalf("formatter did not receive the absolute copied input: %v", err)
 	}
+}
+
+func TestProgramWithoutEmitRejectsScopeThatRewritesItsNativeTarget(t *testing.T) {
+	_, argv := newTsgoExecroot(t, "echo ran\n")
+	writeFile(t, binDir+"/pkg/package.json", `{"exports":"./lib.js"}`)
+	check, err := json.Marshal(runtimeScopeCheck{Source: "pkg/package.json", Runtime: binDir + "/pkg/package.json", Targets: []runtimeTarget{{"./lib.ts", "./lib.ts"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runTsgo(tsgoArgs("-runtime_scope="+string(check), "--", "external/tsgo/tsc"))
+	if err == nil || !strings.Contains(err.Error(), "needs \"./lib.ts\"") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(argv); !os.IsNotExist(err) {
+		t.Fatalf("checker invoked before scope validation: %v", err)
+	}
+}
+
+func overlayArg(t *testing.T, physical, logical string) string {
+	t.Helper()
+	data, err := json.Marshal([]string{physical, logical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "-overlay=" + string(data)
 }

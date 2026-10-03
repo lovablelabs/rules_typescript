@@ -69,43 +69,37 @@ func TestReadsReportIsSortedOnceAndFilesOnly(t *testing.T) {
 	}
 }
 
-func TestRunfilesBesideTheBinary(t *testing.T) {
-	dir := t.TempDir()
-	writeTree(t, dir, map[string]string{
-		"launcher":          "#!/bin/sh\n",
-		"launcher.runfiles": dirMarker,
-		"other":             "#!/bin/sh\n",
-	})
-	want := filepath.Join(dir, "launcher.runfiles")
-	if got := runfilesBeside(filepath.Join(dir, "launcher")); got != want {
-		t.Errorf("runfilesBeside(launcher) = %q, want %q", got, want)
-	}
-	if got := runfilesBeside(filepath.Join(dir, "other")); got != "" {
-		t.Errorf("runfilesBeside(other) = %q, want none", got)
-	}
-	if got := runfilesBeside("launcher"); got != "" {
-		t.Errorf("runfilesBeside(a bare name) = %q, want none", got)
-	}
-}
-
-// readsFixture is vitestFixture's layout as a runfiles tree, so the resolver
-// has a directory the way `bazel test` gives it one.
-func readsFixture(t *testing.T) (*Resolver, map[string]string) {
+func readsFixture(t *testing.T, mode string) (*Resolver, map[string]string) {
 	t.Helper()
 	list := "_main/tests/app/a.test.js\n"
-	_, real := fakeRunfiles(t, map[string]string{
+	r, real := fakeRunfiles(t, map[string]string{
 		"_main/tests/app/_app.vitest/config.mjs":         "x",
 		"_main/tests/app/app_test_files.txt":             list,
-		"_main/tests/app/a.test.js":                      "x",
+		"_main/tests/app/a.test.js":                      "declared test module",
 		"_main/tests/app/node_modules":                   dirMarker,
 		"_main/tests/app/node_modules/vitest/vitest.mjs": "x",
 		"_main/ts/private/reads_hook.cjs":                "x",
 		"+node+/bin/node":                                "#!/bin/sh\n",
 	})
-	tree := strings.TrimSuffix(real["+node+/bin/node"], "/+node+/bin/node")
-	t.Setenv("RUNFILES_MANIFEST_FILE", "")
-	t.Setenv("RUNFILES_DIR", tree)
-	r, err := newResolver(runfiles.Directory(tree))
+	var err error
+	switch mode {
+	case "directory":
+		tree := strings.TrimSuffix(real["+node+/bin/node"], "/+node+/bin/node")
+		t.Setenv("RUNFILES_MANIFEST_FILE", "")
+		t.Setenv("RUNFILES_DIR", tree)
+		r, err = newResolver(runfiles.Directory(tree))
+	case "manifest_directory":
+		manifest, readErr := os.ReadFile(runfilesEnv(r.Env(), "RUNFILES_MANIFEST_FILE"))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		program := filepath.Join(t.TempDir(), "launcher")
+		writeTree(t, program+".runfiles", map[string]string{"MANIFEST": string(manifest)})
+		args := os.Args
+		t.Cleanup(func() { os.Args = args })
+		os.Args = []string{program}
+		r, err = resolverForExecutable(program)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,38 +112,49 @@ func readsConfig() *Config {
 	return cfg
 }
 
-func TestPlanVitestReadsInstallsTheHookBelowTheRunner(t *testing.T) {
-	r, real := readsFixture(t)
-	ws := t.TempDir()
-	t.Setenv("BUILD_WORKSPACE_DIRECTORY", ws)
-	t.Setenv("NODE_OPTIONS", "--inspect")
-	plan, err := MakePlan(readsConfig(), r, []string{ReadsFlag}, Shard{Total: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plan.Cleanup()
-	env := plan.EnvOverrides
-	hook := "--inspect --require " + real["_main/ts/private/reads_hook.cjs"]
-	if env["NODE_OPTIONS"] != hook {
-		t.Errorf("NODE_OPTIONS = %q, want %q", env["NODE_OPTIONS"], hook)
-	}
-	if root, _ := filepath.EvalSymlinks(ws); env["TS_TEST_READS_ROOT"] != root {
-		t.Errorf("TS_TEST_READS_ROOT = %q, want %q", env["TS_TEST_READS_ROOT"], root)
-	}
-	if tree := env["TS_TEST_READS_RUNFILES"]; tree != r.Dir() {
-		t.Errorf("TS_TEST_READS_RUNFILES = %q, want %q", tree, r.Dir())
-	}
-	if _, err := os.Stat(env["TS_TEST_READS_FILE"]); err != nil {
-		t.Errorf("TS_TEST_READS_FILE %q: %v", env["TS_TEST_READS_FILE"], err)
-	}
-	if !plan.Supervise.StdoutToStderr {
-		t.Error("vitest's stdout has to leave stdout to the report")
-	}
-	if want := filepath.Join(r.Dir(), "_main/tests/app"); plan.Dir != want {
-		t.Errorf("dir = %q, want the config's package %q", plan.Dir, want)
-	}
-	if plan.PostRun == nil {
-		t.Fatal("no PostRun: nothing would print the report")
+func TestPlanVitestReadsCannotLoseDeclaredFiles(t *testing.T) {
+	for _, mode := range []string{"directory", "manifest", "manifest_directory"} {
+		t.Run(mode, func(t *testing.T) {
+			r, _ := readsFixture(t, mode)
+			ws := t.TempDir()
+			t.Setenv("BUILD_WORKSPACE_DIRECTORY", ws)
+			t.Setenv("NODE_OPTIONS", "--inspect")
+			cfg := readsConfig()
+			cfg.RuntimeModules = []string{"_main/tests/app/a.test.js"}
+			plan, err := MakePlan(cfg, r, []string{ReadsFlag}, Shard{Total: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer plan.Cleanup()
+			env := plan.EnvOverrides
+			tree := treeRoot(plan)
+			module := filepath.Join(tree, cfg.RuntimeModules[0])
+			if data, err := os.ReadFile(module); err != nil || string(data) != "declared test module" {
+				t.Fatalf("staged module = %q, %v; want the declared File", data, err)
+			}
+			hook := "--inspect --require " + filepath.Join(tree, "_main/ts/private/reads_hook.cjs")
+			if env["NODE_OPTIONS"] != hook {
+				t.Errorf("NODE_OPTIONS = %q, want %q", env["NODE_OPTIONS"], hook)
+			}
+			if root, _ := filepath.EvalSymlinks(ws); env["TS_TEST_READS_ROOT"] != root {
+				t.Errorf("TS_TEST_READS_ROOT = %q, want %q", env["TS_TEST_READS_ROOT"], root)
+			}
+			if got := env["TS_TEST_READS_RUNFILES"]; got != tree {
+				t.Errorf("TS_TEST_READS_RUNFILES = %q, want %q", got, tree)
+			}
+			if _, err := os.Stat(env["TS_TEST_READS_FILE"]); err != nil {
+				t.Errorf("TS_TEST_READS_FILE %q: %v", env["TS_TEST_READS_FILE"], err)
+			}
+			if !plan.Supervise.StdoutToStderr {
+				t.Error("vitest's stdout has to leave stdout to the report")
+			}
+			if want := filepath.Join(tree, "_main/tests/app"); plan.Dir != want {
+				t.Errorf("dir = %q, want the config's package %q", plan.Dir, want)
+			}
+			if plan.PostRun == nil {
+				t.Fatal("no PostRun: nothing would print the report")
+			}
+		})
 	}
 }
 
@@ -181,7 +186,7 @@ func TestReadsReportPrintsTheRecordedFiles(t *testing.T) {
 }
 
 func TestPlanVitestReadsNeedsBazelRun(t *testing.T) {
-	r, _ := readsFixture(t)
+	r, _ := readsFixture(t, "directory")
 	t.Setenv("BUILD_WORKSPACE_DIRECTORY", "")
 	_, err := MakePlan(readsConfig(), r, []string{ReadsFlag}, Shard{Total: 1})
 	if err == nil || !strings.Contains(err.Error(), "bazel run") {
@@ -191,13 +196,14 @@ func TestPlanVitestReadsNeedsBazelRun(t *testing.T) {
 
 // The hook is in every vitest test's config; only the flag installs it.
 func TestPlanVitestLeavesTheReadsHookOutWithoutTheFlag(t *testing.T) {
-	r, real := readsFixture(t)
+	r, _ := readsFixture(t, "directory")
 	t.Setenv("NODE_OPTIONS", "")
 	plan, err := MakePlan(readsConfig(), r, nil, Shard{Total: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	hook := real["_main/ts/private/reads_hook.cjs"]
+	defer plan.Cleanup()
+	hook := filepath.Join(treeRoot(plan), "_main/ts/private/reads_hook.cjs")
 	options := plan.EnvOverrides["NODE_OPTIONS"]
 	if strings.Contains(options, hook) {
 		t.Errorf("NODE_OPTIONS = %q, want no hook without %s", options,
@@ -207,7 +213,7 @@ func TestPlanVitestLeavesTheReadsHookOutWithoutTheFlag(t *testing.T) {
 
 // The launcher consumes --reads; every other argument is vitest's.
 func TestPlanVitestHandsTheOtherArgumentsToVitest(t *testing.T) {
-	r, _ := readsFixture(t)
+	r, _ := readsFixture(t, "directory")
 	t.Setenv("BUILD_WORKSPACE_DIRECTORY", t.TempDir())
 	args := []string{ReadsFlag, "--reporter=dot"}
 	plan, err := MakePlan(readsConfig(), r, args, Shard{Total: 1})
@@ -226,7 +232,7 @@ func TestPlanVitestHandsTheOtherArgumentsToVitest(t *testing.T) {
 func TestPlanVitestReadsReleasesUnownedFiles(t *testing.T) {
 	for _, outcome := range []string{"missing list", "missing Vitest", "invalid hook", "empty shard", "success"} {
 		t.Run(outcome, func(t *testing.T) {
-			r, _ := readsFixture(t)
+			r, _ := readsFixture(t, "directory")
 			t.Setenv("BUILD_WORKSPACE_DIRECTORY", t.TempDir())
 			cfg := readsConfig()
 			shard := Shard{Total: 1}

@@ -37,7 +37,12 @@ exists only under `--experimental-test-module-mocks`.
 # gazelle:exclude tsconfig.compile.json
 # gazelle:exclude tsconfig.ts_extensions.json
 
-load("//ts:defs.bzl", "ts_compile", "ts_test")
+load("//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_test")
+
+exports_files(
+    ["collect.test.ts"],
+    visibility = ["//tests/node_test/analysis:__pkg__"],
+)
 
 ts_compile(
     name = "counter",
@@ -98,10 +103,26 @@ ts_test(
     deps = ["@npm//:vitest"],
 )
 
+ts_codegen(
+    name = "fixture_tree",
+    srcs = ["fixtures/note.txt"],
+    args = [
+        "stage",
+        "-out={out}",
+        "{srcs}",
+        "note.txt",
+    ],
+    generator = "//ts/tools/tsaction:tsaction",
+    out_dir = "fixtures.json",
+)
+
 ts_test(
     name = "runfiles_layout_test",
     srcs = ["runfiles_layout.test.ts"],
-    data = ["fixtures/note.txt"],
+    data = [
+        "fixtures/note.txt",
+        ":fixture_tree",
+    ],
     emit = True,  # keep
     node_modules = "//tests/npm:node_modules",
     runner = "//ts/runners:node_test",

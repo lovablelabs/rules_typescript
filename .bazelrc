@@ -13,7 +13,7 @@ build --output_groups=+_validation
 # Feed the tsserver hook from every target, not just the ones a rule can name.
 # The aspect propagates along dependency edges that already exist and creates
 # none, so it reaches package-private targets with no visibility grant, and its
-# `ide_fragments` group writes one .tsconfig-fragment.json per target reached.
+# `ide_fragments` group forwards each compiler package owner's fragment.
 # `+group` is additive, so this composes with the line above and with any
 # --output_groups a command line adds. Drop both lines to opt out: the hook
 # falls back to .bazel/tsserver-hook-data.json alone.

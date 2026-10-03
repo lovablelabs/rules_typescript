@@ -1,6 +1,7 @@
 package typescript
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/bazel-gazelle/walk"
 
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
@@ -30,24 +32,29 @@ const (
 var wranglerLiteral = regexp.MustCompile(
 	"[\"'`]([^\"'`]*wrangler[\\w.-]*\\.(?:jsonc|json|toml))[\"'`]")
 
-// wranglerConfigOf is the wrangler config the vitest config at cfg names in a
-// literal, repo-relative; "" and one line for none, two, or one outside cfg's.
-func (s *programStore) wranglerConfigOf(repoRoot, cfg string) string {
+func (s *programStore) wranglerConfigOf(c *config.Config, cfg string) (string, error) {
+	if s.generatedFile(cfg, true) {
+		return "", nil
+	}
 	if file, done := s.wranglerConfigs[cfg]; done {
-		return file
+		return file, nil
 	}
 	file := ""
-	switch names := wranglerLiterals(filepath.Join(repoRoot, cfg)); {
+	switch names := wranglerLiterals(filepath.Join(c.RepoRoot, cfg)); {
 	case len(names) == 0:
 	case len(names) > 1:
 		log.Printf("typescript: %s names %d wrangler configs (%s), so nothing "+
 			"is staged as wrangler_config", cfg, len(names),
 			strings.Join(names, ", "))
 	default:
-		file = s.wranglerConfigIn(repoRoot, cfg, names[0])
+		var err error
+		file, err = s.wranglerConfigIn(c, cfg, names[0])
+		if err != nil {
+			return "", err
+		}
 	}
 	s.wranglerConfigs[cfg] = file
-	return file
+	return file, nil
 }
 
 // wranglerLiterals is every distinct wrangler config the file names, each as
@@ -68,35 +75,65 @@ func wranglerLiterals(file string) []string {
 	return out
 }
 
-// The named file when it is in the config's package and on disk.
-func (s *programStore) wranglerConfigIn(repoRoot, cfg, literal string) string {
+func (s *programStore) observeWranglerConfig(c *config.Config, cfg string) {
+	if s.generatedFile(cfg, true) {
+		return
+	}
+	names := wranglerLiterals(filepath.Join(c.RepoRoot, cfg))
+	if len(names) == 1 {
+		file := path.Join(parentDir(cfg), names[0])
+		if firstParty(file) {
+			s.observeBuild(parentDir(file), walk.GetDirInfo)
+		}
+	}
+}
+
+func (s *programStore) wranglerConfigIn(c *config.Config, cfg, literal string) (string, error) {
 	dir := parentDir(cfg)
 	file := path.Join(dir, literal)
 	if !firstParty(file) || !dirIsAncestorOf(dir, file) ||
 		s.nearestPackage(parentDir(file)) != dir {
 		log.Printf("typescript: %s names %s, which is not in %s, so nothing is "+
 			"staged as wrangler_config", cfg, literal, orRepoRoot(dir))
-		return ""
+		return "", nil
 	}
-	st, err := os.Stat(filepath.Join(repoRoot, filepath.FromSlash(file)))
-	if err != nil || st.IsDir() {
-		log.Printf("typescript: %s names %s, which is not there, so nothing is "+
+	switch s.inputIdentity(c, s.index, file) {
+	case unknownInput:
+		return "", s.incompleteOutput(file)
+	case generatedInput:
+		if producer, _ := s.outputProducer(file); producer == nil {
+			return "", fmt.Errorf("typescript: %s names %s, which has no individual output File; "+
+				"declare a scalar output to stage it as wrangler_config", cfg, file)
+		}
+	case unavailableInput:
+		log.Printf("typescript: %s names %s, which is not there or is excluded, so nothing is "+
 			"staged as wrangler_config", cfg, file)
-		return ""
+		return "", nil
 	}
-	return file
+	return file, nil
 }
 
 // wranglerConfigRule is the filegroup over the wrangler config the exported
 // vitest config at cfg names; nil when it names none.
 func wranglerConfigRule(args language.GenerateArgs, tc *tsConfig,
 	cfg string) *rule.Rule {
-	file := tc.programs.wranglerConfigOf(args.Config.RepoRoot, cfg)
-	if file == "" {
-		return nil
-	}
 	r := rule.NewRule("filegroup", wranglerConfigTargetName)
-	r.SetAttr("srcs", packageSrcs(args, []string{file}))
+	if kept := existingRule(args, "filegroup", wranglerConfigTargetName); kept != nil &&
+		(kept.ShouldKeep() || attrKept(kept, "srcs")) {
+		if srcs := kept.Attr("srcs"); srcs != nil {
+			r.SetAttr("srcs", srcs)
+		}
+	} else {
+		tc.programs.observeWranglerConfig(args.Config, cfg)
+		file, err := tc.programs.wranglerConfigOf(args.Config, cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if file == "" {
+			return nil
+		}
+		r.SetAttr("srcs", []string{wranglerConfigLabel(tc, file, cfg, args.Rel)})
+	}
 	r.SetAttr("visibility", []string{"//visibility:public"})
 	return r
 }
@@ -116,8 +153,21 @@ func workersPoolAttrs(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
 	if !importsWorkersPool(edges) {
 		return ""
 	}
-	if file := tc.programs.wranglerConfigOf(c.RepoRoot, cfg); file != "" {
-		r.SetAttr("wrangler_config", wranglerConfigLabel(file, cfg, from.Pkg))
+	effective := tc.programs.semanticRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name))
+	if effective == nil {
+		effective = r
+	}
+	if effective.ShouldKeep() {
+		return ""
+	}
+	if !attrKept(effective, "wrangler_config") {
+		file, err := tc.programs.wranglerConfigOf(c, cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if file != "" {
+			r.SetAttr("wrangler_config", wranglerConfigLabel(tc, file, cfg, from.Pkg))
+		}
 	}
 	available := false
 	if tc.lock != nil {
@@ -134,9 +184,18 @@ func workersPoolAttrs(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
 }
 
 // The file by name from the config's own package, else the owner's filegroup.
-func wranglerConfigLabel(file, cfg, pkg string) string {
+func wranglerConfigLabel(tc *tsConfig, file, cfg, pkg string) string {
 	if dir := parentDir(cfg); dir != pkg {
 		return "//" + dir + ":" + wranglerConfigTargetName
 	}
-	return strings.TrimPrefix(file, pkg+"/")
+	owner := configSrcPackage(tc, file, pkg)
+	name := strings.TrimPrefix(file, owner+"/")
+	if owner != pkg {
+		return "//" + owner + ":" + name
+	}
+	if source, ok := srcLabel(name); ok {
+		return source
+	}
+	log.Fatalf("typescript: %s names %s, which cannot be a Bazel file label; rename the Wrangler config", cfg, file)
+	return ""
 }

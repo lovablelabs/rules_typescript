@@ -14,10 +14,10 @@ ts_compile(
     name = "member",
     srcs = [
         "jsx-runtime.ts",
-        "package.json",
         "view.tsx",
     ],
     emit = True,  # keep
+    package_scopes = [":package.json"],
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
 )

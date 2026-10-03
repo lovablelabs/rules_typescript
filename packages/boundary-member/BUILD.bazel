@@ -5,11 +5,9 @@ load("@rules_typescript//ts:defs.bzl", "ts_compile", "ts_config")
 
 ts_compile(
     name = "boundary-member",
-    srcs = [
-        "package.json",
-        "src/index.ts",
-    ],
+    srcs = ["src/index.ts"],
     emit = True,  # keep
+    package_scopes = [":package.json"],
     tsconfig = ":tsconfig",
     visibility = ["//visibility:public"],
 )

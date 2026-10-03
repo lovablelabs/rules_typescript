@@ -1,0 +1,18 @@
+load("//ts:defs.bzl", "ts_test")
+
+# Failed at run time in gazelle_roundtrip_roots_test: "#sourceLeaf" kept naming leaf.ts beside the moved helper.
+ts_test(
+    name = "imported_test",
+    srcs = [
+        "imported.test.ts",
+        "//tests/vitest/ancestor_scope/roots/imports:helper.ts",  # keep
+    ],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    package_scopes = ["//tests/vitest/ancestor_scope/roots/imports:package.json"],
+    deps = [
+        "//tests/vitest/ancestor_scope:scope",
+        "//tests/vitest/ancestor_scope/roots/imports:canonical",
+        "@npm//:vitest",
+    ],
+)

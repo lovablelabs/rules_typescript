@@ -1,0 +1,12 @@
+filegroup(
+    name = "sources",
+    testonly = True,
+    srcs = glob([
+        "*.tla",
+        "*.cfg",
+    ]) + [
+        "producer_suite.json",
+        "suite.json",
+    ],
+    visibility = ["//visibility:public"],
+)

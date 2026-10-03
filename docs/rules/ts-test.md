@@ -28,7 +28,9 @@ the compiled files.
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `srcs` | `label_list` | required | The test files, as `ts_compile`'s `srcs`, with every other file of the package -- a `.snap`, a fixture -- and a file of another package the tests import by relative path, exported where it lives. The TypeScript ones are in the runfiles at their source paths too; see [Files at Run Time](#files-at-run-time) |
+| `srcs` | `label_list` | `[]` | The test files, as `ts_compile`'s `srcs`, with every other file of the package -- a `.snap`, a fixture -- and a file of another package the tests import by relative path, exported where it lives. The TypeScript ones are in the runfiles at their source paths too; see [Files at Run Time](#files-at-run-time) |
+| `test_srcs` | `label_list` | `[]` | Execution roots selected from `srcs`, before sharding. Empty or omitted uses all executable `srcs`. A nonempty selection must name files in `srcs` and select at least one executable input. Supporting files remain compiler and runtime inputs. |
+| `package_scopes` | `label_list` | `[]` | Package.json metadata kept at its original compiler identity, with runtime placement derived by the shared `ts_compile` constructor. These are not execution roots. |
 | `emit` | `bool` | `False` | Vitest runs TypeScript sources directly while tsgo validation remains enabled. Set `True` for JavaScript-only runners. See [source-only programs](ts-compile.md#source-only-programs). |
 | `deps` | `label_list` | `[]` | `ts_compile` and `@npm//` targets the tests import. A dep under the test's `tsconfig` is checked from its sources ([The Test's Program](#the-tests-program)); a `ts_compile` dep's data srcs are in the runfiles beside its `.js`, and a dep in the test's package has its sources there too |
 | `tsconfig` | `label` | `None` | The test program's tsconfig, as on `ts_compile`: the package's own `tsconfig.json` or a `ts_config` target, the file the deps that join the program share; under vitest its `paths` resolve at run time. See [The Test's Program](#the-tests-program) and [The Test's tsconfig](#the-tests-tsconfig) |
@@ -38,7 +40,7 @@ the compiled files.
 | `args` | `string_list` | `[]` | The runner's command-line flags: node's under the node:test runner, vitest's under the vitest runner; `bazel test --test_arg` appends to them. See [The node:test Runner](#the-nodetest-runner) |
 | `config` | `label` | `None` | The vitest config file (`.ts`/`.mts`/`.cts`/`.js`/`.mjs`/`.cjs`), merged over the generated config's Bazel layer. Every vitest setting is the file's. See [A Config File](#a-config-file) |
 | `config_srcs` | `label_list` | `[]` | The modules `config` imports relatively, and theirs, each at its own path in the runfiles; Gazelle writes it from the config's listing. See [A Config File](#a-config-file) |
-| `data` | `label_list` | `[]` | Extra runfiles: fixtures, anything read at run time |
+| `data` | `label_list` | `[]` | Extra runfiles: fixtures, anything read at run time. `TsInfo` targets retain their declared runtime closure and npm bindings without joining the compiler program or test entry roots |
 | `wrangler_config` | `label` | `None` | The wrangler config a Workers-pool `config` names through `wrangler.configPath`. See [A Workers Pool](#a-workers-pool) |
 | `coverage_provider` | `string` | `""` | `test.coverage.provider`: `"v8"` (vitest's default) or `"istanbul"`. See [Coverage](#coverage) |
 | `size`, `timeout`, `tags`, `visibility` | | | Bazel's test attributes |
@@ -46,10 +48,25 @@ the compiled files.
 `config`, `config_srcs`, `coverage_provider` and `wrangler_config` are the
 vitest runner's and an analysis error under the node:test runner.
 
+Gazelle writes `test_srcs` when an automatically discovered test's closure adds
+labels outside its original roots. Growing that helper closure does
+not add standalone test entries or move tests between shards. Source identities
+select their emitted files when `emit = True`; helpers remain available on every
+shard. Declaration and data files in a selected label do not become entries.
+A selected producer label selects every executable file it supplies; use its
+individual output labels to select a subset.
+
+An explicit node:test target without `test_srcs` still executes every executable
+`srcs` entry, including filenames without `.test` or `.spec`. Vitest keeps its
+existing test/spec selection. For a manual Vitest `srcs` list containing helpers,
+set `test_srcs` to the tests before using sharding; automatic discovery of that
+manual list's execution roots is outside this change.
+
 The vitest runner rejects command-line `--changed` and `--changed=<ref>`:
 Bazel runfiles have no Git source history, so Vitest can otherwise report
 success without running tests. Let Bazel reuse unchanged test targets, or select
-compiled files with `--test_arg=path/to/example.test.js`; name filters such as
+source paths with `--test_arg=path/to/example.test.ts`, including when
+`emit = True`; name filters such as
 `--test_arg=-t --test_arg='case name'` also work. This guard covers CLI flags,
 not `test.changed` in a Vitest config.
 
@@ -67,45 +84,49 @@ const sdkSource = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
 
 `import.meta.url` -- and `__dirname`, in a CommonJS test -- is the runfiles
 path on either runner (the vitest layer's module ids, [The Generated vitest
-Config](#the-generated-vitest-config); node's `--preserve-symlinks-main` and
+Config](#the-generated-vitest-config); node's staged regular modules and
 the runner's resolve hook), so `./index.ts`
 beside the compiled test is the same-package `ts_compile`'s `src/index.ts`.
 A dep's sources from another package are not in the tree: a file a test reads
 across a package boundary is a `data` entry.
 `//tests/vitest/reads_own_source` is the example.
 
+Native Node tests use a declared build output for their runtime layout, including with `--noenable_runfiles`. First-party module paths, relative data reads and package scopes retain their admitted coordinates; aliases reach one internal authority for each selected npm store. A directory entry and an explicit child entry must select the same input object; conflicting mappings fail before Node starts. The view cannot add a missing `node_modules` through an opaque workspace alias. Declare it in that directory or publish individual Files. The native child's standard runfiles lookup uses this same view and Bazel's generated repository mapping, so loading a module through runfiles does not create a second instance. Package the launcher's runfiles with its generated config and complete runtime directory, retaining relative links; a manifest can relocate that group. See [runtime input lifetime](providers.md#runtime-input-lifetime).
+
 A file a test imports across a package boundary is a src: `exports_files`
 where the file lives, the label in `srcs` under `# keep`, which a Gazelle run
 keeps ([Import Resolution](../gazelle/overview.md#import-resolution)). It
-compiles into the test's output tree at its workspace path, and the runfiles
-hold the compiled module at the src's own path too -- a symlink, as a dep's ES
-twin is held at its `.js`'s path -- where the relative import from a compiled
-sibling reaches it, and that path is the module's id under vitest ([The
-Generated vitest Config](#the-generated-vitest-config)); its `.ts` is in the
-runfiles as every src's is. The test's program then hangs off two roots, which
-its check and its emit take as they come ([The Test's
-Program](#the-tests-program)); a CommonJS-shaped program under node:test is
-tsgo's one emit and keeps one root ([The Module
-Format](ts-compile.md#the-module-format)).
+compiles into the test's output tree in the [shared source
+layout](ts-compile.md#shared-source-layout): the test package and the src
+share one common logical root, and each keeps its relative path below it. A
+relative import from a compiled sibling reaches the src at that path, and that
+path is the module's id under vitest ([The Generated vitest
+Config](#the-generated-vitest-config)); its `.ts` is in the runfiles as every
+src's is. A CommonJS-shaped program under node:test is tsgo's one emit and
+keeps one root ([The Module Format](ts-compile.md#the-module-format)).
 `//tests/vitest/cross_package` is the example.
 
-The package's `package.json` is in the tree as written: `ts_compile` stages
-the src unchanged and writes the manifest as built beside it as
-`<name>.package.json`, which the program root and the store tree read and the
-runfiles do not hold ([Sources](ts-compile.md#sources)). A test that reads its
-manifest as data reads what the checkout has, and the package's own name -- a
-self-reference, resolved through the nearest `package.json`'s `name` and
-`exports` -- lands on the source the `exports` name: under vitest the source
-is in the runfiles and vite transforms it, as the checkout's vitest does;
-under node:test the runner's hook maps it to the compiled sibling ([The
-node:test Runner](#the-nodetest-runner)). `//tests/vitest/own_manifest` and
-`//tests/node_test/self_reference` are the examples.
+The shipped runners start an explicitly selected foreign test at the same source-relative runfiles path as an imported helper. Runtime package-scope admission and scope staging use that placement too, so a root manifest supplied by a dependency governs both local and foreign test modules. A custom JavaScript-only runner that launches compiler-output Files directly must also satisfy package-scope admission at those output paths.
+
+A `package.json` declared in `package_scopes` supplies a runtime projection:
+its declared module targets follow their published filenames. An explicit
+JSON module in `srcs` retains its authored contents; when used as a runtime
+scope, it must still agree with the declared runtime module mappings. The npm
+publication manifest serves dependent compiler overlays and the npm store.
+See [Compiler inputs and emitted
+layout](ts-compile.md#compiler-inputs-and-emitted-layout) for these roles.
+
+The package's own name -- a self-reference -- resolves through the nearest
+runtime `package.json`'s `name` and `exports`. The [node:test
+runner](#the-nodetest-runner) maps source targets to their compiled siblings.
+`//tests/vitest/own_manifest` and `//tests/node_test/self_reference` are the
+examples.
 
 vitest runs from the `config`'s package in the runfiles, the test's own with no
 config -- the directory `pnpm run test` runs from -- so `process.cwd()` names it
 and `join(process.cwd(), "fixtures/x.txt")` reads the package's file. What
-vitest walks to collect the run is not that tree but a root of the program's
-compiled files alone ([The Generated vitest
+vitest walks to collect the run is a separate tree of selected test entries at
+their source paths ([The Generated vitest
 Config](#the-generated-vitest-config)). The
 `config` file and its `config_srcs` are regular files at their own paths in the
 runfiles, and the generated config vitest is handed is in the test's package,
@@ -126,8 +147,9 @@ member -- resolves to the compiled file ([`.ts` Specifiers](#ts-specifiers);
 under node:test, the runner's hook:
 [The node:test Runner](#the-nodetest-runner)).
 
-A bare specifier resolves through the importer chain by the runner's own
-route. Under vitest the resolver walks up from the test's runfiles path
+Both shipped runners preserve each source owner's declared npm bindings at the admitted module and package-scope paths, as [binaries do](ts-binary.md#without-a-bundler). This includes relocated source TypeScript and an ES twin selected in place of a CommonJS output. Conflicting bindings at one directory or occupied projection destinations fail before test execution; erased imports do not remove declared bindings.
+
+Other bare specifiers resolve through the importer chain by the runner's own route. Under vitest the resolver walks up from the test's runfiles path
 through each importer's `node_modules` to the lockfile's root importer's;
 where that walk meets none before the workspace's root, the launcher links the
 chain's root in there. Under node:test the hook resolves it from the chain's
@@ -167,9 +189,10 @@ The test's program emits no declarations: nothing reads a test's `.d.ts`, so
 `declarations` output group, under either value of `--//ts:declarations`, and
 under `oxc` its check sets no `isolatedDeclarations`, the rule of an emit it
 does not make. `TsgoCheck` is the program's one tsgo action, and `TsEmit` runs
-oxc once per root its srcs hang off, so the one-root rule of the declaration
-emit does not judge a test ([One Root per Declaration
-Emit](ts-compile.md#one-root-per-declaration-emit)).
+oxc over its source roots using the [shared source layout](ts-compile.md#shared-source-layout).
+Test entries use the producer's exact runtime Files, including staged TypeScript
+when a source-mode test consumes a relocated dependency. Snapshot paths retain
+their original source locations.
 
 ## The Test's tsconfig
 
@@ -256,6 +279,15 @@ transform, so it runs the package's format as tsc emits it
 ([The node:test Runner](#the-nodetest-runner)). `//tests/vitest/commonjs` and
 `//tests/node_test/cjs` pin the two over one `module: commonjs` shape.
 
+An emitted custom callback using `mode = "node_test"` and the generated
+`test_files_list` runs first-party modules as regular files at their logical
+paths in the build-owned runtime view, regardless of `resolve_hook`. Native Node
+resolution retains one internal authority per selected npm store. Callbacks using
+`mode = "node"` use the same view while preserving the caller's working
+directory. Their compiler-output runfiles paths must have the declared scopes,
+even when another test alias has the required scope. Other launcher modes or a
+different test-file list also require compiler-output scope admission.
+
 ## The vitest Runner
 
 vitest is the one the first importer on the chain links, from the test's
@@ -288,24 +320,20 @@ and 4 are root-only because coverage and `resolveSnapshotPath` are vitest's
 non-project options, applied once and never merged into a project.
 
 `test.include` and `test.dir` are set after the merge, on the root and on
-every project. The include is `**/*.{test,spec}.{js,jsx,mjs,cjs}`, vitest's
-default over the extensions a compiled test file has; `dir`, the directory
-vitest walks to collect the run, is the root the launcher staged before the
-run: every compiled file of [the test's program](#the-tests-program) -- this
-shard's under `shard_count` ([Sharding](#sharding)) -- linked at its runfiles
-path under a directory of its own beneath `TEST_TMPDIR`, which
-`TS_TEST_FILES_ROOT` names. The walk is the size of the run -- web's 2,287
-files against the 48,515 entries of its runfiles tree, 46,539 of them
-symlinks each stat'ed to be followed -- and the launcher names no file. A
-config's `include` and `dir` are written for the sources, which are in the
-runfiles beside the compiled files, and are not read: through them each test
-would run twice. The run is the test-named files of the program, a config's
-`exclude` in force. A collected file's id is its runfiles path (below), so a
-relative import, `import.meta.url`, a snapshot and a coverage record are the
-tree's; a reporter names the file relative to vite's root, so by its staged
-path. `//tests/vitest/config_include` is the example, and
-`//tests/vitest/many_files` runs a thousand files, starting as its one-file
-test does.
+every project. The include matches `.test` and `.spec` filenames using the
+selected source files' extensions, such as `.ts`, `.tsx`, `.mts`, `.cts` or
+JavaScript extensions. The launcher stages this shard's selected test entries
+at their source paths in a separate discovery tree beneath `TS_TEST_FILES_ROOT`
+([Sharding](#sharding)). Each entry resolves to its selected runtime module,
+including its emitted file when `emit = True`; helpers remain available without
+becoming extra test entries.
+
+A config's `include` and `dir` are replaced by this discovery layout. Its `root`
+and `exclude` still select tests using source coordinates. Use source filenames
+for positional CLI filters too, even when the tests execute emitted JavaScript.
+After discovery, module ids follow the runfiles rules below and snapshots use
+their source locations ([Snapshots](#snapshots)).
+`//tests/vitest/config_include` and `//tests/vitest/many_files` are examples.
 
 A module's id is its runfiles path where the runfiles hold the file and its
 realpath otherwise. Vite resolves every id to its realpath -- a test file's and
@@ -371,6 +399,16 @@ is `plugins/foo.ts` beside the config, and a bare import in `plugins/foo.ts`
 walks up to the runfiles tree's `node_modules`. A config from an ancestor
 package names its modules as that package's files, `//<package>:<file>`.
 `//tests/vitest/config_srcs` is the example.
+
+Config staging cannot replace a published runtime module or change the nearest
+package scope of a JavaScript or TypeScript runtime module. Analysis rejects an
+authored config scope that would overwrite an emitted program's rewritten
+`package.json`, including when the config imports that JSON. Place the config
+in a separate package scope, or use source mode so both consumers share the
+authored scope File. A producer's unchanged scope symlink retains its exact input
+File identity, so staging that input is allowed. Copying the same published File
+remains supported. JSON modules retain exact File identity without requiring
+JavaScript package-scope equality.
 
 Gazelle writes `config` from the file plain `vitest` would read -- a
 `vitest.config.*`, else a `vite.config.*`; `//tests/vitest/vite_config` is the
@@ -626,18 +664,11 @@ ts_test(
 )
 ```
 
-The pool boots the file `main` names, relative to the configuration directory. `wrangler_config` keeps a TypeScript entry when its dependency publishes that source as a runtime input. When the dependency publishes emitted JavaScript, the configuration action maps the entry to that declared artifact. Incidental source files do not change the runtime identity. Competing source and emitted owners fail; choose one representation in the test dependencies.
+The pool boots the file `main` names, relative to the configuration directory. `wrangler_config` selects the exact live source/runtime File pair, including moved TypeScript and emitted JavaScript. A test's own `srcs` take precedence for those exact sources; joining dependency sources for checking does not recompile them. For compatibility with older providers, an unmatched entry can select its conventional emitted path from declared runtime JavaScript Files not covered by explicit pairs. A simultaneously published source entry is ambiguous and fails. Explicit pairs, including identity pairs, remain authoritative; incidental files on disk do not establish an entry mapping. Conflicting runtime owners fail; choose one representation in the test dependencies.
 
-The action uses the pool's Wrangler parser and stages its copy at the original configuration's runfiles path, including for `?raw` imports. Environment entries use the same projection. An entry with no declared runtime match remains unchanged, so unused environments need no extra dependencies; the pool reports a missing entry if that environment is selected. A configuration with no `main`, or a `.toml` file containing `#` comments, still fails the action. Other keys and supported comments survive with Wrangler's formatting.
+The action uses the pool's Wrangler parser and prepares one copy. It replaces the original configuration's runfiles binding and every live asset/module binding whose record names that exact original File, including moved `?raw` imports. Environment entries use the same entry projection. An entry with no declared runtime match remains unchanged, so unused environments need no extra dependencies; the pool reports a missing entry if that environment is selected. A configuration with no `main`, or a `.toml` file containing `#` comments, still fails the action. Other keys and supported comments survive with Wrangler's formatting.
 
-A runfiles file at the copy's path wins over it silently, with the unpatched
-`main`. The file in `data` as well is an analysis error, `is staged through
-wrangler_config; do not list it in data too.`, and a `ts_compile` dep's data
-src at that path is dropped from the runfiles. Every other data src of the deps
-is in the runfiles, which is what a wrangler `rules` module the worker imports
-needs. `//tests/workers_nested` is the example with the config at the package
-root; `//tests/workers`, with the config beside the tests and
-`main: "src/index.js"` in `data`, is the same-package one.
+The runner omits each replaced config File and validates that every binding selects the prepared File. Listing the authored config separately in `data`, `config_srcs` or transitive runfiles cannot override it; analysis reports the conflicting File. Other dependency assets retain their published identities. `//tests/workers_nested` covers a moved producer and nested test; `//tests/workers` covers a config beside the tests.
 
 What else a wrangler config names, and where each comes from under `ts_test`:
 
@@ -676,10 +707,11 @@ relative specifier and a bare one from the tree, and nothing reads the chain's
 `paths`. Under vitest an alias resolves at run time
 ([The Test's tsconfig](#the-tests-tsconfig)).
 
-The package's code runs at its runfiles paths, as under vitest: the launcher
-passes `--preserve-symlinks-main`, and the runner target's `node:module`
-resolve hook (`ts/private/node_test_hook.mjs`) resolves every specifier from a
-file outside the store, one whose path holds no `node_modules/` segment:
+The build action materializes the program's declared scalar modules, including imported JSON, as regular files at their admitted runfiles coordinates, preserving bytes and permissions. Ordinary File and store authorities are copied once; their aliases and unrelated dangling links retain link roles. The configured runtime executable uses its original runfiles. The launcher execs without a temporary application tree or cleanup helper, so parent exit does not remove inputs still read by children. Directory and manifest runfiles select the same immutable view; the manifest takes precedence when both are available. Materialization cost is not measured.
+
+The runner target's synchronous `node:module` resolve hook
+(`ts/private/node_test_hook.mjs`) resolves specifiers from files outside the
+store, whose paths hold no `node_modules/` segment:
 
 - A relative specifier resolves, at the importer's runfiles path, to the file
   the compiled tree holds for it: `./util.ts`, `.tsx`, `.mts` or `.cts` to the
@@ -691,17 +723,22 @@ file outside the store, one whose path holds no `node_modules/` segment:
 - The package's own name -- the nearest `package.json` above the test names
   it and has `exports`, node's first step for a bare specifier -- resolves as
   written from the test's own path, and the source its `exports` name to the
-  compiled sibling (`//tests/node_test/self_reference`).
-- A bare specifier resolves through the importer chain, the directories the
-  launcher puts on `NODE_PATH` nearest first, never from a `node_modules` the
-  walk up from `bazel-out` happens to meet (`:bare_import_test`): the hook
-  resolves an `import` from each importer's directory in turn, and a `require`
-  reads `NODE_PATH` itself. One ending in `.ts`, `.tsx`, `.mts` or `.cts` -- a
+  compiled sibling (`//tests/node_test/self_reference`). Private `#` imports
+  use the same rule with the nearest manifest's `imports` map. Both keep the
+  same module identity as a relative import, including in borrowed sources.
+- A bare specifier resolves from the importing module's staged path first.
+  When that lookup selects no package, the hook tries the declared importer
+  chain on `NODE_PATH` in order; `require` reads `NODE_PATH` itself. A selected
+  package's missing entry or rejected export remains an error on either route.
+  One ending in `.ts`, `.tsx`, `.mts` or `.cts` -- a
   subpath into a workspace member -- resolves to the compiled file the store
   holds for it, on either route (`//tests/npm:by_name_member_node_test`). Code
-  in the store resolves as node resolves it, at its realpath, a `.ts`
-  specifier to its compiled form, so a package's edge beside its tree answers
-  its imports as installed (`//tests/npm/multi_version:own_edge_node_test`).
+  in the store uses Node's native realpath resolution. `require`,
+  `require.resolve`, `require.cache` and `createRequire` therefore agree on
+  installed module identities and dependency edges
+  (`//tests/npm/multi_version:own_edge_node_test`). The hook also maps a `.ts`
+  specifier to its compiled form; native `require.resolve` does not apply this
+  extension fallback.
 
 The compiled tests run in the module format their tsconfig gives them
 ([The Module Format](ts-compile.md#the-module-format)). A package whose
@@ -774,12 +811,14 @@ Test sources are checked for undeclared imports like any other `ts_compile`
 sources: a module that only some dep's own deps provide fails the build with the
 label to add ([Deps have to be direct](ts-compile.md#deps-have-to-be-direct)).
 
-A `ts_compile` dep brings its store files into the runfiles: its compiled JS
-value-imports the packages it declared, and `TsInfo.npm_files` carries the
-dep's importer links and their store trees, so a test in one package runs
-production code from another without repeating its npm deps. `deps` lists
-what the test files import, each resolved through the test's own chain
-([the chain](node-modules.md#the-chain)).
+A `ts_compile` dependency contributes its importer links and store trees to
+runfiles through `TsInfo.npm_files`; the test need not repeat those npm
+dependencies. Under [node:test](#the-nodetest-runner), a first-party dependency's
+bare ESM import uses its own staged importer links, preserving its declared
+package version. The test's importer chain supplies a fallback only when the
+module's native lookup selects no package. `deps` lists what the test files
+import, each resolved through the
+test's own chain ([the chain](node-modules.md#the-chain)).
 `bazel run //:gazelle` writes the list from tsgo's listing of the package: the
 edges of the test files, the production sources and the declarations, the
 vitest config's imports, and the nearest `package.json`'s `dependencies` and

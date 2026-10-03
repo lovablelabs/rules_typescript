@@ -1,0 +1,58 @@
+load("//npm:defs.bzl", "node_modules")
+load("//tests/npm:direct_version_tests.bzl", "direct_npm_identity_test")
+load("//ts:defs.bzl", "ts_compile", "ts_dev_server", "ts_test")
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm/dev_inherited_types:scope_node_modules",
+    deps = ["//tests/npm/dev_inherited_types:scope_store_B"],
+)
+
+# keep
+ts_compile(
+    name = "entry",
+    srcs = ["entry.ts"],
+    node_modules = ":node_modules",
+    package_scopes = ["//tests/npm/dev_inherited_types:scope_imports/package.json"],
+    source_node_modules = ["//tests/npm/dev_inherited_types:scope_node_modules"],
+    deps = [
+        "//tests/npm/dev_inherited_types:scope_metadata",
+        "//tests/npm/dev_inherited_types:scope_store_A",
+    ],
+)
+
+# keep
+ts_test(
+    name = "package_import_retains_scope_store_test",
+    srcs = ["entry.ts"],
+    emit = True,
+    node_modules = ":node_modules",
+    package_scopes = ["//tests/npm/dev_inherited_types:scope_imports/package.json"],
+    runner = "//ts/runners:node_test",
+    source_node_modules = ["//tests/npm/dev_inherited_types:scope_node_modules"],
+    deps = [
+        "//tests/npm/dev_inherited_types:scope_metadata",
+        "//tests/npm/dev_inherited_types:scope_store_A",
+    ],
+)
+
+# keep
+ts_dev_server(
+    name = "dev",
+    entry_point = ":entry",
+    node_modules = ":node_modules",
+    tags = ["manual"],  # Rejected subject is reached by the analysis test.
+)
+
+direct_npm_identity_test(
+    name = "package_import_rejects_nearer_module_store_test",
+    messages = [
+        "source 'tests/npm/dev_inherited_types/scope_imports/package.json'",
+        "npm 'scope-store'",
+        "scope-store@1.0.0/node_modules/scope-store",
+        "scope-store@2.0.0/node_modules/scope-store",
+        "but app importer",
+    ],
+    target_under_test = ":dev",
+)

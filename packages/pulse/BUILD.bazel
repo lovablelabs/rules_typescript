@@ -28,9 +28,9 @@ ts_compile(
     srcs = [
         "components/controls/button/index.ts",
         "entry.ts",
-        "package.json",
         "styles/tokens/color.ts",
     ],
     emit = True,  # keep
+    package_scopes = ["package.json"],
     visibility = ["//visibility:public"],
 )
