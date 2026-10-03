@@ -1,0 +1,15 @@
+load("//npm:defs.bzl", "npm_bin")
+load("//tests/npm:node_modules_tests.bzl", "bin_entry_missing_test")
+
+# keep
+npm_bin(
+    name = "missing",
+    entry_missing = "npm_bin: entry script 'cli.js' not found in package files for target ':missing' of fixture.",
+    entry_script = "cli.js",
+    tags = ["manual"],
+)
+
+bin_entry_missing_test(
+    name = "bin_entry_missing_test",
+    target_under_test = ":missing__native_program",
+)

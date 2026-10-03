@@ -142,8 +142,9 @@ The call declares, `manual` and public:
   `node_modules/.pnpm/<key>/node_modules/<name>`, where `<key>` is
   `<name with / as +>@<version>` plus `_<peer id>` when pnpm resolved the
   package against a peer set (`NpmPackageInfo.peer_id`). Its one action,
-  `NpmStore`, copies the fetched package's files into the tree with
-  `tsaction stage`; beside the tree it declares one symlink per dependency
+  `NpmStore`, copies the fetched package directory into the tree with
+  `tsaction stage`, the directory one source artifact rather than one target
+  per file; beside the tree it declares one symlink per dependency
   edge the lockfile records, `node_modules/.pnpm/<key>/node_modules/<dep>` ->
   `../../<dep key>/node_modules/<dep>`, under the name the snapshot imports
   the dependency by, so an npm alias is a link name and not a second copy. An
@@ -269,7 +270,8 @@ interface, documented under
 | Attribute               | Type         | Default  | Description                                                                                                                                                                                                                  |
 | ----------------------- | ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `entry_script`          | `string`     | required | The bin entry's path inside the package, e.g. `vitest.mjs`                                                                                                                                                                   |
-| `package_files`         | `label_list` | `[]`     | Every file of the package, from its `ts_npm_package` target                                                                                                                                                                  |
+| `package_files`         | `label_list` | `[]`     | Every file of the package, for a target with no `store`; a generated target runs the script from its store tree                                                                                                             |
+| `entry_missing`         | `string`     | `""`     | The error `npm_import` found at fetch time when the package lacks `entry_script`, reported when the target is analysed                                                                                                      |
 | `optional_dep_packages` | `label_list` | `[]`     | Sibling package targets holding the platform-specific native binaries the script resolves at run time. The launcher links them under a `node_modules/` so `require.resolve()` finds them inside a sandbox or a runfiles tree |
 | `runtime`               | `label`      | `None`   | A JS runtime binary for this target, taking priority over the `js_runtime` toolchain                                                                                                                                         |
 

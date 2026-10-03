@@ -236,11 +236,11 @@ NpmPackageInfo = provider(
                        "the extracted package. None on a pnpm workspace " +
                        "member, which was never extracted from a tarball: " +
                        "its compile writes the manifest as built.",
-        "package_root": "string: exec-root-relative directory the files in `all_files` hang off -- where `package_dir` sits for an extracted tarball, the member's directory under bazel-bin for a workspace member.",
-        "all_files": "depset of File: every file of this package " +
-                     "(package.json, .js, .d.ts, other assets), the files " +
-                     "its store tree copies; a member's are its outputs, " +
-                     "the manifest as built in place of the src.",
+        "package_root": "string: exec-root-relative directory the files in `all_files` hang off -- the store tree for an extracted tarball, the member's directory under bazel-bin for a workspace member.",
+        "all_files": "depset of File: this package's files: the store " +
+                     "tree alone for an extracted tarball; a member's " +
+                     "outputs, the files its store tree copies, the " +
+                     "manifest as built in place of the src.",
         "transitive_deps": "depset of NpmPackageInfo: Transitive npm dependencies.",
         "store": "NpmStoreInfo: this resolution's store tree and the links " +
                  "beside it (npm/private/store.bzl), one per snapshot, in " +

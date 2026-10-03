@@ -17,7 +17,7 @@ func TestForeignPlatformPackageIsInTheGraph(t *testing.T) {
 	var pkg struct {
 		OS []string `json:"os"`
 	}
-	f := tree.FoundFile("*fsevents__2_3_3/node_modules/fsevents/package.json")
+	f := tree.FoundFile("*/.pnpm/fsevents@2.3.3/node_modules/fsevents/package.json")
 	f.JSON(&pkg)
 
 	if !slices.Equal(pkg.OS, []string{"darwin"}) {
