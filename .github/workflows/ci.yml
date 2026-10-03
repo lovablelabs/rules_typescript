@@ -381,6 +381,18 @@ jobs:
             --test_env=RULES_TS_IT_SCRATCH=/mnt/rules_ts_it 2>&1 \
             | tee "${RUNNER_TEMP}/integration.log"
 
+      # The outer log hides the nested Bazels: print each test's per-check and
+      # per-invocation timings, and the tail of any test that did not pass.
+      - name: Nested Bazel timings
+        if: ${{ !cancelled() }}
+        run: |
+          du -sh /mnt/rules_ts_it/* 2>/dev/null || true
+          find -L bazel-testlogs/tests/integration -name test.log 2>/dev/null | sort | while read -r log; do
+            echo "=== ${log#bazel-testlogs/}"
+            grep -E '^(NESTED|CHECK) ' "$log" || true
+            grep -q '^ALL PASSED' "$log" || tail -n 40 "$log"
+          done
+
       # Bazel intermittently fails to stage a store tree or a declared link
       # into the sandbox -- "[unix_jni.cc:281] <path> (No such file or directory)" for a
       # directory inside its own output base, on a different path each time. It
@@ -410,9 +422,11 @@ jobs:
 
       # A timed-out cold build still produces valid content-addressed outputs;
       # saving them prevents the next run from repeating the same cold timeout.
+      # PRs restore main's: a GB-sized copy per PR would evict it under the 10 GB cap (#252).
       - uses: actions/cache/save@v6
         if: >-
-          ${{ !cancelled() && steps.nested-cache.outcome == 'success' &&
+          ${{ !cancelled() && github.event_name == 'push' &&
+              steps.nested-cache.outcome == 'success' &&
               steps.nested-cache.outputs.cache-hit != 'true' }}
         with:
           path: |

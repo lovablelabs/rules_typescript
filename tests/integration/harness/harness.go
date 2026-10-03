@@ -3,6 +3,7 @@
 package harness
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -47,6 +48,9 @@ type IT struct {
 	bazelrc    string
 	bazelBin   string
 	stops      []func()
+
+	nestedCount int
+	nestedTime  time.Duration
 }
 
 type Log struct {
@@ -65,7 +69,10 @@ func Run(cfg Config, body func(*IT)) {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 		os.Exit(1)
 	}
+	started := time.Now()
 	code := invoke(it, body)
+	fmt.Printf("CHECK %6.1fs total (%d nested bazel, %.1fs)\n", time.Since(started).Seconds(),
+		it.nestedCount, it.nestedTime.Seconds())
 	it.cleanup()
 	if code == 0 {
 		fmt.Println("ALL PASSED")
@@ -410,8 +417,10 @@ func nestedEnv() []string {
 	return append(env, "BAZELISK_HOME="+bazeliskHome())
 }
 
+// No user or system rc: setup-bazel's ~/.bazelrc `build --disk_cache` outranks
+// the `common` one above and sent every nested action to a cache CI never saves.
 func (it *IT) startup() []string {
-	opts := []string{"--output_base=" + it.OutputBase}
+	opts := []string{"--nosystem_rc", "--nohome_rc", "--output_base=" + it.OutputBase}
 	if it.bazelrc != "" {
 		opts = append(opts, "--bazelrc="+it.bazelrc)
 	}
@@ -440,12 +449,71 @@ func (it *IT) command(args []string) *exec.Cmd {
 	return cmd
 }
 
+// Bazel's own summary of where each nested invocation's time went.
+var nestedSummaryLine = regexp.MustCompile(`^INFO: (\d+ process(es)?: .*|Analyzed .*|Elapsed time: .*)$`)
+
+type summaryWriter struct {
+	out     io.Writer
+	partial []byte
+	found   []string
+}
+
+func (w *summaryWriter) Write(p []byte) (int, error) {
+	w.partial = append(w.partial, p...)
+	for {
+		i := bytes.IndexByte(w.partial, '\n')
+		if i < 0 {
+			break
+		}
+		line := strings.TrimRight(string(w.partial[:i]), "\r")
+		if m := nestedSummaryLine.FindStringSubmatch(line); m != nil {
+			w.found = append(w.found, m[1])
+		}
+		w.partial = w.partial[i+1:]
+	}
+	return w.out.Write(p)
+}
+
+// run executes a nested Bazel and prints one NESTED line with its wall time and
+// cache summary, so a slow check shows which invocation and which actions cost it.
+func (it *IT) run(cmd *exec.Cmd, args []string) error {
+	stderr := cmd.Stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	summary := &summaryWriter{out: stderr}
+	// One writer for both keeps exec from copying into a shared builder from two goroutines.
+	if cmd.Stdout == cmd.Stderr {
+		cmd.Stdout = summary
+	}
+	cmd.Stderr = summary
+	started := time.Now()
+	err := cmd.Run()
+	elapsed := time.Since(started)
+	it.nestedCount++
+	it.nestedTime += elapsed
+	verb := strings.Join(args, " ")
+	if len(verb) > 120 {
+		verb = verb[:120] + "..."
+	}
+	fmt.Printf("NESTED %6.1fs bazel %s | %s\n", elapsed.Seconds(), verb, strings.Join(summary.found, " | "))
+	return err
+}
+
+// Check runs one named check and prints its wall time and nested Bazel share.
+func (it *IT) Check(name string, body func()) {
+	started, count, nested := time.Now(), it.nestedCount, it.nestedTime
+	body()
+	fmt.Printf("CHECK %6.1fs %s (%d nested bazel, %.1fs)\n", time.Since(started).Seconds(), name,
+		it.nestedCount-count, (it.nestedTime - nested).Seconds())
+}
+
 func (it *IT) Bazel(args ...string) error {
 	fmt.Printf("INFO: bazel %s\n", strings.Join(args, " "))
 	cmd := it.command(args)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return it.run(cmd, args)
 }
 
 func (it *IT) MustBazel(args ...string) {
@@ -460,7 +528,7 @@ func (it *IT) BazelStdout(args ...string) string {
 	out := &strings.Builder{}
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := it.run(cmd, args); err != nil {
 		it.Fail("bazel %s exited non-zero: %v", strings.Join(args, " "), err)
 	}
 	return out.String()
@@ -472,7 +540,7 @@ func (it *IT) BazelLog(logName string, args ...string) (*Log, error) {
 	out := &strings.Builder{}
 	cmd.Stdout = out
 	cmd.Stderr = out
-	err := cmd.Run()
+	err := it.run(cmd, args)
 	log := &Log{Path: it.Scratch(logName), Text: out.String()}
 	if writeErr := os.WriteFile(log.Path, []byte(log.Text), 0o644); writeErr != nil {
 		it.Fail("cannot write %s: %v", log.Path, writeErr)
@@ -494,7 +562,7 @@ func (it *IT) Install() {
 		"npm_config_state_dir="+filepath.Join(store, "state"))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := it.run(cmd, args); err != nil {
 		it.Fail("pnpm install exited non-zero: %v", err)
 	}
 	it.RequireFile(it.Path("node_modules", ".modules.yaml"),
