@@ -76,7 +76,6 @@ exports_files(
         name = "scope_store_" + identity,
         package_name = "scope-store",
         package_dir = ":scope_store_" + identity + "_manifest",
-        package_files = [":scope_store_" + identity + "_files"],
         package_version = version,
         store = ":node_modules/.pnpm/scope-store@" + version + "/node_modules/scope-store",
         visibility = ["//tests/npm/dev_inherited_types/scope_imports/nested:__pkg__"],

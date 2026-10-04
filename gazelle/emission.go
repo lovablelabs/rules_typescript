@@ -34,6 +34,8 @@ type emissionGraph struct {
 	listEpoch int
 	// Bumped whenever a stored owner or BUILD file that could declare outputs changes.
 	outputsGeneration int
+	// Bumped at every rule store except a resolved TypeScript rule stored again unchanged.
+	rulesGeneration int
 }
 
 func (s *programStore) ruleListsMayChange() {
@@ -50,6 +52,19 @@ type registeredBuild struct {
 }
 
 func (g *emissionGraph) setRule(key string, r *rule.Rule) {
+	g.rulesGeneration++
+	g.storeRule(key, r)
+}
+
+// Resolve edits only resolve attributes, which no proto provider reads.
+func (g *emissionGraph) setResolvedRule(key string, r *rule.Rule) {
+	if g.rules[key] != r {
+		g.rulesGeneration++
+	}
+	g.storeRule(key, r)
+}
+
+func (g *emissionGraph) storeRule(key string, r *rule.Rule) {
 	if declaresOutputs(g.rules[key]) || declaresOutputs(r) {
 		g.outputsGeneration++
 	}
@@ -61,6 +76,7 @@ func (g *emissionGraph) deleteRule(key string) {
 	if declaresOutputs(g.rules[key]) {
 		g.outputsGeneration++
 	}
+	g.rulesGeneration++
 	delete(g.rules, key)
 	g.bump(key)
 }

@@ -930,14 +930,25 @@ type ruleImports struct {
 	reportSrcDrops func(*rule.Rule)
 }
 
+// The index is shared by every reader and must not be written.
 func (p *program) edgesBySource() map[string][]explainfiles.Edge {
-	byFrom := map[string][]explainfiles.Edge{}
-	if p != nil {
-		for _, e := range p.Edges {
-			byFrom[e.From] = append(byFrom[e.From], e)
-		}
+	if p == nil {
+		return map[string][]explainfiles.Edge{}
 	}
+	if index := p.bySource; index != nil && len(index.edges) == len(p.Edges) && (len(p.Edges) == 0 || &index.edges[0] == &p.Edges[0]) {
+		return index.byFrom
+	}
+	byFrom := map[string][]explainfiles.Edge{}
+	for _, e := range p.Edges {
+		byFrom[e.From] = append(byFrom[e.From], e)
+	}
+	p.bySource = &edgeIndex{edges: p.Edges, byFrom: byFrom}
 	return byFrom
+}
+
+type edgeIndex struct {
+	edges  []explainfiles.Edge
+	byFrom map[string][]explainfiles.Edge
 }
 
 func sourceEdges(byFrom map[string][]explainfiles.Edge, files ...[]string) []explainfiles.Edge {

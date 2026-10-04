@@ -100,9 +100,42 @@ def runfiles_scope_paths(ctx, runfiles, module_paths = []):
         if path in demanded or path.endswith("/package.json") or (file != None and (file.basename == "package.json" or file.is_directory or file.is_symlink))
     }
 
-def _available_destination(paths, destination):
+def _occupy(occupied, ancestors, path):
+    occupied[path] = None
+    parts = path.split("/")
+    for depth in range(1, len(parts)):
+        ancestors["/".join(parts[:depth])] = True
+
+def _available_destination(occupied, ancestors, destination):
     parts = destination.split("/")
-    return not any(["/".join(parts[:depth]) in paths for depth in range(1, len(parts) + 1)]) and not any([path.startswith(destination + "/") for path in paths])
+    return not any(["/".join(parts[:depth]) in occupied for depth in range(1, len(parts) + 1)]) and destination not in ancestors
+
+def _view_outputs(ctx, prefix, regular, links):
+    # RE flattens symlinks inside a tree artifact, so only directories with no link beneath them become one tree.
+    linked = {}
+    for path in links:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            # Case-folded: a link and a tree differing only in case collide on case-insensitive filesystems.
+            linked["/".join(parts[:depth]).lower()] = True
+    outputs = [ctx.actions.declare_symlink(prefix + path) for path in links]
+    trees = {}
+    for path, is_directory in regular.items():
+        parts = path.split("/")
+        tree = None
+        for depth in range(1, len(parts)):
+            candidate = "/".join(parts[:depth])
+            if candidate.lower() not in linked:
+                tree = candidate
+                break
+        if tree != None:
+            trees[tree] = True
+        elif is_directory:
+            outputs.append(ctx.actions.declare_directory(prefix + path))
+        else:
+            outputs.append(ctx.actions.declare_file(prefix + path))
+    outputs.extend([ctx.actions.declare_directory(prefix + tree) for tree in sorted(trees)])
+    return outputs
 
 def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_file):
     if runtime_file:
@@ -128,21 +161,42 @@ def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_f
     prefix = base + ".runtime"
     spec = ctx.actions.declare_file(prefix + ".json")
     root = spec.path[:-len(".json")] + "/view"
+    visible = {}
+    refs = {}
+    for path, file in paths.items():
+        parts = path.split("/")
+        if not any(["/".join(parts[:depth]) in paths for depth in range(1, len(parts))]):
+            visible[path] = file
+        if file != None:
+            refs[file.path] = refs.get(file.path, 0) + 1
+
+    # Keyed by path: two targets sharing one action yield distinct File objects for one artifact.
+    entry_of = {file.path: path for path, file in visible.items() if file != None and refs[file.path] == 1}
+    targets = {file.path: True for file in canonical.values()}
     outputs = []
     authorities = {}
+    placed = {}
     inputs = []
     by_path = {file.path: file for file in files}
     for file_path in sorted(by_path):
         file = by_path[file_path]
-        path = prefix + "/files/" + file.path
         target = canonical.get(file)
         choices = selected.get(target or file, [])
         if len(choices) > 1:
             fail("{}: native File '{}' reaches multiple canonical module paths {}. Did you mean to expose one canonical module path?".format(ctx.label, file.path, choices))
         if target != None or choices:
-            output = ctx.actions.declare_symlink(path)
-            kind = "alias"
-        elif file.is_symlink:
+            # Aliases resolve straight to their target: a declared link per module would double the view's artifacts.
+            inputs.append({"path": file.path, "output": "", "kind": "alias"})
+            continue
+        if file.path in entry_of and file.path not in targets:
+            # A File seen at one view path is materialized there, with no separate transport copy.
+            placed[file.path] = True
+            authorities[file.path] = root + "/" + entry_of[file.path]
+            form = "symlink" if file.is_symlink else ("directory" if file.is_directory else "file")
+            inputs.append({"path": file.path, "output": "", "kind": "placed", "form": form, "target": authorities[file.path]})
+            continue
+        path = prefix + "/files/" + file.path
+        if file.is_symlink:
             output = ctx.actions.declare_symlink(path)
             kind = "symlink"
         elif file.is_directory:
@@ -151,7 +205,7 @@ def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_f
         else:
             output = ctx.actions.declare_file(path)
             kind = "file"
-        authorities[file] = output
+        authorities[file.path] = output.path
         outputs.append(output)
         inputs.append({"path": file.path, "output": output.path, "kind": kind})
     for input in inputs:
@@ -160,25 +214,31 @@ def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_f
         file = by_path[input["path"]]
         target = canonical.get(file, file)
         choices = selected.get(target, [])
-        input["target"] = root + "/" + choices[0] if choices else authorities[target].path
-    for path, file in paths.items():
-        parts = path.split("/")
-        if any(["/".join(parts[:depth]) in paths for depth in range(1, len(parts))]):
-            continue
-        output = ctx.actions.declare_file(prefix + "/view/" + path) if path in modules or file == None else ctx.actions.declare_symlink(prefix + "/view/" + path)
-        outputs.append(output)
+        input["target"] = root + "/" + choices[0] if choices else authorities[target.path]
+    regular = {}
+    links = []
+    for path, file in visible.items():
+        if path in modules or file == None or (file.path in placed and not file.is_symlink):
+            regular[path] = file != None and file.is_directory
+        else:
+            links.append(path)
     section = config[config["mode"]]
     node_modules = section.get("node_modules", [])
     if type(node_modules) == "string":
         node_modules = [node_modules] if node_modules else []
-    links = {}
+    contexts = section.get("npm_contexts", [])
+    workspace_links = {}
+    occupied = {}
+    ancestors = {}
+    if node_modules or contexts:
+        for path in paths:
+            _occupy(occupied, ancestors, path)
     if node_modules:
         destination = config["workspace"] + "/node_modules"
-        if _available_destination(paths, destination):
-            links[destination] = node_modules[-1]
-            outputs.append(ctx.actions.declare_symlink(prefix + "/view/" + destination))
-    occupied = paths | {path: None for path in links}
-    contexts = section.get("npm_contexts", [])
+        if _available_destination(occupied, ancestors, destination):
+            workspace_links[destination] = node_modules[-1]
+            links.append(destination)
+            _occupy(occupied, ancestors, destination)
     for context in contexts:
         lookups = [(context["module"], context["bindings"])]
         scope = context.get("package_scope")
@@ -188,9 +248,10 @@ def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_f
             directory = anchor.rsplit("/", 1)[0]
             for name in bindings:
                 destination = directory + "/node_modules/" + name
-                if _available_destination(occupied, destination):
-                    outputs.append(ctx.actions.declare_symlink(prefix + "/view/" + destination))
-                    occupied[destination] = None
+                if _available_destination(occupied, ancestors, destination):
+                    links.append(destination)
+                    _occupy(occupied, ancestors, destination)
+    outputs.extend(_view_outputs(ctx, prefix + "/view/", regular, links))
     optional = section.get("optional_deps", [])
     for dep in optional:
         outputs.append(ctx.actions.declare_symlink(prefix + "/optional/node_modules/" + dep["name"]))
@@ -200,7 +261,7 @@ def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_f
         "entries": {path: file.path if file != None else "" for path, file in paths.items()},
         "modules": modules,
         "npm_contexts": contexts,
-        "links": links,
+        "links": workspace_links,
         "optional_deps": optional,
     }))
     ctx.actions.run(
@@ -289,7 +350,7 @@ def declare_launcher(ctx, config, basename = None, runfiles = None, canonical_li
 
     ctx.actions.write(
         output = config_file,
-        content = json.encode_indent(config, indent = "  "),
+        content = json.encode(config),
     )
 
     # One launcher binary for every target; the config beside the symlink is
