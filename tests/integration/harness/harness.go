@@ -362,8 +362,8 @@ func makeWritable(dir string) {
 	})
 }
 
-// The output base is kept: under `bazel test` the next run clears TEST_TMPDIR
-// anyway, and outside it the next run of this test reuses it in place.
+// Outside `bazel test` the next run of this test reuses the output base in place. Under it,
+// TEST_TMPDIR is cleared only by the next run, so a core leg's output bases filled the CI disk.
 func (it *IT) cleanup() {
 	for i := len(it.stops) - 1; i >= 0; i-- {
 		it.stops[i]()
@@ -371,7 +371,11 @@ func (it *IT) cleanup() {
 	shutdown := exec.Command(it.bazel, append(it.startup(), "shutdown")...)
 	shutdown.Env = nestedEnv()
 	shutdown.Run()
-	for _, dir := range it.scratchDirs() {
+	dirs := it.scratchDirs()
+	if os.Getenv("TEST_TMPDIR") != "" {
+		dirs = append(dirs, it.OutputBase)
+	}
+	for _, dir := range dirs {
 		makeWritable(dir)
 		os.RemoveAll(dir)
 	}
