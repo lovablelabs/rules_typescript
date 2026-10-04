@@ -137,6 +137,7 @@ func TestRunRootFallbackIsUnderTheCacheRootAndExists(t *testing.T) {
 }
 
 func TestCleanupKeepsTheOutputBase(t *testing.T) {
+	t.Setenv("TEST_TMPDIR", "")
 	base := t.TempDir()
 	it := &IT{
 		WorkspaceDir: filepath.Join(base, "workspace"),
@@ -158,9 +159,29 @@ func TestCleanupKeepsTheOutputBase(t *testing.T) {
 	}
 }
 
+// rules_typescript#235's core leg: 22 kept output bases filled the 145 GB runner (ENOSPC).
+func TestCleanupUnderBazelTestDropsTheOutputBase(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("TEST_TMPDIR", base)
+	it := &IT{
+		WorkspaceDir: filepath.Join(base, "workspace"),
+		OutputBase:   filepath.Join(base, "output_base"),
+		staged:       filepath.Join(base, "workspace"),
+		scratchDir:   filepath.Join(base, "scratch"),
+	}
+	markDirs(t, it.WorkspaceDir, it.OutputBase, it.scratchDir)
+
+	it.cleanup()
+
+	if _, err := os.Stat(it.OutputBase); !os.IsNotExist(err) {
+		t.Errorf("cleanup() left the output base behind (err = %v)", err)
+	}
+}
+
 // A run over the checkout stages nothing, so cleanup() removes the scratch
 // directory alone: the checkout it ran in is not this run's to delete.
 func TestCleanupKeepsTheCheckout(t *testing.T) {
+	t.Setenv("TEST_TMPDIR", "")
 	base := t.TempDir()
 	it := &IT{
 		RulesTSRoot:  filepath.Join(base, "checkout"),
