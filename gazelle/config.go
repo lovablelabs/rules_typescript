@@ -27,6 +27,8 @@ type tsConfig struct {
 	protoEnabled    []string
 	// The nearest package.json above when the lockfile has no importer for it.
 	foreignManifest string
+	// gazelle:generation_mode update_only: a subdirectory without a BUILD file is not configured.
+	updateOnly bool
 
 	programs   *programStore
 	lock       *npmLock
@@ -181,7 +183,8 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		if member := s.emission.lock.memberCompilerTarget(s.repoConfig.RepoName, key); member != "" {
 			key = member
 		}
-		if seenTargets[key] {
+		s.emission.crawlMemo()
+		if seenTargets[key] || s.emission.crawled[key] {
 			continue
 		}
 		seenTargets[key] = true
@@ -190,10 +193,13 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			continue
 		}
 		load(target.Pkg)
+		s.emission.crawlMemo()
+		s.emission.crawledPkgs[target.Pkg] = true
 		r := s.semanticRule(key)
 		if r == nil {
 			continue
 		}
+		s.emission.crawled[key] = true
 		references, _ := runtimeDependencies(r)
 		references = append(references, r.AttrStrings("source_node_modules")...)
 		switch r.Kind() {
@@ -316,6 +322,14 @@ func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(
 	if tc.foreignManifest != "" {
 		tc.programs.foreign[rel] = tc.foreignManifest
 	}
+	if f != nil {
+		for _, d := range f.Directives {
+			if d.Key == "generation_mode" {
+				tc.updateOnly = strings.TrimSpace(d.Value) == "update_only"
+			}
+		}
+	}
+	tc.programs.prefetchSubdirListings(c, tc, rel, dirInfo)
 	if tc.programs.generatedOutput(tc.programs.index, rel, false) {
 		c.Exts[languageName] = tc
 		return

@@ -1,0 +1,22 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "incremental",
+    srcs = [
+        "record.go",
+        "signature.go",
+        "snapshot.go",
+    ],
+    importpath = "github.com/mikn/rules_typescript/gazelle/incremental",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "incremental_test",
+    srcs = [
+        "record_test.go",
+        "signature_test.go",
+        "snapshot_test.go",
+    ],
+    embed = [":incremental"],
+)

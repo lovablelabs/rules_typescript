@@ -67,7 +67,7 @@ func Parse(text string) (*Listing, error) {
 			if err := readReason(l, file, line[3:]); err != nil {
 				return nil, err
 			}
-		case diagnosticLine.MatchString(line):
+		case strings.Contains(line, "error TS") && diagnosticLine.MatchString(line):
 			l.Diagnostics = append(l.Diagnostics, line)
 			inDiagnostic = true
 		default:
@@ -81,6 +81,9 @@ func Parse(text string) (*Listing, error) {
 
 func readReason(l *Listing, file, reason string) error {
 	for _, f := range reasonForms {
+		if !f.admits(reason) {
+			continue
+		}
 		if m := f.re.FindStringSubmatch(reason); m != nil {
 			f.read(l, file, m)
 			return nil
@@ -95,6 +98,72 @@ func readReason(l *Listing, file, reason string) error {
 type reasonForm struct {
 	re   *regexp.Regexp
 	read func(l *Listing, file string, m []string)
+	// Literal text every match holds: its leading and trailing run and each run between groups.
+	prefix, suffix string
+	literals       []string
+}
+
+func (f reasonForm) admits(reason string) bool {
+	if !strings.HasPrefix(reason, f.prefix) || !strings.HasSuffix(reason, f.suffix) {
+		return false
+	}
+	for _, literal := range f.literals {
+		if !strings.Contains(reason, literal) {
+			return false
+		}
+	}
+	return true
+}
+
+// requiredLiterals is the literal runs outside the groups of a pattern with no escape,
+// class, repetition count or top-level alternation; any other pattern requires none.
+func requiredLiterals(pattern string) (prefix, suffix string, literals []string) {
+	if strings.ContainsAny(pattern, `\[]{}`) {
+		return "", "", nil
+	}
+	var run []byte
+	depth, start := 0, 0
+	flush := func(end int) {
+		if len(run) > 0 {
+			if start == 0 {
+				prefix = string(run)
+			}
+			if end == len(pattern) {
+				suffix = string(run)
+			}
+			literals = append(literals, string(run))
+		}
+		run = run[:0]
+	}
+	for i := 0; i < len(pattern); i++ {
+		switch ch := pattern[i]; {
+		case ch == '(':
+			flush(-1)
+			depth++
+		case ch == ')':
+			depth--
+			start = -1
+		case depth > 0:
+		case ch == '|':
+			return "", "", nil
+		case ch == '*' || ch == '?' || ch == '+':
+			if len(run) > 0 {
+				run = run[:len(run)-1]
+			}
+			flush(-1)
+			start = -1
+		case ch == '.' || ch == '^' || ch == '$':
+			flush(-1)
+			start = -1
+		default:
+			if len(run) == 0 && start != 0 {
+				start = i
+			}
+			run = append(run, ch)
+		}
+	}
+	flush(len(pattern))
+	return prefix, suffix, literals
 }
 
 // A quoted value runs to the quote before its form's next literal token, so a
@@ -107,7 +176,8 @@ const (
 
 func form(pattern string, read func(l *Listing, file string, m []string),
 ) reasonForm {
-	return reasonForm{regexp.MustCompile("^" + pattern + "$"), read}
+	prefix, suffix, literals := requiredLiterals(pattern)
+	return reasonForm{re: regexp.MustCompile("^" + pattern + "$"), read: read, prefix: prefix, suffix: suffix, literals: literals}
 }
 
 func asRoot(l *Listing, file string, _ []string) {

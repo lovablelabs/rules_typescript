@@ -89,7 +89,7 @@ func planVitest(
 	if err := stageFiles(r, tree, v.Stage); err != nil {
 		return nil, err
 	}
-	if err := placeNpmContexts(r, v.NpmContexts, cfg.RuntimeModules); err != nil {
+	if err := placeNpmContexts(r, v.NpmContexts, v.NpmBindings, cfg.RuntimeModules); err != nil {
 		return nil, err
 	}
 	configFile := filepath.Join(tree, filepath.FromSlash(v.ConfigFile))

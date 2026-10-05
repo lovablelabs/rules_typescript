@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -46,11 +47,14 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 			"what it listed or why it is not a package, how many are, and the "+
 			".ts files no program lists")
 	fs.StringVar(&tc.protos.graphPath, "ts_proto_graph", "", "declared native external protobuf graph artifact")
+	fs.StringVar(&listingCacheDir, "ts_listing_cache", "",
+		"a directory that keeps tsgo listings across runs, each reused while everything it read is unchanged")
 	l.programs = tc.programs
 	c.Exts[languageName] = tc
 }
 
 func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+	listingVerbose = getConfig(c).programs.verbose
 	store := getConfig(c).protos
 	if store.graphPath != "" {
 		graphFile, err := runfiles.Rlocation(store.graphPath)
@@ -84,6 +88,12 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if recursive := fs.Lookup("r"); recursive != nil {
 		store.recursive = recursive.Value.String() == "true"
 	}
+	getConfig(c).programs.fullWalk = store.recursive && slices.Equal(store.roots, []string{""})
+	if !getConfig(c).programs.fullWalk && listingCacheDir != "" && os.Getenv("GOGC") == "" {
+		// A partial run's heap is small, and GC at the default ratio was a third of its CPU;
+		// on a full run the same ratio raised peak RSS from 2.4 to 4.0 GB.
+		debug.SetGCPercent(200)
+	}
 
 	if tsgo := getConfig(c).programs.tsgoFlag; tsgo != "" {
 		if _, err := os.Stat(tsgo); err != nil {
@@ -99,6 +109,7 @@ func (l *tsLang) KnownDirectives() []string {
 
 func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	getConfig(c).programs.ruleListsMayChange()
+	getConfig(c).programs.touchPackage(rel)
 	configureTsConfig(c, rel, f, walk.GetDirInfo)
 	l.programs = getConfig(c).programs
 	l.programs.observeBuild(rel, walk.GetDirInfo)
@@ -323,6 +334,8 @@ func (l *tsLang) Fix(_ *config.Config, _ *rule.File) {}
 
 func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
 	getConfig(args.Config).programs.ruleListsMayChange()
+	getConfig(args.Config).programs.touchPackage(args.Rel)
+	defer getConfig(args.Config).programs.touchPackage(args.Rel)
 	res := generateRules(args)
 	tc := getConfig(args.Config)
 	s := tc.programs
@@ -370,6 +383,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 func (l *tsLang) DoneGeneratingRules() {
 	l.programs.ruleListsMayChange()
 	if l.programs != nil {
+		l.programs.stopPrefetch()
 		l.programs.reportCensus()
 		l.programs.reportUnlisted()
 		l.programs.reportUnowned()
@@ -511,6 +525,6 @@ func (l *tsLang) Resolve(
 		}
 	}
 	if g := getConfig(c).programs.emission; g != nil {
-		g.setRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), liveRule)
+		g.setResolvedRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), liveRule)
 	}
 }

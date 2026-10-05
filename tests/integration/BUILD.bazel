@@ -260,6 +260,91 @@ bazel_integration_test(
 )
 
 bazel_integration_test(
+    name = "gazelle_roundtrip_roots_helpers_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "roots_helpers"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_roots_layout_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "roots_layout"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_foreign_runtime_scope_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "foreign_runtime_scope"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_incremental_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "incremental"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
+    name = "gazelle_roundtrip_warmup_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "warmup"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
     name = "gazelle_roundtrip_foreign_test",
     timeout = "long",
     bazel_binaries = bazel_binaries,
@@ -439,16 +524,21 @@ test_suite(
         ":existing_project_test",
         ":gazelle_roundtrip_borrowed_test",
         ":gazelle_roundtrip_config_test",
+        ":gazelle_roundtrip_foreign_runtime_scope_test",
         ":gazelle_roundtrip_foreign_runtime_test",
         ":gazelle_roundtrip_foreign_test",
+        ":gazelle_roundtrip_incremental_test",
         ":gazelle_roundtrip_packages_test",
+        ":gazelle_roundtrip_roots_helpers_test",
         ":gazelle_roundtrip_roots_identity_test",
+        ":gazelle_roundtrip_roots_layout_test",
         ":gazelle_roundtrip_roots_runtime_test",
         ":gazelle_roundtrip_roots_test",
         ":gazelle_roundtrip_runtime_test",
         ":gazelle_roundtrip_scope_test",
         ":gazelle_roundtrip_test",
         ":gazelle_roundtrip_transitive_test",
+        ":gazelle_roundtrip_warmup_test",
         ":lsp_test",
         ":new_project_test",
         ":npm_deps_test",

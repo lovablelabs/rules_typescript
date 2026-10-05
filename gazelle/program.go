@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
@@ -35,6 +37,9 @@ type program struct {
 	dir        string
 	refused    string
 	manifest   bool
+	bySource   *edgeIndex
+	// candidateEdge's index of Edges; built on first use, so Edges must not change after.
+	moduleEdges map[[3]string]explainfiles.EdgeKind
 }
 
 // One run's listings, one store every directory's config shares: the packages
@@ -66,6 +71,9 @@ type programStore struct {
 	installChecked   bool
 	regularFiles     map[string]bool
 	memo             *resolutionMemo
+	protoIndex       *protoIndex
+	prefetch         *listingPrefetch
+	fullWalk         bool
 	manifests        map[string]*manifest
 	noLockSaid       bool
 }
@@ -109,6 +117,25 @@ func (s *programStore) binary() (string, error) {
 	if s.tsgo != "" {
 		return s.tsgo, nil
 	}
+	abs, how, err := s.locateBinary()
+	if err != nil {
+		return "", err
+	}
+	s.tsgo = abs
+	s.say("listing programs with %s (%s)", abs, how)
+	return abs, nil
+}
+
+// findBinary is binary without its one report.
+func (s *programStore) findBinary() (string, error) {
+	if s.tsgo != "" {
+		return s.tsgo, nil
+	}
+	abs, _, err := s.locateBinary()
+	return abs, err
+}
+
+func (s *programStore) locateBinary() (string, string, error) {
 	var found, how string
 	switch {
 	case s.tsgoFlag != "":
@@ -118,22 +145,20 @@ func (s *programStore) binary() (string, error) {
 	case tsgoRlocationpath != "":
 		p, err := runfiles.Rlocation(tsgoRlocationpath)
 		if err != nil {
-			return "", fmt.Errorf("the toolchain's tsgo is not in the runfiles (%v); pass -ts_tsgo=<path>", err)
+			return "", "", fmt.Errorf("the toolchain's tsgo is not in the runfiles (%v); pass -ts_tsgo=<path>", err)
 		}
 		found, how = p, "runfiles"
 	default:
-		return "", errNoTsgo
+		return "", "", errNoTsgo
 	}
 	abs, err := filepath.Abs(found)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if _, err := os.Stat(abs); err != nil {
-		return "", fmt.Errorf("tsgo from %s: %w", how, err)
+		return "", "", fmt.Errorf("tsgo from %s: %w", how, err)
 	}
-	s.tsgo = abs
-	s.say("listing programs with %s (%s)", abs, how)
-	return abs, nil
+	return abs, how, nil
 }
 
 var tsSourceExtensions = []string{".ts", ".tsx", ".mts", ".cts"}
@@ -339,7 +364,7 @@ func listProgram(repoRoot, rel, tsgo string) (*program, error) {
 }
 
 func (s *programStore) discoverCompilerProgram(c *config.Config, cfg, tsgo string, dirInfo func(string) (walk.DirInfo, error)) (*program, error) {
-	p, err := listCompilerProgram(c.RepoRoot, cfg, tsgo, nil)
+	p, err := s.compilerListing(c.RepoRoot, cfg, tsgo)
 	if err != nil {
 		return p, err
 	}
@@ -448,8 +473,18 @@ func (s *programStore) reconcileCompilerProgram(c *config.Config, p *program, di
 }
 
 func listCompilerProgram(repoRoot, cfg, tsgo string, exclude []string, roots ...string) (*program, error) {
+	return listCompilerProgramContext(context.Background(), repoRoot, cfg, tsgo, exclude, roots...)
+}
+
+// Held exclusively while a projection config exists, and shared by every prefetched
+// listing, so no concurrent listing can read a projection.
+var projectionConfigs sync.RWMutex
+
+func listCompilerProgramContext(ctx context.Context, repoRoot, cfg, tsgo string, exclude []string, roots ...string) (*program, error) {
 	project := cfg
 	if len(roots) > 0 || len(exclude) > 0 {
+		projectionConfigs.Lock()
+		defer projectionConfigs.Unlock()
 		dir := filepath.Join(repoRoot, filepath.FromSlash(parentDir(cfg)))
 		files := make([]string, 0, len(roots))
 		for _, root := range roots {
@@ -483,7 +518,7 @@ func listCompilerProgram(repoRoot, cfg, tsgo string, exclude []string, roots ...
 		project = file.Name()
 	}
 	// --pretty false: a FORCE_COLOR in the environment would otherwise colour the diagnostics.
-	p, err := runListing(repoRoot, tsgo, cfg, []string{"-p", project, "--noEmit", "--listFilesOnly", "--explainFiles",
+	p, err := runListingContext(ctx, repoRoot, tsgo, cfg, []string{"-p", project, "--noEmit", "--listFilesOnly", "--explainFiles",
 		"--pretty", "false"})
 	if err != nil {
 		return nil, err
@@ -680,13 +715,18 @@ func (p *program) candidateEdge(candidate resolutionCandidate) explainfiles.Edge
 	if !selected.Kind.ModuleSpecifier() {
 		return selected
 	}
-	for _, edge := range p.Edges {
-		if edge.From == candidate.from && edge.Specifier == candidate.specifier && edge.To == candidate.resolved && edge.Kind.ModuleSpecifier() {
-			selected.Kind = edge.Kind
-			if selected.Kind == explainfiles.Import {
-				break
+	if p.moduleEdges == nil {
+		// An Import wins; otherwise the last module-specifier edge does, as a scan in order would pick.
+		p.moduleEdges = map[[3]string]explainfiles.EdgeKind{}
+		for _, edge := range p.Edges {
+			key := [3]string{edge.From, edge.Specifier, edge.To}
+			if edge.Kind.ModuleSpecifier() && p.moduleEdges[key] != explainfiles.Import {
+				p.moduleEdges[key] = edge.Kind
 			}
 		}
+	}
+	if kind, ok := p.moduleEdges[[3]string{candidate.from, candidate.specifier, candidate.resolved}]; ok {
+		selected.Kind = kind
 	}
 	return selected
 }
@@ -695,8 +735,34 @@ func (p *program) candidateEdge(candidate resolutionCandidate) explainfiles.Edge
 // listing is kept whatever the exit; TS18003 alone is a program with no inputs.
 func runListing(repoRoot, tsgo, subject string, args []string,
 ) (*program, error) {
+	return runListingContext(context.Background(), repoRoot, tsgo, subject, args)
+}
+
+func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args []string,
+) (*program, error) {
+	if listingCacheDir == "" {
+		return uncachedListing(ctx, repoRoot, tsgo, subject, args)
+	}
+	key := listingKey(repoRoot, tsgo, subject, args)
+	if p := loadListing(key, subject); p != nil {
+		return p, nil
+	}
+	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
+	if err == nil {
+		saveListing(key, repoRoot, subject, args, p)
+	}
+	return p, err
+}
+
+var uncachedListing = runListingUncached
+
+func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, args []string,
+) (*program, error) {
 	args = append(append([]string{}, args...), "--traceResolution", "--locale", "en")
-	cmd := exec.Command(tsgo, args...)
+	cmd := exec.CommandContext(ctx, tsgo, args...)
+	if ctx.Done() != nil {
+		dieWithParent(cmd)
+	}
 	cmd.Dir = repoRoot
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -710,6 +776,7 @@ func runListing(repoRoot, tsgo, subject string, args []string,
 		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
 	p := &program{Listing: *l, candidates: candidates, config: subject}
+	internProgram(p)
 	for i := range p.candidates {
 		candidate := &p.candidates[i]
 		if candidate.kind == explainfiles.TypeReference && (candidate.from == "" || path.Base(candidate.from) == "__inferred type names__.ts") {

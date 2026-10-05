@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,17 +94,22 @@ var handWritten = []string{
 // Each test target names one check group here, so every group fits its own
 // timeout; the empty name is the round trip itself.
 var checkGroups = map[string]func(it *harness.IT, foreignExports string){
-	"scope":           scopeChecks,
-	"transitive":      transitiveScopeChecks,
-	"config":          configChecks,
-	"packages":        packageScopeChecks,
-	"foreign":         foreignChecks,
-	"foreign_runtime": foreignRuntimeChecks,
-	"runtime":         runtimeChecks,
-	"borrowed":        borrowedChecks,
-	"roots":           rootsChecks,
-	"roots_runtime":   rootsRuntimeChecks,
-	"roots_identity":  rootsIdentityChecks,
+	"scope":                 scopeChecks,
+	"transitive":            transitiveScopeChecks,
+	"config":                configChecks,
+	"packages":              packageScopeChecks,
+	"foreign":               foreignChecks,
+	"foreign_runtime":       foreignRuntimeChecks,
+	"foreign_runtime_scope": foreignRuntimeScopeChecks,
+	"runtime":               runtimeChecks,
+	"borrowed":              borrowedChecks,
+	"roots":                 rootsChecks,
+	"roots_runtime":         rootsRuntimeChecks,
+	"roots_layout":          rootsLayoutChecks,
+	"roots_helpers":         rootsHelpersChecks,
+	"roots_identity":        rootsIdentityChecks,
+	"incremental":           incrementalChecks,
+	"warmup":                warmupChecks,
 }
 
 func main() {
@@ -352,6 +358,9 @@ func foreignChecks(it *harness.IT, foreignExports string) {
 
 func foreignRuntimeChecks(it *harness.IT, _ string) {
 	it.Check("emittedConsumerKeepsSourceModeRuntimeFiles", func() { emittedConsumerKeepsSourceModeRuntimeFiles(it) })
+}
+
+func foreignRuntimeScopeChecks(it *harness.IT, _ string) {
 	it.Check("sourceModeDirectRuntimeCannotLoseForeignModules", func() { sourceModeDirectRuntimeCannotLoseForeignModules(it) })
 	it.Check("siblingOwnerRetainsSourcePackageScope", func() { siblingOwnerRetainsSourcePackageScope(it) })
 }
@@ -368,7 +377,24 @@ func configChecks(it *harness.IT, _ string) {
 // Later checks run against the root publisher and binaries mixedSourceRootsDeclareAndRun leaves.
 func rootsChecks(it *harness.IT, _ string) {
 	it.Check("mixedSourceRootsDeclareAndRun", func() { mixedSourceRootsDeclareAndRun(it) })
+}
+
+func rootsHelpersChecks(it *harness.IT, _ string) {
 	it.Check("borrowedHelpersDoNotBecomeTestEntries", func() { borrowedHelpersDoNotBecomeTestEntries(it) })
+}
+
+// CI runs this group before the suite: PR caches restore main's, which lack this
+// tree's runtime actions, and a group that built them cold overran its timeout.
+func warmupChecks(it *harness.IT, _ string) {
+	targets := testTargets(it)
+	for _, runfiles := range []string{"--enable_runfiles", "--noenable_runfiles"} {
+		it.MustBazel(append([]string{"build", runfiles}, targets...)...)
+		it.Pass("every test target builds with %s", runfiles)
+	}
+}
+
+func incrementalChecks(it *harness.IT, _ string) {
+	it.Check("incrementalImportEditsMatchAFullRun", func() { incrementalImportEditsMatchAFullRun(it) })
 }
 
 func rootsIdentityChecks(it *harness.IT, _ string) {
@@ -378,8 +404,11 @@ func rootsIdentityChecks(it *harness.IT, _ string) {
 
 func rootsRuntimeChecks(it *harness.IT, _ string) {
 	it.Check("vitestConfigReferencesRetainRuntimeIdentity", func() { vitestConfigReferencesRetainRuntimeIdentity(it) })
-	it.Check("compilerInputsCannotBecomeRuntimeLayout", func() { compilerInputsCannotBecomeRuntimeLayout(it) })
 	it.Check("nativeDescendantRetainsRuntimeInputs", func() { nativeDescendantRetainsRuntimeInputs(it) })
+}
+
+func rootsLayoutChecks(it *harness.IT, _ string) {
+	it.Check("compilerInputsCannotBecomeRuntimeLayout", func() { compilerInputsCannotBecomeRuntimeLayout(it) })
 	it.Check("workspaceMemberRejectsBorrowedSibling", func() { workspaceMemberRejectsBorrowedSibling(it) })
 }
 
@@ -5986,4 +6015,66 @@ if (process.argv[2] === 'child') {
 		}()
 	}
 	it.Pass("directory and manifest relocated views retain child imports and assets after normal and direct-SIGTERM parent exit")
+}
+
+// An incremental run patches cached listings instead of running tsgo; its BUILD
+// files must equal what a fresh full run writes for the same tree.
+func incrementalImportEditsMatchAFullRun(it *harness.IT) {
+	cache := filepath.Dir(it.Scratch("listing-cache", "entry"))
+	flag := "-ts_listing_cache=" + cache
+	it.Write(it.Path("incremental/tsconfig.json"), `{"extends": "../tsconfig.json", "include": ["*.ts"]}`)
+	it.Write(it.Path("incremental/a.ts"), "import { add } from '../src/lib/math';\nimport { c } from './c';\nexport const a = add(c, 1);\n")
+	it.Write(it.Path("incremental/b.ts"), "export const b = 2;\n")
+	it.Write(it.Path("incremental/c.ts"), "export const c = 3;\n")
+	it.MustBazel("run", "//:gazelle", "--", flag)
+	for i, edit := range []struct{ name, file, text string }{
+		{"an added same-directory and cross-package import", "incremental/b.ts",
+			"import { add } from '../src/lib/math';\nimport { c } from './c';\nexport const b = add(c, 2);\n"},
+		{"a removed import", "incremental/a.ts", "import { add } from '../src/lib/math';\nexport const a = add(1, 1);\n"},
+	} {
+		it.Write(it.Path(edit.file), edit.text)
+		log, err := it.BazelLog(fmt.Sprintf("incremental_%d", i), "run", "//:gazelle", "--", flag, "-ts_verbose", "-r=false", "incremental")
+		if err != nil {
+			log.Dump()
+			it.Fail("the incremental run after %s failed: %v", edit.name, err)
+		}
+		if !log.Matches(`listing cache \d+ hit\(s\), [1-9]\d* patched`) {
+			log.Dump()
+			it.Fail("the incremental run after %s listed with tsgo instead of patching", edit.name)
+		}
+		incremental := roundtripBuildFiles(it)
+		it.MustBazel("run", "//:gazelle")
+		full := roundtripBuildFiles(it)
+		for _, rel := range slices.Sorted(maps.Keys(full)) {
+			if incremental[rel] != full[rel] {
+				fmt.Fprintf(os.Stderr, "--- incremental %s ---\n%s\n--- full ---\n%s\n", rel, incremental[rel], full[rel])
+				it.Fail("after %s the incremental run wrote %s differently from a full run", edit.name, rel)
+			}
+		}
+		if len(incremental) != len(full) {
+			it.Fail("after %s the incremental run wrote %d BUILD files, a full run %d", edit.name, len(incremental), len(full))
+		}
+		it.Pass("after %s the incremental run equals a full run (%d BUILD files)", edit.name, len(full))
+	}
+}
+
+func roundtripBuildFiles(it *harness.IT) map[string]string {
+	files := map[string]string{}
+	err := filepath.WalkDir(it.WorkspaceDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "node_modules" || strings.HasPrefix(d.Name(), "bazel-") || d.Name() == ".git") {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && (d.Name() == "BUILD.bazel" || d.Name() == "BUILD") {
+			rel, _ := filepath.Rel(it.WorkspaceDir, p)
+			files[filepath.ToSlash(rel)] = it.Read(p)
+		}
+		return nil
+	})
+	if err != nil {
+		it.Fail("cannot walk the workspace: %v", err)
+	}
+	return files
 }

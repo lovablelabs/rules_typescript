@@ -17,6 +17,8 @@ type Input struct {
 	Output string `json:"output"`
 	Kind   string `json:"kind"`
 	Target string `json:"target,omitempty"`
+	// Form is a placed input's declared shape; sandboxes stage regular inputs as links.
+	Form string `json:"form,omitempty"`
 }
 
 type PackageLink struct {
@@ -25,13 +27,14 @@ type PackageLink struct {
 }
 
 type Spec struct {
-	Root         string            `json:"root"`
-	Inputs       []Input           `json:"inputs"`
-	Entries      map[string]string `json:"entries"`
-	Modules      []string          `json:"modules"`
-	NpmContexts  []NpmContext      `json:"npm_contexts"`
-	Links        map[string]string `json:"links"`
-	OptionalDeps []PackageLink     `json:"optional_deps"`
+	Root         string              `json:"root"`
+	Inputs       []Input             `json:"inputs"`
+	Entries      map[string]string   `json:"entries"`
+	Modules      []string            `json:"modules"`
+	NpmContexts  []NpmContext        `json:"npm_contexts"`
+	NpmBindings  []map[string]string `json:"npm_binding_sets"`
+	Links        map[string]string   `json:"links"`
+	OptionalDeps []PackageLink       `json:"optional_deps"`
 }
 
 func Build(spec Spec) error {
@@ -45,9 +48,13 @@ func Build(spec Spec) error {
 		if err != nil {
 			return err
 		}
-		input.Output, err = resolvedPath(input.Output)
-		if err != nil {
-			return err
+		if input.Output != "" {
+			input.Output, err = resolvedPath(input.Output)
+			if err != nil {
+				return err
+			}
+		} else if input.Kind != "alias" && input.Kind != "placed" {
+			return fmt.Errorf("runtime view: %s input %q has no declared output", input.Kind, input.Path)
 		}
 		if input.Target != "" {
 			input.Target, err = resolvedPath(input.Target)
@@ -95,8 +102,16 @@ func Build(spec Spec) error {
 			err = copyRegular(input.Path, input.Output)
 		case "directory":
 			err = copyDirectory(input.Path, input.Output)
+		case "placed":
+			if input.Target == "" {
+				err = fmt.Errorf("placed input has no view path")
+			}
 		case "alias":
-			err = relativeLink(input.Output, input.Target)
+			if input.Output != "" {
+				err = relativeLink(input.Output, input.Target)
+			} else if input.Target == "" {
+				err = fmt.Errorf("alias has no authority")
+			}
 		case "symlink":
 			var target string
 			target, err = os.Readlink(input.Path)
@@ -119,8 +134,11 @@ func Build(spec Spec) error {
 		}
 	}
 	staged := map[string]string{}
+	placements := map[string]string{}
 	for name, source := range entries {
 		switch {
+		case source != "" && inputs[source].Kind == "placed":
+			placements[name] = source
 		case source == "", modules[name]:
 			staged[name] = source
 		case inputs[source].Kind == "symlink":
@@ -137,7 +155,7 @@ func Build(spec Spec) error {
 			}
 			staged[name] = target
 		default:
-			relative, err := filepath.Rel(filepath.Dir(filepath.Join(root, filepath.FromSlash(name))), inputs[source].Output)
+			relative, err := filepath.Rel(filepath.Dir(filepath.Join(root, filepath.FromSlash(name))), inputs[source].authority())
 			if err != nil {
 				return err
 			}
@@ -146,6 +164,11 @@ func Build(spec Spec) error {
 	}
 	if err := Stage(root, staged, spec.Modules); err != nil {
 		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(placements)) {
+		if err := place(filepath.Join(root, filepath.FromSlash(name)), placements[name], inputs); err != nil {
+			return fmt.Errorf("runtime view: materializing %q: %w", placements[name], err)
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(spec.Links)) {
 		output, err := nativeContextPath(root, name)
@@ -159,6 +182,9 @@ func Build(spec Spec) error {
 		if err := relativeLink(output, target); err != nil {
 			return err
 		}
+	}
+	if err := ResolveNpmBindings(spec.NpmContexts, spec.NpmBindings); err != nil {
+		return err
 	}
 	if err := PlaceNpmContexts(root, spec.NpmContexts, spec.Modules); err != nil {
 		return err
@@ -183,6 +209,30 @@ func Build(spec Spec) error {
 	return nil
 }
 
+// place materializes an input at its one view path: a copy of a file or
+// directory, or a link keeping a relative link's text.
+func place(destination, source string, inputs map[string]Input) error {
+	switch inputs[source].Form {
+	case "symlink":
+		target, err := os.Readlink(source)
+		if err != nil {
+			return err
+		}
+		if filepath.IsAbs(target) {
+			if mapped := mappedInput(filepath.Clean(target), inputs); mapped != "" {
+				return relativeLink(destination, mapped)
+			}
+		}
+		return makeLink(destination, target)
+	case "directory":
+		return copyDirectory(source, destination)
+	case "file":
+		return copyRegular(source, destination)
+	default:
+		return fmt.Errorf("unknown placed form %q", inputs[source].Form)
+	}
+}
+
 // resolvedPath resolves the symlinks of path's existing ancestors, so relative
 // links between view outputs and resolved stores count ".." in one tree.
 func resolvedPath(path string) (string, error) {
@@ -205,14 +255,23 @@ func resolvedPath(path string) (string, error) {
 	}
 }
 
+// authority is where the view reaches an input: its declared output, or for an
+// output-less alias the target it resolves to.
+func (input Input) authority() string {
+	if input.Output == "" {
+		return input.Target
+	}
+	return input.Output
+}
+
 func mappedInput(path string, inputs map[string]Input) string {
 	if input, exists := inputs[path]; exists {
-		return input.Output
+		return input.authority()
 	}
 	for parent := filepath.Dir(path); parent != "." && parent != filepath.Dir(parent); parent = filepath.Dir(parent) {
-		if input, exists := inputs[parent]; exists && input.Kind == "directory" {
+		if input, exists := inputs[parent]; exists && (input.Kind == "directory" || input.Kind == "placed" && input.Form == "directory") {
 			relative, _ := filepath.Rel(parent, path)
-			return filepath.Join(input.Output, relative)
+			return filepath.Join(input.authority(), relative)
 		}
 	}
 	return ""

@@ -308,3 +308,30 @@ func TestNestedEnvDropsTestTmpdir(t *testing.T) {
 		t.Errorf("TEST_TMPDIR = %q (%d entries), want it dropped", got, count)
 	}
 }
+
+// rules_typescript#235's roundtrip groups timed out at 900 s: flipping --enable_runfiles
+// in one output base discarded its analysis cache on every flip.
+func TestRunfilesModesKeepSeparateOutputBases(t *testing.T) {
+	base := t.TempDir()
+	it := &IT{OutputBase: filepath.Join(base, "output_base")}
+	manifest := it.outputBaseFor([]string{"test", "//:t", "--noenable_runfiles"})
+	if manifest == it.OutputBase {
+		t.Fatalf("--noenable_runfiles shares the output base %s", manifest)
+	}
+	for _, args := range [][]string{{"run", "//:gazelle"}, {"test", "//:t", "--enable_runfiles"}, {"run", "//:t", "--", "--noenable_runfiles"}} {
+		if got := it.outputBaseFor(args); got != it.OutputBase {
+			t.Errorf("outputBaseFor(%q) = %s, want %s", args, got, it.OutputBase)
+		}
+	}
+	stale := filepath.Join(manifest, "execroot", "_main", "bazel-out", "stale.js")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths := it.inEveryBase(filepath.Join(it.OutputBase, "execroot", "_main", "bazel-out", "stale.js"))
+	if len(paths) != 2 || paths[1] != stale {
+		t.Errorf("inEveryBase() = %q, want both bases' paths ending in %s", paths, stale)
+	}
+}

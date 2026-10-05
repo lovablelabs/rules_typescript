@@ -158,7 +158,10 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func placeNpmContexts(r *Resolver, contexts []NpmContext, modules []string) error {
+func placeNpmContexts(r *Resolver, contexts []NpmContext, sets []map[string]string, modules []string) error {
+	if err := runtimeview.ResolveNpmBindings(contexts, sets); err != nil {
+		return err
+	}
 	return runtimeview.PlaceNpmContexts(r.Dir(), contexts, modules)
 }
 

@@ -420,9 +420,10 @@ def _ts_test_impl(ctx):
     context_inputs = []
     if launched.mode in ["node", "node_test", "vitest"]:
         available = {rlocation_path(ctx, file): file for file in ordinary} | dict(demanded)
-        contexts, context_inputs = runtime_npm_contexts(ctx, struct(owners = owner_sets), module_paths, available, links)
+        contexts, binding_sets, context_inputs = runtime_npm_contexts(ctx, struct(owners = owner_sets), module_paths, available, links)
         if contexts:
             section["npm_contexts"] = contexts
+            section["npm_binding_sets"] = binding_sets
         demanded.extend([(rlocation_path(ctx, file), file) for file in context_inputs])
 
     config = {

@@ -375,21 +375,9 @@ func protoProvider(c *config.Config, ix *resolve.RuleIndex, root, imp string) []
 				}
 			}
 		}
-		if tc.programs.emission != nil {
-			nativeLanguage := gazelleproto.NewLanguage()
-			for key := range tc.programs.emission.rules {
-				effective := tc.programs.semanticRule(key)
-				if effective == nil || effective.Kind() != "proto_library" {
-					continue
-				}
-				owner, err := parseLabel(key)
-				if err != nil {
-					continue
-				}
-				ownerConfig := tc.programs.inputs[owner.Pkg].config
-				if slices.Contains(nativeLanguage.Imports(ownerConfig, effective, &rule.File{Pkg: owner.Pkg}), spec) {
-					native[absoluteProtoLabel(ownerConfig, owner, "")] = true
-				}
+		if index := tc.programs.protoProviderIndex(); index != nil {
+			for _, owner := range index.natives[spec] {
+				native[owner] = true
 			}
 		}
 	}
@@ -410,24 +398,55 @@ func protoWrapperProviders(c *config.Config, ix *resolve.RuleIndex, root string,
 	for _, provider := range ix.FindRulesByImport(spec, languageName) {
 		providers[provider.Label] = provider
 	}
-	if s.emission != nil {
-		for key := range s.emission.rules {
-			effective := s.semanticRule(key)
-			if effective == nil {
-				continue
-			}
-			owner, err := parseLabel(key)
-			if err != nil {
-				continue
-			}
-			ownerConfig := s.inputs[owner.Pkg].config
-			if slices.Contains(protoImportsForRule(ownerConfig, effective, &rule.File{Pkg: owner.Pkg}), spec) {
-				owner = absoluteProtoLabel(ownerConfig, owner, "")
-				providers[owner] = resolve.FindResult{Label: owner}
-			}
+	if index := s.protoProviderIndex(); index != nil {
+		for _, owner := range index.wrappers[spec] {
+			providers[owner] = resolve.FindResult{Label: owner}
 		}
 	}
 	return slices.SortedFunc(maps.Values(providers), func(a, b resolve.FindResult) int { return strings.Compare(a.Label.String(), b.Label.String()) })
+}
+
+// Stored proto_library owners by import and stored wrappers by protoWrapperKey.
+type protoIndex struct {
+	emission        *emissionGraph
+	rulesGeneration int
+	natives         map[resolve.ImportSpec][]label.Label
+	wrappers        map[resolve.ImportSpec][]label.Label
+}
+
+func (s *programStore) protoProviderIndex() *protoIndex {
+	g := s.emission
+	if g == nil {
+		return nil
+	}
+	if s.protoIndex != nil && s.protoIndex.emission == g && s.protoIndex.rulesGeneration == g.rulesGeneration {
+		return s.protoIndex
+	}
+	index := &protoIndex{emission: g, rulesGeneration: g.rulesGeneration,
+		natives: map[resolve.ImportSpec][]label.Label{}, wrappers: map[resolve.ImportSpec][]label.Label{}}
+	nativeLanguage := gazelleproto.NewLanguage()
+	for key, r := range g.rules {
+		if r == nil {
+			continue
+		}
+		owner, err := parseLabel(key)
+		if err != nil {
+			continue
+		}
+		ownerConfig := s.inputs[owner.Pkg].config
+		effective := canonicalRule(ownerConfig, r)
+		f := &rule.File{Pkg: owner.Pkg}
+		if effective.Kind() == "proto_library" {
+			for _, spec := range nativeLanguage.Imports(ownerConfig, effective, f) {
+				index.natives[spec] = append(index.natives[spec], absoluteProtoLabel(ownerConfig, owner, ""))
+			}
+		}
+		for _, spec := range protoImportsForRule(ownerConfig, effective, f) {
+			index.wrappers[spec] = append(index.wrappers[spec], absoluteProtoLabel(ownerConfig, owner, ""))
+		}
+	}
+	s.protoIndex = index
+	return index
 }
 
 func protoOutputProviders(c *config.Config, ix *resolve.RuleIndex, file string) []resolve.FindResult {

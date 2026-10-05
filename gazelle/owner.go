@@ -184,6 +184,7 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 	}
 	p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(file string) bool { return !reached[file] })
 	p.Edges = edges
+	p.moduleEdges = nil
 	var block resolutionKey
 	selectedProbePassed := false
 	p.candidates = slices.DeleteFunc(slices.Clone(p.candidates), func(candidate resolutionCandidate) bool {

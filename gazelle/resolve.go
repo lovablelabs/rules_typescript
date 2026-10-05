@@ -238,11 +238,48 @@ func codegenTreeOwner(s *programStore, ix *resolve.RuleIndex, imp string) (resol
 	if imp == "" || imp == "." || imp == ".." || !firstParty(imp) {
 		return resolve.FindResult{}, false
 	}
+	if ix == nil || ix != s.index || s.emission == nil {
+		return findCodegenTreeOwner(s, ix, imp)
+	}
+	memo := s.resolutionMemo()
+	if owner, ok := memo.trees[imp]; ok {
+		return owner.result, owner.found
+	}
+	result, found := findCodegenTreeOwner(s, ix, imp)
+	memo.trees[imp] = treeOwner{result, found}
+	return result, found
+}
+
+func (s *programStore) indexedTree(ix *resolve.RuleIndex, dir string) (resolve.FindResult, bool) {
+	lookup := func() (resolve.FindResult, bool) {
+		spec := resolve.ImportSpec{Lang: languageName, Imp: codegenTreeKey(dir)}
+		for _, r := range ix.FindRulesByImport(spec, languageName) {
+			return r, true
+		}
+		return resolve.FindResult{}, false
+	}
+	if ix != s.index || s.emission == nil {
+		return lookup()
+	}
+	memo := s.resolutionMemo()
+	if owner, ok := memo.indexedTrees[dir]; ok {
+		return owner.result, owner.found
+	}
+	result, found := lookup()
+	memo.indexedTrees[dir] = treeOwner{result, found}
+	return result, found
+}
+
+type treeOwner struct {
+	result resolve.FindResult
+	found  bool
+}
+
+func findCodegenTreeOwner(s *programStore, ix *resolve.RuleIndex, imp string) (resolve.FindResult, bool) {
 	producer, pkg, root := s.declaredOutputProducer(imp, true)
 	for dir := imp; dir != "" && dir != "." && dir != "/" && dir != ".."; dir = path.Dir(dir) {
 		if ix != nil {
-			spec := resolve.ImportSpec{Lang: languageName, Imp: codegenTreeKey(dir)}
-			for _, r := range ix.FindRulesByImport(spec, languageName) {
+			if r, found := s.indexedTree(ix, dir); found {
 				return r, true
 			}
 		}
@@ -1823,8 +1860,22 @@ func compilerConfigSource(c *config.Config, selected, owner string,
 }
 
 func (s *programStore) outputProducer(file string) (*rule.Rule, string) {
+	if s.index == nil || s.emission == nil {
+		producer, pkg, _ := s.declaredOutputProducer(file, false)
+		return producer, pkg
+	}
+	memo := s.resolutionMemo()
+	if owner, ok := memo.producers[file]; ok {
+		return owner.rule, owner.pkg
+	}
 	producer, pkg, _ := s.declaredOutputProducer(file, false)
+	memo.producers[file] = fileProducer{producer, pkg}
 	return producer, pkg
+}
+
+type fileProducer struct {
+	rule *rule.Rule
+	pkg  string
 }
 
 func (s *programStore) declaredOutputProducer(file string, tree bool) (*rule.Rule, string, string) {
@@ -1833,6 +1884,16 @@ func (s *programStore) declaredOutputProducer(file string, tree bool) (*rule.Rul
 	}
 	var producer *rule.Rule
 	var pkg, root string
+	if tree && s.index != nil {
+		if trees, observed := s.ancestorTrees(parentDir(file)); observed {
+			for _, t := range trees {
+				if within(file, t.root) && (producer == nil || len(t.root) > len(root)) {
+					producer, pkg, root = t.producer, t.pkg, t.root
+				}
+			}
+			return producer, pkg, root
+		}
+	}
 	for dir := parentDir(file); ; dir = parentDir(dir) {
 		if f := s.emission.files[dir]; f != nil {
 			if outputs := s.packageOutputs(dir, f); outputs != nil {
@@ -1872,6 +1933,43 @@ func (s *programStore) declaredOutputProducer(file string, tree bool) (*rule.Rul
 			return producer, pkg, root
 		}
 	}
+}
+
+type ancestorTree struct {
+	root, pkg string
+	producer  *rule.Rule
+}
+
+// ancestorTrees are the trees of every package at or above dir in declaredOutputProducer's scan order;
+// not observed while a package's rules are unobserved, which only that scan may observe.
+func (s *programStore) ancestorTrees(dir string) ([]ancestorTree, bool) {
+	memo := s.resolutionMemo()
+	if known, ok := memo.ancestorTrees[dir]; ok {
+		return known.trees, known.observed
+	}
+	var trees []ancestorTree
+	observed := true
+	if f := s.emission.files[dir]; f != nil {
+		if outputs := s.packageOutputs(dir, f); outputs != nil {
+			for _, t := range outputs.trees {
+				trees = append(trees, ancestorTree{root: t.root, pkg: dir, producer: outputs.producers[t.rule]})
+			}
+		} else {
+			observed = false
+		}
+	}
+	if observed && dir != "" {
+		above, aboveObserved := s.ancestorTrees(parentDir(dir))
+		observed = aboveObserved
+		trees = append(trees, above...)
+	}
+	memo.ancestorTrees[dir] = ancestorTrees{trees, observed}
+	return trees, observed
+}
+
+type ancestorTrees struct {
+	trees    []ancestorTree
+	observed bool
 }
 
 // Valid while the package's rules, their stored owners and its configuration stay the same objects.

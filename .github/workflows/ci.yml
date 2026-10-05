@@ -367,6 +367,16 @@ jobs:
             USE_BAZEL_VERSION="${declared:-$(cat .bazelversion)}" \
             bazelisk --version
 
+      # A PR's runtime actions miss main's cache; built here, no group pays them inside its timeout.
+      - name: Warm the nested runtime actions
+        if: matrix.shard == 'core'
+        run: |
+          set -o pipefail
+          bazelisk test --config=ci-integration-core \
+            //tests/integration:gazelle_roundtrip_warmup_test \
+            --test_env=RULES_TS_IT_SCRATCH=/mnt/rules_ts_it 2>&1 \
+            | tee "${RUNNER_TEMP}/warmup.log"
+
       # The tests carry "cpu:2", not "exclusive", so Bazel already runs as many
       # as this runner has cores for; the config picks which of them this leg
       # owns.

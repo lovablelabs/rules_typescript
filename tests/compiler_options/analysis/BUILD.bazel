@@ -124,7 +124,6 @@ ts_npm_package(
     name = "borrowed_culori_types",
     package_name = "@types/culori",
     package_dir = ":borrowed_culori_manifest",
-    package_files = [":borrowed_culori_files"],
     package_version = "0.0.0",
     store = ":node_modules/.pnpm/@types+culori@0.0.0/node_modules/@types/culori",
 )

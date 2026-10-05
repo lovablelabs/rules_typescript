@@ -76,3 +76,58 @@ func TestMain_SuccessDoesNotReportAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStage_PackageDirectoryCopiesWholeTreeAtDot(t *testing.T) {
+	pkg := filepath.Join(t.TempDir(), "pkg")
+	for _, dir := range []string{"lib/deep", "empty"} {
+		if err := os.MkdirAll(filepath.Join(pkg, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, text := range map[string]string{"package.json": "{}", "lib/deep/index.js": "x"} {
+		if err := os.WriteFile(filepath.Join(pkg, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("lib/deep/index.js", filepath.Join(pkg, "main.js")); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "tree")
+	if err := stage([]string{"-out=" + out, pkg, "."}); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"package.json": "{}", "lib/deep/index.js": "x", "main.js": "x"} {
+		if got, err := os.ReadFile(filepath.Join(out, name)); err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(out, "empty")); err != nil || !info.IsDir() {
+		t.Errorf("empty directory not staged: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(out, "main.js")); err != nil || target != "lib/deep/index.js" {
+		t.Errorf("in-package link = %q, %v; want it kept as lib/deep/index.js", target, err)
+	}
+}
+
+func TestStage_LinkLeavingThePackageOrLoopingFails(t *testing.T) {
+	for name, links := range map[string]map[string]string{
+		"escape":   {"evil": "../outside"},
+		"absolute": {"evil": "/etc/passwd"},
+		"loop":     {"a": "b", "b": "a"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pkg := filepath.Join(t.TempDir(), "pkg")
+			if err := os.MkdirAll(pkg, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for link, target := range links {
+				if err := os.Symlink(target, filepath.Join(pkg, link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := stage([]string{"-out=" + filepath.Join(t.TempDir(), "tree"), pkg, "."}); err == nil {
+				t.Error("stage succeeded")
+			}
+		})
+	}
+}

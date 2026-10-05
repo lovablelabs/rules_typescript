@@ -64,12 +64,13 @@ type PackageLink = runtimeview.PackageLink
 // VitestConfig runs the vitest CLI over a sharded set of compiled test files.
 // NodeModules is the importer chain, nearest first.
 type VitestConfig struct {
-	NpmContexts   []NpmContext `json:"npm_contexts,omitempty"`
-	VitestInTree  string       `json:"vitest_in_tree,omitempty"`
-	ConfigFile    string       `json:"config_file"`
-	TestFilesList string       `json:"test_files_list"`
-	NodeModules   []string     `json:"node_modules,omitempty"`
-	ReadsHook     string       `json:"reads_hook,omitempty"`
+	NpmContexts   []NpmContext        `json:"npm_contexts,omitempty"`
+	NpmBindings   []map[string]string `json:"npm_binding_sets,omitempty"`
+	VitestInTree  string              `json:"vitest_in_tree,omitempty"`
+	ConfigFile    string              `json:"config_file"`
+	TestFilesList string              `json:"test_files_list"`
+	NodeModules   []string            `json:"node_modules,omitempty"`
+	ReadsHook     string              `json:"reads_hook,omitempty"`
 	// RootRel is vite's root relative to the config's directory: the package
 	// of a `config` from an ancestor package, "." otherwise.
 	RootRel string `json:"root_rel,omitempty"`

@@ -34,6 +34,33 @@ type emissionGraph struct {
 	listEpoch int
 	// Bumped whenever a stored owner or BUILD file that could declare outputs changes.
 	outputsGeneration int
+	// Bumped at every rule store except a resolved TypeScript rule stored again unchanged.
+	rulesGeneration int
+	// observeBuilds' crawl memo: targets whose references were followed, and the
+	// packages they read. A rule edit in one of those packages clears it.
+	crawled, crawledPkgs map[string]bool
+	lastTouched          string
+}
+
+func (g *emissionGraph) crawlMemo() {
+	if g.crawled == nil {
+		g.crawled, g.crawledPkgs = map[string]bool{}, map[string]bool{}
+	}
+}
+
+// touch marks the package a callback edits. Gazelle's Fix and merge rewrite only
+// the BUILD file of the directory a callback ran for, after it returns.
+func (g *emissionGraph) touch(pkg string) {
+	if g.crawledPkgs[pkg] || g.crawledPkgs[g.lastTouched] {
+		g.crawled = nil
+	}
+	g.lastTouched = pkg
+}
+
+func (s *programStore) touchPackage(pkg string) {
+	if s != nil && s.emission != nil {
+		s.emission.touch(pkg)
+	}
 }
 
 func (s *programStore) ruleListsMayChange() {
@@ -50,6 +77,19 @@ type registeredBuild struct {
 }
 
 func (g *emissionGraph) setRule(key string, r *rule.Rule) {
+	g.rulesGeneration++
+	g.storeRule(key, r)
+}
+
+// Resolve edits only resolve attributes, which no proto provider reads.
+func (g *emissionGraph) setResolvedRule(key string, r *rule.Rule) {
+	if g.rules[key] != r {
+		g.rulesGeneration++
+	}
+	g.storeRule(key, r)
+}
+
+func (g *emissionGraph) storeRule(key string, r *rule.Rule) {
 	if declaresOutputs(g.rules[key]) || declaresOutputs(r) {
 		g.outputsGeneration++
 	}
@@ -61,6 +101,7 @@ func (g *emissionGraph) deleteRule(key string) {
 	if declaresOutputs(g.rules[key]) {
 		g.outputsGeneration++
 	}
+	g.rulesGeneration++
 	delete(g.rules, key)
 	g.bump(key)
 }
@@ -81,7 +122,11 @@ func (g *emissionGraph) bump(key string) {
 	own, err := parseLabel(key)
 	if err != nil {
 		g.epoch++
+		g.crawled = nil
 		return
+	}
+	if g.crawledPkgs[own.Pkg] {
+		g.crawled = nil
 	}
 	if g.versions == nil {
 		g.versions = map[string]int{}
@@ -341,6 +386,7 @@ func (s *programStore) recordEmissionConsumers(c *config.Config, pkg string) {
 }
 
 func (l *tsLang) AfterResolvingDeps(_ context.Context) {
+	defer logListingCache()
 	if l.programs == nil || l.programs.emission == nil {
 		return
 	}

@@ -111,14 +111,16 @@ def _runtime_npm_context_impl(ctx):
             asserts.true(env, spec_action.outputs.to_list()[0] in builders[0].inputs.to_list(), "the native view consumes the inspected context spec")
             spec = json.decode(spec_action.content)
             contexts = spec["npm_contexts"]
+            binding_sets = spec["npm_binding_sets"]
             modules = spec["modules"]
         else:
             contexts = config[config["mode"]].get("npm_contexts", [])
+            binding_sets = config[config["mode"]].get("npm_binding_sets", [])
             modules = config["runtime_modules"]
         contexts = [context for context in contexts if context["source"] == source.short_path and context["module"] == coordinate]
         asserts.equals(env, 1, len(contexts), "the admitted source retains one context at its execution coordinate")
         if contexts:
-            asserts.equals(env, rlocation_path(ctx, source_store), contexts[0]["bindings"].get("@types/culori"), "the context retains the source's exact store, not the consumer's version")
+            asserts.equals(env, rlocation_path(ctx, source_store), binding_sets[contexts[0]["bindings_set"]].get("@types/culori"), "the context retains the source's exact store, not the consumer's version")
         asserts.true(env, coordinate in modules, "npm context is anchored to an admitted runtime module")
     runfiles = target[DefaultInfo].default_runfiles
     visible = runfiles_scope_paths(ctx, runfiles, [coordinate])

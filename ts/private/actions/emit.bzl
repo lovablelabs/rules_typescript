@@ -8,7 +8,7 @@ alone. docs/rules/ts-compile.md § The Module Format.
 
 load("//ts/private:toolchain.bzl", "get_tools_toolchain")
 load(":manifest.bzl", "runtime_scope_inputs")
-load(":tsgo.bzl", "compiler_sources")
+load(":tsgo.bzl", "add_overlays", "compiler_sources")
 
 def emit_action(
         ctx,
@@ -50,7 +50,7 @@ def emit_action(
         compiler_sources(args, program_inputs, chain, dep_dts, generated_srcs)
         args.add_all(importers, format_each = "-node_modules=%s")
         args.add_all(inherited_importers, format_each = "-inherit_node_modules=%s")
-        args.add_all(overlays, format_each = "-overlay=%s")
+        add_overlays(args, overlays)
         args.add_all(manifests, format_each = "-manifest=%s")
         args.add("-scratch=" + scratch)
     args.add("-out_dir=" + out_base)

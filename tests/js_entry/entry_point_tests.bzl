@@ -161,8 +161,11 @@ def _data_links_impl(ctx):
         inputs = {input["path"]: input for input in spec["inputs"]}
         links = [file for file in ctx.files.fixtures if file.is_symlink]
         asserts.equals(env, ["dangling.js", "dangling.json", "valid.js", "valid.json"], sorted([file.basename for file in links]))
+        builders = [action for action in runnable_actions(env) if action.mnemonic == "TsNativeView"]
+        outputs = {output.path: output for builder in builders for output in builder.outputs.to_list()}
         for file in links:
-            asserts.equals(env, "symlink", inputs[file.path]["kind"], "data link retains its declared kind: " + file.basename)
+            output = outputs.get(spec["root"] + "/" + rlocation_path(ctx, file))
+            asserts.true(env, output != None and output.is_symlink, "data link retains its declared kind: " + file.basename)
             asserts.false(env, rlocation_path(ctx, file) in spec["modules"], "data link cannot become a canonical module: " + file.basename)
         file = ctx.file.javascript_data
         asserts.true(env, rlocation_path(ctx, file) in spec["modules"], "regular JavaScript data keeps its module coordinate for every entry shape")

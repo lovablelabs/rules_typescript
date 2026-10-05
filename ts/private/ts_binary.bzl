@@ -227,9 +227,10 @@ def _ts_binary_impl(ctx):
         config["node"]["node_modules"] = runfiles_dir(ctx, node_modules.label)
     module_paths = {file: (rlocation_path(ctx, file), file) for file in modules}
     available = {rlocation_path(ctx, file): file for file in live}
-    contexts, context_inputs = runtime_npm_contexts(ctx, struct(owners = owner_sets), module_paths, available, links)
+    contexts, binding_sets, context_inputs = runtime_npm_contexts(ctx, struct(owners = owner_sets), module_paths, available, links)
     if contexts:
         config["node"]["npm_contexts"] = contexts
+        config["node"]["npm_binding_sets"] = binding_sets
     demanded.extend([(rlocation_path(ctx, file), file) for file in context_inputs])
 
     explicit_runfiles = list(data_files) + context_inputs

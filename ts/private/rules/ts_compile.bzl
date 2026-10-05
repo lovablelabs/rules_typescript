@@ -93,7 +93,6 @@ load(
 )
 load(
     "//ts/private/actions:tsgo.bzl",
-    "npm_hub_entry",
     "npm_hub_label",
     "ownership_manifest",
     "tsgo_check",
@@ -277,6 +276,18 @@ def _module_path(source, output):
             suffix = declaration
             break
     return logical[:-(len(source.extension) + 1)] + suffix
+
+def _overlay_arg(entry):
+    return entry if type(entry) == "string" else json.encode([entry.path, _logical_path(entry)])
+
+def _declaration_overlay_arg(pair):
+    return json.encode([pair[1].path, _module_path(pair[0], pair[1])])
+
+def _json_overlay_arg(pair):
+    return json.encode([pair[1].path, _logical_path(pair[0])])
+
+def _declaration_path_arg(pair):
+    return _module_path(pair[0], pair[1])
 
 def _program_layout(package, sources, declarations, dependency_pairs, assets, emit):
     dependency_moved = any([_module_path(source, output) != _logical_path(output) for source, output in dependency_pairs])
@@ -585,7 +596,7 @@ def compile_program(
 
     declared_trees = {selected.link.store.tree: True for selected in selected_npm}
     npm_reachable = [
-        npm_hub_entry(info)
+        info
         for info in packages
         if info.store.tree not in declared_trees
     ]
@@ -1075,14 +1086,19 @@ def compile_program(
     json_modules = {runtime: True for source, runtime in dependency_pairs if source.extension == "json"}
 
     # Package imports do not use rootDirs to reach generated compiler inputs.
-    overlays.update({
-        file.path: _logical_path(file)
+    overlay_entries = {path: json.encode([path, logical]) for path, logical in overlays.items()}
+    overlay_entries.update({
+        file.path: file
         for file in compiler_type_files.keys() + [file for file in dep_json if file in json_modules]
         if not file.is_source and not file.is_directory
     })
-    exact_overlays = [json.encode([declaration.path, _module_path(source, declaration)]) for source, declaration in dependency_declarations]
-    exact_overlays += [json.encode([runtime.path, _logical_path(source)]) for source, runtime in dependency_pairs if source.extension == "json"]
-    compiler_overlays = [json.encode([path, overlays[path]]) for path in sorted(overlays.keys())] + exact_overlays
+
+    # Closure-sized overlay strings are rendered by map_each at execution, not retained per target.
+    compiler_overlays = [
+        ([overlay_entries[path] for path in sorted(overlay_entries.keys())], _overlay_arg),
+        (dependency_declarations, _declaration_overlay_arg),
+        ([pair for pair in dependency_pairs if pair[0].extension == "json"], _json_overlay_arg),
+    ]
     lint = ctx.attr._lint[LintConfigInfo]
     needs_config = program_srcs or (lint.binary and check_srcs and any(["{tsconfig}" in arg for arg in lint.args]))
     tsgo_toolchain_info = ctx.toolchains[TSGO_TOOLCHAIN_TYPE]
@@ -1115,7 +1131,7 @@ def compile_program(
             isolated_declarations = oxc_emits_dts,
             lib_check = ctx.attr._lib_check[BuildSettingInfo].value,
             emit = emit,
-            declaration_paths = [_module_path(source, declaration) for source, declaration in dependency_declarations],
+            declaration_paths = (dependency_declarations, _declaration_path_arg),
         )
         tsconfig = written.tsconfig
         options_file = written.options

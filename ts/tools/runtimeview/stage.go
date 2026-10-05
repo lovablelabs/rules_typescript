@@ -12,16 +12,44 @@ import (
 	"strings"
 )
 
+// Bindings is filled from BindingsSet, an index into the config's
+// npm_binding_sets, by ResolveNpmBindings.
 type NpmContext struct {
 	Module       string            `json:"module"`
 	Source       string            `json:"source"`
-	Bindings     map[string]string `json:"bindings"`
+	Bindings     map[string]string `json:"bindings,omitempty"`
+	BindingsSet  *int              `json:"bindings_set,omitempty"`
 	PackageScope *NpmPackageScope  `json:"package_scope,omitempty"`
 }
 
 type NpmPackageScope struct {
-	Manifest string            `json:"manifest"`
-	Bindings map[string]string `json:"bindings"`
+	Manifest    string            `json:"manifest"`
+	Bindings    map[string]string `json:"bindings,omitempty"`
+	BindingsSet *int              `json:"bindings_set,omitempty"`
+}
+
+func ResolveNpmBindings(contexts []NpmContext, sets []map[string]string) error {
+	pick := func(i *int, bindings *map[string]string) error {
+		if i == nil {
+			return nil
+		}
+		if *i < 0 || *i >= len(sets) {
+			return fmt.Errorf("ts_launcher: npm bindings set %d of %d", *i, len(sets))
+		}
+		*bindings = sets[*i]
+		return nil
+	}
+	for i := range contexts {
+		if err := pick(contexts[i].BindingsSet, &contexts[i].Bindings); err != nil {
+			return err
+		}
+		if scope := contexts[i].PackageScope; scope != nil {
+			if err := pick(scope.BindingsSet, &scope.Bindings); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type npmDemand struct {

@@ -145,8 +145,8 @@ names the snapshot's tree in [the store](node-modules.md#the-store).
 | `package_version` | `string` | The version; `0.0.0` on a workspace member, which pnpm resolves by path |
 | `peer_id` | `string` | A filesystem-safe token naming the peer set this resolution was made against, empty for a package pnpm resolved only one way. Two snapshots can share `name@version` and differ only here |
 | `package_dir` | `File or None` | The `package.json` at the root of the extracted package. `None` on a workspace member, whose compile writes the manifest as built |
-| `package_root` | `string` | Exec-root-relative directory the files in `all_files` hang off: where `package_dir` sits for an extracted tarball, the member's directory under `bazel-bin` for a workspace member |
-| `all_files` | `depset of File` | Every file of the package (`package.json`, `.js`, `.d.ts`, other assets), the files its store tree copies; a member's are its outputs, the manifest as built in place of the src |
+| `package_root` | `string` | Exec-root-relative directory the files in `all_files` hang off: the store tree for an extracted tarball, the member's directory under `bazel-bin` for a workspace member |
+| `all_files` | `depset of File` | The package's files: the store tree alone for an extracted tarball; a member's outputs, the files its store tree copies, the manifest as built in place of the src |
 | `transitive_deps` | `depset of NpmPackageInfo` | Every npm package reachable from this one, the paired `@types/*` package included |
 | `store` | `NpmStoreInfo` | The snapshot's store tree and the links beside it: `key`, `tree`, `links`, `transitive` (`npm/private/store.bzl`) |
 

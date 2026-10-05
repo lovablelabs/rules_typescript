@@ -115,6 +115,13 @@ crate.annotation(
     version = "0.40.0",
 )
 crate.annotation(
+    crate = "oj_js",
+    patch_args = ["-p1"],
+    patches = ["//oj:oj-js-code-cache-bounded.patch"],
+    repositories = ["oj_crates"],
+    version = "0.2.5",
+)
+crate.annotation(
     crate = "libsqlite3-sys",
     patch_args = ["-p1"],
     patches = ["//oj:sqlite-build-script-path.patch"],

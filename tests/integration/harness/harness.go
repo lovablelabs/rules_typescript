@@ -46,7 +46,8 @@ type IT struct {
 	staged     string
 	scratchDir string
 	bazelrc    string
-	bazelBin   string
+	bazelBins  map[string]string
+	lastBase   string
 	registry   string
 	stops      []func()
 
@@ -369,12 +370,17 @@ func (it *IT) cleanup() {
 	for i := len(it.stops) - 1; i >= 0; i-- {
 		it.stops[i]()
 	}
-	shutdown := exec.Command(it.bazel, append(it.startup(), "shutdown")...)
-	shutdown.Env = nestedEnv()
-	shutdown.Run()
+	for _, base := range it.outputBases() {
+		if _, err := os.Stat(base); err != nil {
+			continue
+		}
+		shutdown := exec.Command(it.bazel, append(it.startupIn(base), "shutdown")...)
+		shutdown.Env = nestedEnv()
+		shutdown.Run()
+	}
 	dirs := it.scratchDirs()
 	if os.Getenv("TEST_TMPDIR") != "" {
-		dirs = append(dirs, it.OutputBase)
+		dirs = append(dirs, it.outputBases()...)
 	}
 	for _, dir := range dirs {
 		makeWritable(dir)
@@ -425,7 +431,11 @@ func nestedEnv() []string {
 // No user or system rc: setup-bazel's ~/.bazelrc `build --disk_cache` outranks
 // the `common` one above and sent every nested action to a cache CI never saves.
 func (it *IT) startup() []string {
-	opts := []string{"--nosystem_rc", "--nohome_rc", "--output_base=" + it.OutputBase}
+	return it.startupIn(it.OutputBase)
+}
+
+func (it *IT) startupIn(base string) []string {
+	opts := []string{"--nosystem_rc", "--nohome_rc", "--output_base=" + base}
 	if it.bazelrc != "" {
 		opts = append(opts, "--bazelrc="+it.bazelrc)
 	}
@@ -447,8 +457,29 @@ func (it *IT) BazelExecutable() string {
 	return path
 }
 
+// Flipping --enable_runfiles discards the analysis cache, which cost the roundtrip checks
+// about a third of their nested time; each mode keeps its own server and output base.
+func (it *IT) outputBaseFor(args []string) string {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		switch arg {
+		case "--noenable_runfiles", "--enable_runfiles=false", "--enable_runfiles=no", "--enable_runfiles=0":
+			return it.OutputBase + "_manifest"
+		}
+	}
+	return it.OutputBase
+}
+
+func (it *IT) outputBases() []string {
+	return []string{it.OutputBase, it.OutputBase + "_manifest"}
+}
+
 func (it *IT) command(args []string) *exec.Cmd {
-	cmd := exec.Command(it.bazel, append(it.startup(), args...)...)
+	base := it.outputBaseFor(args)
+	it.lastBase = base
+	cmd := exec.Command(it.bazel, append(it.startupIn(base), args...)...)
 	cmd.Dir = it.WorkspaceDir
 	cmd.Env = nestedEnv()
 	return cmd
@@ -577,20 +608,32 @@ func (it *IT) Install() {
 		"pnpm install left no node_modules/.modules.yaml at the workspace root")
 }
 
+// The bazel-bin of the output base the last invocation used, as Bazel's own symlink would be.
 func (it *IT) BazelBin() string {
-	if it.bazelBin == "" {
-		cmd := it.command([]string{"info", "bazel-bin"})
-		out := &strings.Builder{}
-		cmd.Stdout = out
-		if err := cmd.Run(); err != nil {
-			it.Fail("bazel info bazel-bin failed: %v", err)
-		}
-		it.bazelBin = strings.TrimSpace(out.String())
-		if it.bazelBin == "" {
-			it.Fail("bazel info bazel-bin printed nothing")
-		}
+	base := it.lastBase
+	if base == "" {
+		base = it.OutputBase
 	}
-	return it.bazelBin
+	if bin, ok := it.bazelBins[base]; ok {
+		return bin
+	}
+	cmd := exec.Command(it.bazel, append(it.startupIn(base), "info", "bazel-bin")...)
+	cmd.Dir = it.WorkspaceDir
+	cmd.Env = nestedEnv()
+	out := &strings.Builder{}
+	cmd.Stdout = out
+	if err := cmd.Run(); err != nil {
+		it.Fail("bazel info bazel-bin failed: %v", err)
+	}
+	bin := strings.TrimSpace(out.String())
+	if bin == "" {
+		it.Fail("bazel info bazel-bin printed nothing")
+	}
+	if it.bazelBins == nil {
+		it.bazelBins = map[string]string{}
+	}
+	it.bazelBins[base] = bin
+	return bin
 }
 
 func (l *Log) Contains(text string) bool {
@@ -822,9 +865,12 @@ func (it *IT) RequireFile(path, format string, a ...any) {
 	}
 }
 
+// One output base held every earlier build's outputs, so an absence holds in every base.
 func (it *IT) RequireNoFile(path, format string, a ...any) {
-	if _, err := os.Stat(path); err == nil {
-		it.Fail(format, a...)
+	for _, path := range it.inEveryBase(path) {
+		if _, err := os.Stat(path); err == nil {
+			it.Fail(format, a...)
+		}
 	}
 }
 
@@ -843,9 +889,27 @@ func (it *IT) RequireDir(path, format string, a ...any) {
 }
 
 func (it *IT) RequireNoDir(path, format string, a ...any) {
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		it.Fail(format, a...)
+	for _, path := range it.inEveryBase(path) {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			it.Fail(format, a...)
+		}
 	}
+}
+
+func (it *IT) inEveryBase(path string) []string {
+	bases := it.outputBases()
+	for _, base := range bases {
+		rel, err := filepath.Rel(base, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		paths := []string{}
+		for _, other := range bases {
+			paths = append(paths, filepath.Join(other, rel))
+		}
+		return paths
+	}
+	return []string{path}
 }
 
 func (it *IT) RequireContains(path, text, format string, a ...any) {
