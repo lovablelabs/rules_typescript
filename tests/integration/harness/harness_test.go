@@ -7,6 +7,47 @@ import (
 	"testing"
 )
 
+func TestBazelStdout(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		exit string
+	}{
+		{name: "failed_command_retains_stdout_diagnostics", exit: "7"},
+		{name: "successful_command_preserves_stdout_exactly", exit: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bazel := filepath.Join(dir, "bazel")
+			script := "#!/bin/sh\nprintf '  diagnostic 100%% complete\\nnext line\\t \\n'\nexit " + tc.exit + "\n"
+			if err := os.WriteFile(bazel, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Close every executable writer before a sibling fork can inherit it.
+			t.Parallel()
+			it := &IT{bazel: bazel, WorkspaceDir: dir}
+			var output string
+			var caught any
+			func() {
+				defer func() { caught = recover() }()
+				output = it.BazelStdout("run", "//:probe")
+			}()
+			want := "  diagnostic 100% complete\nnext line\t \n"
+			if tc.exit != "0" {
+				got, ok := caught.(failure)
+				if !ok {
+					t.Fatalf("panic = %#v, want harness failure", caught)
+				}
+				if !strings.Contains(got.msg, "exit status "+tc.exit) || !strings.Contains(got.msg, want) {
+					t.Fatalf("failure lost exit status or stdout: %q", got.msg)
+				}
+			} else if caught != nil || output != want {
+				t.Fatalf("stdout = %q, panic = %#v; want %q without panic", output, caught, want)
+			}
+		})
+	}
+}
+
 // Ambient Bazel variables would otherwise mask missing fallback behavior.
 func setEnv(t *testing.T, env map[string]string) {
 	t.Helper()
@@ -265,5 +306,32 @@ func TestNestedEnvDropsTestTmpdir(t *testing.T) {
 
 	if got, count := envValue(nestedEnv(), "TEST_TMPDIR"); count != 0 {
 		t.Errorf("TEST_TMPDIR = %q (%d entries), want it dropped", got, count)
+	}
+}
+
+// rules_typescript#235's roundtrip groups timed out at 900 s: flipping --enable_runfiles
+// in one output base discarded its analysis cache on every flip.
+func TestRunfilesModesKeepSeparateOutputBases(t *testing.T) {
+	base := t.TempDir()
+	it := &IT{OutputBase: filepath.Join(base, "output_base")}
+	manifest := it.outputBaseFor([]string{"test", "//:t", "--noenable_runfiles"})
+	if manifest == it.OutputBase {
+		t.Fatalf("--noenable_runfiles shares the output base %s", manifest)
+	}
+	for _, args := range [][]string{{"run", "//:gazelle"}, {"test", "//:t", "--enable_runfiles"}, {"run", "//:t", "--", "--noenable_runfiles"}} {
+		if got := it.outputBaseFor(args); got != it.OutputBase {
+			t.Errorf("outputBaseFor(%q) = %s, want %s", args, got, it.OutputBase)
+		}
+	}
+	stale := filepath.Join(manifest, "execroot", "_main", "bazel-out", "stale.js")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths := it.inEveryBase(filepath.Join(it.OutputBase, "execroot", "_main", "bazel-out", "stale.js"))
+	if len(paths) != 2 || paths[1] != stale {
+		t.Errorf("inEveryBase() = %q, want both bases' paths ending in %s", paths, stale)
 	}
 }

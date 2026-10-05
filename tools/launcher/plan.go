@@ -2,12 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
+
+	"github.com/mikn/rules_typescript/ts/tools/runtimeview"
 )
 
 // Plan is everything the launcher decided before it touched the process table.
@@ -25,8 +25,8 @@ type Plan struct {
 	UseExec     bool `json:"use_exec"`
 	runfilesEnv []string
 	Supervise   SuperviseOptions `json:"-"`
-	Cleanup     func()           `json:"-"`
-	PostRun     func(int) error  `json:"-"`
+	cleanup     cleanupResources
+	PostRun     func(int) error `json:"-"`
 }
 
 func (p *Plan) setEnv(key, value string) {
@@ -127,15 +127,10 @@ func runtimeCommand(cfg *Config, r *Resolver) ([]string, error) {
 // installNodeModules puts the chain on NODE_PATH nearest first and links its
 // root in as <workspace>/node_modules, the walk-up's last stop for ESM.
 func installNodeModules(
-	r *Resolver, plan *Plan, root, workspace string, rlocations []string,
+	plan *Plan, root, workspace string, rlocations []string,
 ) ([]string, error) {
 	if len(rlocations) == 0 {
 		return nil, nil
-	}
-	if r.Dir() == "" {
-		if err := stageNodeModules(root, runfilesEnv(r.Env(), "RUNFILES_MANIFEST_FILE")); err != nil {
-			return nil, err
-		}
 	}
 	dirs := make([]string, 0, len(rlocations))
 	for _, rlocation := range rlocations {
@@ -147,59 +142,35 @@ func installNodeModules(
 		}
 	}
 	if chainRoot := dirs[len(dirs)-1]; isDir(chainRoot) {
-		linkAs(filepath.Join(root, workspace, "node_modules"), chainRoot)
+		link := filepath.Join(root, workspace, "node_modules")
+		if _, err := os.Lstat(link); os.IsNotExist(err) {
+			if parent, err := os.Lstat(filepath.Dir(link)); err == nil && parent.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("ts_launcher: cannot add %q through a workspace directory alias; declare node_modules in that directory or expose its runfiles individually", link)
+			}
+		}
+		linkAs(link, chainRoot)
 	}
 	return dirs, nil
 }
 
-func isDir(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && st.IsDir()
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
-// stageNodeModules links every node_modules entry of the manifest into root
-// at its runfiles path, a declared link's relative target kept verbatim.
-func stageNodeModules(root, manifest string) error {
-	if manifest == "" {
-		return errors.New("ts_launcher: no runfiles directory and no " +
-			"RUNFILES_MANIFEST_FILE")
-	}
-	data, err := os.ReadFile(manifest)
-	if err != nil {
+func placeNpmContexts(r *Resolver, contexts []NpmContext, sets []map[string]string, modules []string) error {
+	if err := runtimeview.ResolveNpmBindings(contexts, sets); err != nil {
 		return err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		rlocation, target, ok := manifestEntry(line)
-		if !ok || !strings.Contains(rlocation, "/node_modules/") {
-			continue
-		}
-		link := filepath.Join(root, filepath.FromSlash(rlocation))
-		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
-			return err
-		}
-		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if err := os.Symlink(filepath.FromSlash(target), link); err != nil {
-			return err
-		}
-	}
-	return nil
+	return runtimeview.PlaceNpmContexts(r.Dir(), contexts, modules)
 }
 
-// manifestEntry reads one runfiles manifest line, "<rlocation> <target>"; a
-// line starting with a space escapes both as \s, \n and \b.
-func manifestEntry(line string) (rlocation, target string, ok bool) {
-	escaped := strings.HasPrefix(line, " ")
-	rlocation, target, ok = strings.Cut(strings.TrimPrefix(line, " "), " ")
-	if !ok || rlocation == "" {
-		return "", "", false
-	}
-	if escaped {
-		unescape := strings.NewReplacer(`\s`, " ", `\n`, "\n", `\b`, `\`)
-		rlocation, target = unescape.Replace(rlocation), unescape.Replace(target)
-	}
-	return rlocation, target, true
+func stageManifest(root, manifest string, include func(string) bool, modules []string) error {
+	return runtimeview.StageManifest(root, manifest, include, modules)
+}
+
+func stageEntries(root string, entries map[string]string, modules []string) error {
+	return runtimeview.Stage(root, entries, modules)
 }
 
 // linkAs creates link -> target unless something already sits at link.
@@ -211,9 +182,7 @@ func linkAs(link, target string) {
 }
 
 func Run(plan *Plan) (int, error) {
-	if plan.Cleanup != nil && !plan.UseExec {
-		defer plan.Cleanup()
-	}
+	defer plan.Cleanup()
 	for _, m := range plan.Messages {
 		fmt.Fprintln(os.Stderr, m)
 	}
@@ -227,6 +196,9 @@ func Run(plan *Plan) (int, error) {
 	}
 	env := Environ(plan.EnvOverrides, plan.runfilesEnv)
 	if plan.UseExec && plan.PostRun == nil {
+		if len(plan.cleanup) != 0 {
+			return 1, fmt.Errorf("ts_launcher: exec plan owns mutable inputs; use the supervised lifecycle")
+		}
 		return 1, Exec(plan.Argv, env)
 	}
 	code, err := Supervise(plan.Argv, env, plan.Supervise)

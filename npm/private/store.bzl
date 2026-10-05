@@ -6,6 +6,9 @@ load(
     "NpmHoistInfo",
     "NpmLinkInfo",
     "TsInfo",
+    "canonical_runtime_file",
+    "runtime_links",
+    "runtime_mappings",
 )
 load(
     "//ts/private:toolchain.bzl",
@@ -38,7 +41,9 @@ HOIST_TARGET = STORE_DIR + "/node_modules"
 
 def store_key(name, version, peer_id):
     """The store directory of one resolution: name, version and peer set."""
-    key = "{}@{}".format(name.replace("/", "+"), version)
+
+    # pnpm's own spelling, which also covers the path in a `file:` version.
+    key = "{}@{}".format(name.replace("/", "+"), version.replace("/", "+").replace(":", "+"))
     return key if not peer_id else "{}_{}".format(key, peer_id)
 
 def store_target(key, name):
@@ -165,9 +170,12 @@ def _store_info(ctx, parts, tree, links):
 def _npm_store_impl(ctx):
     parts = _store_parts(ctx.label.name)
     tree = ctx.actions.declare_directory(ctx.label.name)
-    root = ctx.file.package_dir.dirname + "/"
+    package = ctx.file.package_dir.dirname
+    root = package + "/"
 
     def dest(f):
+        if f.path == package:
+            return "."
         if not f.path.startswith(root):
             fail("{}: {} lies outside the package at {}".format(
                 ctx.label,
@@ -193,7 +201,8 @@ npm_store = rule(
     attrs = {
         "files": attr.label(
             mandatory = True,
-            doc = "The snapshot repository's `:files` filegroup.",
+            doc = "The snapshot repository's `:files` filegroup: the package " +
+                  "directory, or files inside it.",
         ),
         "package_dir": attr.label(
             mandatory = True,
@@ -229,6 +238,14 @@ def _npm_store_member_impl(ctx):
     tree = ctx.actions.declare_directory(ctx.label.name)
     info = member[TsInfo]
     roots = _member_roots(ctx, member)
+    label = str(ctx.label)
+    member_dir = ctx.attr.member_dir
+
+    def outside(f):
+        return ("{}: npm_store_member cannot preserve the relative layout of " +
+                "'{}' outside member '{}'. Did you mean to move the file " +
+                "inside the member or import it through a separately " +
+                "published package?").format(label, f.short_path, member_dir)
 
     def dest(f):
         if f == info.manifest:
@@ -236,14 +253,23 @@ def _npm_store_member_impl(ctx):
         for root in roots:
             if f.path.startswith(root):
                 return f.path[len(root):]
-        return f.basename
+        fail(outside(f))
 
     data = info.data.to_list()
+
+    # Every file outside the member is named at once; which came first in data is incidental.
+    stray = {
+        outside(f): True
+        for f in data + [f for emitted in (info.declarations, info.js, info.js_maps, info.runtime_sources) for f in emitted.to_list()]
+        if f != info.manifest and not [root for root in roots if f.path.startswith(root)]
+    }
+    if stray:
+        fail("\n".join(stray.keys()))
     written = [f for f in data if dest(f) == "package.json"]
     if not info.manifest or not written:
         fail(("{}: {} stages no package.json at {}; the tree's manifest is " +
               "the one the member's compile writes as built, so list the " +
-              "member's package.json in its srcs.").format(
+              "member's package.json in package_scopes, or srcs if imported as JSON.").format(
             ctx.label,
             member.label,
             ctx.attr.member_dir,
@@ -251,6 +277,48 @@ def _npm_store_member_impl(ctx):
     files = [f for f in data if f not in written] + [info.manifest]
     for emitted in (info.declarations, info.js, info.js_maps, info.runtime_sources):
         files.extend(emitted.to_list())
+    selected = {file: True for file in files}
+    owners = info.owners.to_list()
+    links = runtime_links(owners)
+    if links:
+        canonical = {file: canonical_runtime_file(file, links) for file in links if file in selected}
+
+        # A scope imported as JSON also has a module identity that the store must preserve.
+        modules = {
+            canonical_runtime_file(file, links): True
+            for file in depset(
+                transitive = [info.transitive_js, info.transitive_runtime_sources] + [owner.declarations for owner in owners],
+                order = "postorder",
+            ).to_list()
+        }
+        live = {
+            file: True
+            for file in depset(
+                transitive = [info.transitive_data, info.transitive_js, info.transitive_runtime_sources],
+                order = "postorder",
+            ).to_list()
+        }
+        for _owner, pairs in runtime_mappings(owners, live):
+            for source, runtime in pairs:
+                modules[canonical_runtime_file(source, links)] = True
+                modules[canonical_runtime_file(runtime, links)] = True
+        scope_aliases = {
+            runtime: True
+            for owner in owners
+            for source, runtime in getattr(owner, "runtime_scopes", ())
+            if source in links.get(runtime, {}) and canonical.get(runtime) == canonical_runtime_file(source, links) and canonical.get(runtime) not in modules
+        }
+        for owner in owners:
+            for link, target in getattr(owner, "canonical_links", ()):
+                if link in selected and link not in scope_aliases:
+                    fail(("{}: member {} requires canonical dependency '{}' through '{}'; " +
+                          "the npm store copies files and cannot preserve the dependency's package scope and importer. " +
+                          "Use a separately published npm dependency or include its sources in this member.").format(
+                        ctx.label,
+                        member.label,
+                        target.short_path,
+                        link.short_path,
+                    ))
     _stage(ctx, tree, files, dest)
     store = _store_info(ctx, parts, tree, _dep_links(ctx, parts))
     return [DefaultInfo(files = store.transitive), store]

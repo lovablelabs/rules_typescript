@@ -90,6 +90,11 @@ importers:
       no-target-member:
         specifier: workspace:*
         version: link:packages/no-target-member
+      # A vendored tarball: pnpm locks the file's integrity, and its package key
+      # carries the path where a registry package has its version.
+      '@vendored/local-pkg':
+        specifier: file:vendor/vendored-local-pkg-1.0.0.tgz
+        version: file:vendor/vendored-local-pkg-1.0.0.tgz
     devDependencies:
       '@types/ms':
         specifier: 2.1.0
@@ -145,6 +150,10 @@ packages:
   '@types/node@22.20.1':
     resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
 
+  '@vendored/local-pkg@file:vendor/vendored-local-pkg-1.0.0.tgz':
+    resolution: {integrity: sha512-lknO1+gJFNzEyadnN/Q+NEZgFePkqq3w+K7uKjwWIKeroa6csLbQWkYQUeunDfDTUSzCZcMnXHj4PWVCDpRweQ==, tarball: file:vendor/vendored-local-pkg-1.0.0.tgz}
+    version: 1.0.0
+
   ansi-regex@5.0.1:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
     engines: {node: '>=8'}
@@ -198,6 +207,8 @@ snapshots:
   '@types/node@22.20.1':
     dependencies:
       undici-types: 6.21.0
+
+  '@vendored/local-pkg@file:vendor/vendored-local-pkg-1.0.0.tgz': {}
 
   ansi-regex@5.0.1: {}
 

@@ -1,0 +1,30 @@
+load("//ts:defs.bzl", "ts_compile")
+
+package(default_visibility = ["//visibility:public"])
+
+ts_compile(
+    name = "moving_layout",
+    srcs = [
+        "//tests/compiler_options/analysis:mixed_compiler_input_layout.ts",
+        "//tests/workers_nested:src/layout.ts",
+    ],
+    emit = True,  # keep
+    tsconfig = "//tests/workers_nested:worker_tsconfig",
+)
+
+ts_compile(
+    name = "worker",
+    srcs = [
+        "//tests/workers_nested:src/environment.ts",
+        "//tests/workers_nested:src/index.ts",
+        "//tests/workers_nested:src/text.d.ts",
+    ],
+    emit = False,  # keep
+    node_modules = "//tests/workers:node_modules",
+    tsconfig = "//tests/workers_nested:worker_tsconfig",
+    deps = [
+        ":moving_layout",
+        "//tests/workers_nested:worker_assets",
+        "@npm_workers//:zod",
+    ],
+)

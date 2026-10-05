@@ -5,9 +5,21 @@ WranglerTestConfig action and the symlink it adds. ts_test reaches it through
 the struct workers_pool_environment returns, and no other file names wrangler.
 """
 
+load("//tools/launcher:launcher.bzl", "runfiles_link_path")
+load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo")
 load("//ts/private:runtime.bzl", "get_js_tool")
 
+_POOL_PACKAGE = "@cloudflare/vitest-pool-workers"
+
 WORKERS_POOL_ATTRS = {
+    "workers_pool": attr.label(
+        doc = "The node_modules importer or node_modules_member link declaring the pool imported by the " +
+              "config or one of its helpers. When set, its pool supplies " +
+              "Wrangler and is staged for runtime. Otherwise Wrangler uses " +
+              "the first pool on the test's importer chain. Gazelle selects " +
+              "the explicit owner from the resolved config import.",
+        providers = [[NodeModulesInfo], [NpmLinkInfo]],
+    ),
     "wrangler_config": attr.label(
         doc = "The wrangler config a Workers-pool `config` names through " +
               "`wrangler.configPath`. A copy projecting matching `main` and " +
@@ -22,45 +34,61 @@ WORKERS_POOL_ATTRS = {
     ),
 }
 
-def _runtime_path(file):
-    return file.short_path
+def _pool_chain(ctx, chain):
+    if not ctx.attr.workers_pool:
+        return chain
+    owner = ctx.attr.workers_pool
+    pool = None
+    if NpmLinkInfo in owner:
+        if owner[NpmLinkInfo].link.path.endswith("/node_modules/" + _POOL_PACKAGE):
+            pool = owner[NpmLinkInfo]
+    else:
+        pool = owner[NodeModulesInfo].links.get(_POOL_PACKAGE)
+    if pool == None:
+        fail(("ts_test {}: workers_pool {} does not link {}. Did you mean " +
+              "the importer or member link declaring the config's pool?").format(ctx.label, owner.label, _POOL_PACKAGE))
+    return struct(
+        dirs = [pool.link.path[:-len("/" + _POOL_PACKAGE)]],
+        npm_files = owner[DefaultInfo].files,
+    )
 
-def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_sources, runtime_js):
-    """The pool's half of the test environment, or its absence.
+def _runtime_file_arg(pair):
+    return json.encode([pair[0].short_path, pair[1].short_path])
 
-    `chain` is ts_test's struct(dirs, rlocations, npm_files). Returns
-    struct(symlinks, runtime_data_sets): the patched wrangler config over the
-    source's path, and the data sets less that source.
-    """
+def _file_short_path(file):
+    return None if file.is_directory else file.short_path
+
+def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset_files, runtime_sources, runtime_js):
     symlinks = {}
+    replacements = {}
 
     if ctx.file.wrangler_config:
         src = ctx.file.wrangler_config
+        bindings = {src: True}
+        bindings.update({runtime: True for source, runtime in runtime_files if source == src})
+        bindings.update({published: True for original, _coordinate, published in asset_files if original == src})
+        entries = {}
+        for source, runtime in runtime_files:
+            previous = entries.get(source.short_path)
+            if previous != None and previous != runtime:
+                fail("ts_test {}: source '{}' has conflicting declared runtime owners '{}' and '{}'.".format(ctx.label, source.short_path, previous.path, runtime.path))
+            entries[source.short_path] = runtime
 
-        # A runfiles file at a symlink's path wins over it silently, and the
-        # unpatched `main` with it: the source's copy in data or through a dep.
-        for f in ctx.files.data:
-            if f.short_path == src.short_path:
-                fail(
-                    "ts_test {}: {} is staged through wrangler_config; ".format(
-                        ctx.label,
-                        src.short_path,
-                    ) + "do not list it in data too.",
-                )
         runtime_data_sets = [depset([
             f
             for f in depset(transitive = runtime_data_sets).to_list()
-            if f.short_path != src.short_path
+            if f not in bindings
         ])]
 
         js_tool = get_js_tool(ctx)
         if not js_tool:
             fail(("ts_test {}: wrangler_config needs the JS tool toolchain " +
                   "to patch the config.").format(ctx.label))
-        if not chain.dirs:
-            fail(("ts_test {}: wrangler_config needs `node_modules`, the " +
-                  "importer whose links hold the pool; wrangler is the " +
-                  "pool's own edge.").format(ctx.label))
+        pool = _pool_chain(ctx, chain)
+        if not pool.dirs:
+            fail(("ts_test {}: wrangler_config needs a Workers pool importer. " +
+                  "Did you mean to set workers_pool to the importer or member link " +
+                  "declaring the config's pool, or node_modules for the test's chain?").format(ctx.label))
         patched = ctx.actions.declare_file(
             "_{}_wrangler.{}".format(ctx.label.name, src.extension),
         )
@@ -69,13 +97,17 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_sources, run
         args.add("--config", src)
         args.add("--out", patched)
         args.add("--config-path", src.short_path)
-        args.add_all(runtime_sources, before_each = "--runtime-source", map_each = _runtime_path, expand_directories = False)
-        args.add_all(runtime_js, before_each = "--runtime-js", map_each = _runtime_path, expand_directories = False)
-        args.add_all(chain.dirs, before_each = "--node-modules")
+        args.add_all(runtime_files, map_each = _runtime_file_arg, before_each = "--runtime-file", uniquify = True, expand_directories = False)
+
+        # Older owners publish runtime Files without source/runtime pairs; the patch drops the paired ones.
+        args.add_all(runtime_sources, map_each = _file_short_path, before_each = "--runtime-source", expand_directories = False)
+        args.add_all(runtime_js, map_each = _file_short_path, before_each = "--runtime-js", expand_directories = False)
+        args.add_all(pool.dirs, before_each = "--node-modules")
         ctx.actions.run(
             inputs = depset(
                 [src, ctx.file._wrangler_patch],
-                transitive = [chain.npm_files],
+                transitive = [pool.npm_files],
+                order = "postorder",
             ),
             outputs = [patched],
             executable = js_tool.runtime_binary,
@@ -83,9 +115,11 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_sources, run
             mnemonic = "WranglerTestConfig",
             progress_message = "WranglerTestConfig %{label}",
         )
-        symlinks[src.short_path] = patched
+        symlinks[runfiles_link_path(src)] = patched
+        replacements = {file: patched for file in bindings}
 
     return struct(
         symlinks = symlinks,
         runtime_data_sets = runtime_data_sets,
+        replacements = replacements,
     )

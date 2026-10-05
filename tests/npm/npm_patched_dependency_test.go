@@ -19,7 +19,7 @@ func TestPatchReachesTheFilesBazelHandsOut(t *testing.T) {
 	var pkg struct {
 		SideEffects json.RawMessage `json:"sideEffects"`
 	}
-	f := tree.FoundFile("*nanoid__3_3_11/node_modules/nanoid/package.json")
+	f := tree.FoundFile("*/.pnpm/nanoid@3.3.11/node_modules/nanoid/package.json")
 	f.JSON(&pkg)
 
 	want := []string{"./index.js", "./index.cjs"}
@@ -40,7 +40,7 @@ func TestPatchReachesTheFilesBazelHandsOut(t *testing.T) {
 func TestScopedPackagePatchReachesTheFilesBazelHandsOut(t *testing.T) {
 	tree := verify.New(t)
 
-	f := tree.FoundFile("*types_ms__2_1_0/node_modules/@types/ms/index.d.ts")
+	f := tree.FoundFile("*/.pnpm/@types+ms@2.1.0/node_modules/@types/ms/index.d.ts")
 	f.Contains("options?: { long?: boolean }")
 	f.Excludes("options?: { long: boolean }")
 }

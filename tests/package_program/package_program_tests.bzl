@@ -3,6 +3,7 @@ tsconfig, the declarations under another, and a dep held as sources brings no
 declarations along any path."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
+load("//tests:runnable_actions.bzl", "runnable_action_aspect", "runnable_action_label", "runnable_actions")
 load("//ts:defs.bzl", "TsInfo")
 
 _PKG = "tests/package_program/"
@@ -18,13 +19,13 @@ def _label(target):
     return text[2:] if text.startswith("@@//") else text
 
 def _action(env, mnemonic):
-    for action in analysistest.target_actions(env):
+    for action in runnable_actions(env):
         if action.mnemonic == mnemonic:
             return action
     return None
 
 def _manifest_lines(env, check):
-    name = analysistest.target_under_test(env).label.name
+    name = runnable_action_label(env).name
     manifest = [
         f
         for f in check.inputs.to_list()
@@ -35,7 +36,7 @@ def _manifest_lines(env, check):
         return []
     writers = [
         a
-        for a in analysistest.target_actions(env)
+        for a in runnable_actions(env)
         if manifest[0] in a.outputs.to_list()
     ]
     asserts.equals(env, 1, len(writers), "one action writes the manifest")
@@ -61,7 +62,7 @@ def _dep(ctx, env):
 
 def _reads_no_declaration_of(env, dep, label):
     declarations = dep.declarations.to_list()
-    for action in analysistest.target_actions(env):
+    for action in runnable_actions(env):
         inputs = action.inputs.to_list()
         for f in declarations:
             asserts.false(
@@ -245,11 +246,13 @@ _ATTRS = {
 checks_the_sources_test = analysistest.make(
     _checks_the_sources_impl,
     attrs = _ATTRS,
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )
 
 reads_the_declarations_test = analysistest.make(
     _reads_the_declarations_impl,
     attrs = _ATTRS,
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )
 
 drops_the_declarations_on_every_path_test = analysistest.make(
@@ -260,11 +263,13 @@ drops_the_declarations_on_every_path_test = analysistest.make(
             doc = "A dep under another tsconfig that depends on `dep`.",
         ),
     },
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )
 
 compile_reads_the_declarations_test = analysistest.make(
     _compile_reads_the_declarations_impl,
     attrs = _ATTRS,
+    extra_target_under_test_aspects = [runnable_action_aspect],
 )
 
 owners_record_test = analysistest.make(

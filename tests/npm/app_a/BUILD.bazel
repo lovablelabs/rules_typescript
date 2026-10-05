@@ -1,6 +1,15 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("//npm:defs.bzl", "node_modules")
-load("//tests/npm:direct_version_tests.bzl", "importer_resolution_wins_test")
-load("//ts:defs.bzl", "ts_compile")
+load("//npm/private:store.bzl", "npm_store")
+load(
+    "//tests/npm:direct_version_tests.bzl",
+    "direct_npm_identity_test",
+    "mixed_npm_store_identity_test",
+    "npm_identity_runtime_test",
+)
+load("//ts:defs.bzl", "ts_compile", "ts_dev_server")
+load("//ts/private:ts_npm_package.bzl", "ts_npm_package")
 
 package(default_visibility = ["//tests/npm:__pkg__"])
 
@@ -9,7 +18,13 @@ package(default_visibility = ["//tests/npm:__pkg__"])
 node_modules(
     name = "node_modules",
     parent = "//tests/npm/features:node_modules",
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/dev_inherited_types:__pkg__",
+    ],
     deps = [
+        ":registry_shared",
+        "@npm//:vitest",
         "@npm_features//app-a:ansi-regex",
         "@npm_features//app-a:ansi-styles",
     ],
@@ -25,8 +40,300 @@ ts_compile(
     deps = ["@npm_features//:ansi-regex"],
 )
 
-importer_resolution_wins_test(
+direct_npm_identity_test(
     name = "importer_resolution_wins_test",
     size = "small",
+    messages = [
+        "links ansi-regex@5.0.1",
+        "@npm_features//tests/npm/app_a:ansi-regex",
+    ],
     target_under_test = ":root_regex",
 )
+
+[
+    write_file(
+        name = "registry_shared_" + kind,
+        out = "registry_shared/" + filename,
+        content = [
+            content,
+            "",
+        ],
+        visibility = [
+            "//tests/npm:__pkg__",
+            "//tests/npm/app_b:__pkg__",
+        ],
+    )
+    for kind, filename, content in [
+        ("manifest", "package.json", '{"name":"shared","version":"0.0.0","type":"module","exports":{".":{"types":"./index.d.ts","default":"./index.js"}}}'),
+        ("runtime", "index.js", "export function greet(name) { return `Registry, ${name}!`; }"),
+        ("types", "index.d.ts", "export declare function greet(name: string): string;"),
+    ]
+]
+
+filegroup(
+    name = "registry_shared_files",
+    srcs = [
+        ":registry_shared_manifest",
+        ":registry_shared_runtime",
+        ":registry_shared_types",
+    ],
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/app_b:__pkg__",
+    ],
+)
+
+npm_store(
+    name = "node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+    files = ":registry_shared_files",
+    package_dir = ":registry_shared_manifest",
+)
+
+ts_npm_package(
+    name = "registry_shared",
+    package_name = "shared",
+    package_dir = ":registry_shared_manifest",
+    package_version = "0.0.0",
+    store = ":node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+    visibility = [
+        "//tests/npm:__pkg__",
+        "//tests/npm/dev_inherited_types:__pkg__",
+    ],
+)
+
+# These targets deliberately fail analysis and are reached by the analysis tests.
+[
+    ts_compile(
+        name = name,
+        srcs = ["//tests/npm:workspace_identity_runtime_test_src"],
+        emit = True,
+        node_modules = ":node_modules",
+        tags = ["manual"],
+        deps = deps,
+    )
+    for name, deps in [
+        (
+            "registry_then_workspace",
+            [
+                ":registry_shared",
+                "//tests/npm:node_modules/shared",
+            ],
+        ),
+        (
+            "workspace_then_registry",
+            [
+                "//tests/npm:node_modules/shared",
+                ":registry_shared",
+            ],
+        ),
+        (
+            "workspace_shadowed_by_registry",
+            ["//tests/npm:node_modules/shared"],
+        ),
+    ]
+]
+
+[
+    direct_npm_identity_test(
+        name = name + "_test",
+        size = "small",
+        messages = messages,
+        target_under_test = ":" + name,
+    )
+    for name, messages in [
+        (
+            "registry_then_workspace",
+            [
+                "'shared' in deps is shared@0.0.0",
+                "links shared@0.0.0",
+                "//tests/npm/app_a:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+                "//tests/npm:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+            ],
+        ),
+        (
+            "workspace_then_registry",
+            [
+                "'shared' in deps is shared@0.0.0",
+                "links shared@0.0.0",
+                "//tests/npm:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+                "//tests/npm/app_a:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+            ],
+        ),
+        (
+            "workspace_shadowed_by_registry",
+            [
+                "'shared' in deps is shared@0.0.0",
+                "links shared@0.0.0",
+                "//tests/npm:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+                "//tests/npm/app_a:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+            ],
+        ),
+    ]
+]
+
+npm_identity_runtime_test(
+    name = "registry_identity_runtime_test",
+    expected = "Registry, World!",
+    node_modules = ":node_modules",
+    deps = [
+        ":registry_shared",
+        "@npm_features//:types_node",
+    ],
+)
+
+write_file(
+    name = "local_shared_source",
+    out = "local_shared.ts",
+    content = [
+        'import { greet } from "shared";',
+        'export const local = greet("World");',
+        "",
+    ],
+)
+
+[
+    ts_compile(
+        name = name,
+        srcs = [
+            ":local_shared_source",
+            "//tests/npm/app_b:borrowed_shared_source",
+        ],
+        node_modules = ":node_modules",
+        source_node_modules = ["//tests/npm/app_b:node_modules"],
+        # The missing direct dependency intentionally fails TsgoCheck.
+        tags = [] if direct_b else ["manual"],
+        deps = [
+            ":registry_shared",
+            "//tests/npm/app_b:shared_owner",
+        ] + (["//tests/npm/app_b:registry_shared"] if direct_b else []),
+    )
+    for name, direct_b in [
+        ("borrowed_shared_undeclared", False),
+        ("borrowed_shared_declared", True),
+    ]
+]
+
+alias(
+    name = "vite_server_alias",
+    actual = "//vite:dev_server",
+)
+
+alias(
+    name = "registry_shared_alias",
+    actual = ":registry_shared",
+)
+
+ts_compile(
+    name = "same_npm_store_alias",
+    srcs = [":local_shared_source"],
+    node_modules = ":node_modules",
+    deps = [":registry_shared_alias"],
+)
+
+[
+    mixed_npm_store_identity_test(
+        name = name + "_test",
+        asset_consumer = ":dev_asset_entry" if direct_b else None,
+        asset_owner = "//tests/npm/app_b:shared_asset_owner" if direct_b else None,
+        retained = "//tests/npm/app_b:registry_shared",
+        retained_direct = direct_b,
+        selected = ":registry_shared",
+        target_under_test = ":" + name,
+    )
+    for name, direct_b in [
+        ("borrowed_shared_undeclared", False),
+        ("borrowed_shared_declared", True),
+    ]
+]
+
+[
+    ts_compile(
+        name = "dev_" + kind + "_entry",
+        srcs = [":local_shared_source"],
+        node_modules = ":node_modules",
+        deps = [
+            ":registry_shared",
+            "//tests/npm/app_b:" + owner,
+        ],
+    )
+    for kind, owner in [
+        ("asset", "shared_asset_owner"),
+        ("ordinary_data", "shared_ordinary_data_owner"),
+    ]
+]
+
+_DEV_SERVERS = [
+    ("default", None),
+    ("vite", ":vite_server_alias"),
+]
+
+_DEV_NPM_CASES = [
+    (
+        "distinct_npm_stores",
+        "rejects_distinct_store_files_with_the_same_package_key_test",
+        ":borrowed_shared_declared",
+        [
+            "tests/npm/app_b/borrowed_shared.ts",
+            "npm 'shared'",
+            "//tests/npm/app_b:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+            "//tests/npm/app_a:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+            "but app importer",
+        ],
+    ),
+    (
+        "same_npm_store_alias",
+        "does_not_reject_an_alias_of_the_same_npm_store_test",
+        ":same_npm_store_alias",
+        [],
+    ),
+    (
+        "distinct_asset_npm_stores",
+        "rejects_executable_asset_npm_store_mismatch_test",
+        ":dev_asset_entry",
+        [
+            "source 'tests/npm/app_b/helper.mjs'",
+            "//tests/npm/app_b:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+            "//tests/npm/app_a:node_modules/.pnpm/shared@0.0.0/node_modules/shared",
+        ],
+    ),
+    (
+        "ordinary_data",
+        "does_not_require_executable_npm_context_for_ordinary_data_test",
+        ":dev_ordinary_data_entry",
+        [],
+    ),
+]
+
+[
+    ts_dev_server(
+        name = backend + "_" + name,
+        entry_point = entry,
+        node_modules = ":node_modules",
+        server = server,
+        tags = ["manual"] if messages else [],  # Refused subjects are reached by the analysis tests.
+    )
+    for backend, server in _DEV_SERVERS
+    for name, _test, entry, messages in _DEV_NPM_CASES
+]
+
+[
+    direct_npm_identity_test(
+        name = backend + "_" + test,
+        size = "small",
+        messages = messages,
+        target_under_test = ":" + backend + "_" + name,
+    )
+    for backend, _server in _DEV_SERVERS
+    for name, test, _entry, messages in _DEV_NPM_CASES
+    if messages
+]
+
+[
+    build_test(
+        name = backend + "_" + test,
+        targets = [":" + backend + "_" + name],
+    )
+    for backend, _server in _DEV_SERVERS
+    for name, test, _entry, messages in _DEV_NPM_CASES
+    if not messages
+]

@@ -26,14 +26,13 @@ TsconfigSourcesInfo = provider(
     fields = {
         "packages": "depset of struct(path, has_index): package of every ts_compile target reached, and whether it has an index file to name as the package entry point.",
         "option_groups": "depset of struct(package, label, options_json, extends, include): the program one target checks under, which the root block cannot carry -- the tsconfig it names, and allowJs for its JavaScript srcs. A target whose tsconfig turns `strict` off or names a `lib` is checked correctly by the build and wrongly by the editor unless the editor gets its own program for those files.",
-        "has_content": "Whether anything above is non-empty here or anywhere below, so that a fragment is written only where there is something to say.",
     },
 )
 
 TsconfigFragmentInfo = provider(
-    doc = "The per-target tsconfig fragments an editor can merge without a rule ever naming the target.",
+    doc = "The compiler fragments an editor can merge without a rule ever naming the target.",
     fields = {
-        "fragments": """depset of File: one fragment per target the aspect reached.
+        "fragments": """depset of File: one fragment per compiler target that contributes a package.
 
 Each is complete for its own closure -- the packages it reaches -- so any
 one of them is a usable answer on its own, which is what makes a partially
@@ -142,7 +141,7 @@ def _option_group(target, ctx):
     include = [
         f.short_path[len(package) + 1:] if package else f.short_path
         for f in sources
-        if not f.short_path.endswith(".d.ts") and f.short_path.startswith(package)
+        if f.is_source and not f.short_path.endswith(".d.ts") and f.short_path.startswith(package)
     ]
     if not include:
         return []
@@ -183,11 +182,10 @@ def _tsconfig_aspect_impl(target, ctx):
     sources = TsconfigSourcesInfo(
         packages = depset(packages, transitive = [s.packages for s in inherited], order = "postorder"),
         option_groups = depset(option_groups, transitive = [s.option_groups for s in inherited], order = "postorder"),
-        has_content = bool(packages) or any([s.has_content for s in inherited]),
     )
 
-    fragments = [dep[TsconfigFragmentInfo].fragments for dep in getattr(ctx.rule.attr, "deps", []) if TsconfigFragmentInfo in dep]
-    own = [_fragment(target, ctx, sources)] if sources.has_content else []
+    fragments = [dep[TsconfigFragmentInfo].fragments for dep in reached if TsconfigFragmentInfo in dep]
+    own = [_fragment(target, ctx, sources)] if packages else []
     fragments = depset(own, transitive = fragments, order = "postorder")
 
     return [
@@ -201,7 +199,7 @@ tsconfig_aspect = aspect(
     attr_aspects = ["deps", "member", "target"],
     doc = """Collects the source roots an IDE tsconfig needs.
 
-Also writes one `<target>.tsconfig-fragment.json` per target reached, in the
+Also writes one `<target>.tsconfig-fragment.json` per compiler package owner, in the
 `ide_fragments` output group. That group is how the tsserver hook gets the
 targets no rule can name: an aspect propagates along dependency edges that
 already exist and creates none, so it needs no visibility where

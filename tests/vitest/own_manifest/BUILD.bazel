@@ -1,11 +1,3 @@
-"""A test reads its package's manifest as the checkout has it: the
-`package.json` src at the package's path is the file as written, its `exports`
-naming the sources. The package's own name and a JSON import of the manifest
-resolve through the same file -- for tsgo through the copy as built the
-program root lays at the path, the compile's own file, at run time through the
-source, as the checkout's vitest resolves it.
-"""
-
 load("//ts:defs.bzl", "ts_compile", "ts_test")
 
 # keep

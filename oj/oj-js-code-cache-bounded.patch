@@ -1,0 +1,75 @@
+--- a/src/code_cache.rs
++++ b/src/code_cache.rs
+@@ -71,7 +71,7 @@
+ 
+     fn entry_path(&self, specifier: &Url, suffix: &str) -> PathBuf {
+         self.dir
+-            .join(format!("{:016x}-{suffix}.bin", hash64(specifier.as_str().as_bytes())))
++            .join(format!("{:016x}-{suffix}.bin", hash64(stable_specifier(specifier.as_str()).as_bytes())))
+     }
+ 
+     fn kind_suffix(kind: CodeCacheType) -> &'static str {
+@@ -95,6 +95,8 @@
+         if std::fs::create_dir_all(&self.dir).is_err() {
+             return;
+         }
++        static PRUNED: std::sync::Once = std::sync::Once::new();
++        PRUNED.call_once(|| prune(&self.dir));
+         // Atomic publish: a concurrent child reads either the old entry or
+         // the new one, never a torn half-write.
+         let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+@@ -196,3 +198,54 @@
+         }
+     }
+ }
++
++// Vite bundles a config to a new `.timestamp-<ms>-<hash>.mjs` name on every load, so keyed
++// by URL each start left an entry (one cache reached 72 GB); the source hash keeps this correct.
++fn stable_specifier(specifier: &str) -> std::borrow::Cow<'_, str> {
++    let Some(at) = specifier.rfind(".timestamp-") else {
++        return std::borrow::Cow::Borrowed(specifier);
++    };
++    let rest = &specifier[at + ".timestamp-".len()..];
++    let Some((stamp, tail)) = rest.split_once('.') else {
++        return std::borrow::Cow::Borrowed(specifier);
++    };
++    let Some((ms, hash)) = stamp.split_once('-') else {
++        return std::borrow::Cow::Borrowed(specifier);
++    };
++    if ms.is_empty() || !ms.bytes().all(|b| b.is_ascii_digit()) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return std::borrow::Cow::Borrowed(specifier);
++    }
++    std::borrow::Cow::Owned(format!("{}.timestamp.{tail}", &specifier[..at]))
++}
++
++// Entries are never evicted otherwise, so each process trims the directory once,
++// oldest first, to three quarters of OJ_CODE_CACHE_MAX_BYTES (default 1 GiB).
++fn prune(dir: &std::path::Path) {
++    let cap: u64 = std::env::var("OJ_CODE_CACHE_MAX_BYTES")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(1 << 30);
++    let Ok(read) = std::fs::read_dir(dir) else {
++        return;
++    };
++    let mut entries: Vec<(std::time::SystemTime, u64, PathBuf)> = read
++        .filter_map(|e| {
++            let e = e.ok()?;
++            let meta = e.metadata().ok()?;
++            meta.is_file().then(|| (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len(), e.path()))
++        })
++        .collect();
++    let mut total: u64 = entries.iter().map(|e| e.1).sum();
++    if total <= cap {
++        return;
++    }
++    entries.sort();
++    for (_, len, path) in entries {
++        if total <= cap / 4 * 3 {
++            break;
++        }
++        if std::fs::remove_file(&path).is_ok() {
++            total -= len;
++        }
++    }
++}

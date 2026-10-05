@@ -3,16 +3,7 @@ tree is built, the launcher is handed the importer's node_modules directory,
 and a dep's package reaches the runfiles through the dep's npm_files."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-
-_ActionsInfo = provider(
-    "The actions a target registered.",
-    fields = ["actions"],
-)
-
-def _actions_aspect_impl(target, _ctx):
-    return [_ActionsInfo(actions = target.actions)]
-
-_actions_aspect = aspect(implementation = _actions_aspect_impl)
+load("//tests:runnable_actions.bzl", "RunnableActionOwnerInfo", "runnable_action_aspect")
 
 def _only_output(action, suffix):
     outputs = action.outputs.to_list()
@@ -22,7 +13,7 @@ def _only_output(action, suffix):
 
 def _runtime_is_the_chain_impl(ctx):
     env = unittest.begin(ctx)
-    actions = ctx.attr.test[_ActionsInfo].actions
+    actions = ctx.attr.test[RunnableActionOwnerInfo].actions
     trees = [a for a in actions if a.mnemonic == "NodeModulesTree"]
     tsgo = [a for a in actions if a.mnemonic == "TsgoCheck"]
     launchers = [a for a in actions if _only_output(a, "_test_launcher.json")]
@@ -48,10 +39,10 @@ def _runtime_is_the_chain_impl(ctx):
             "the dep's npm_files",
         )
         content = launchers[0].content
-        asserts.true(
+        asserts.equals(
             env,
-            '"node_modules": [' in content and
-            '"{}/tests/npm/node_modules"'.format(ctx.workspace_name) in content,
+            ["{}/tests/npm/node_modules".format(ctx.workspace_name)],
+            json.decode(content)["vitest"]["node_modules"],
             "the launcher runs the tests in the importer's node_modules: " +
             content,
         )
@@ -59,5 +50,5 @@ def _runtime_is_the_chain_impl(ctx):
 
 runtime_is_the_chain_test = unittest.make(
     _runtime_is_the_chain_impl,
-    attrs = {"test": attr.label(aspects = [_actions_aspect])},
+    attrs = {"test": attr.label(aspects = [runnable_action_aspect])},
 )

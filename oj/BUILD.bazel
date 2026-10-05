@@ -19,6 +19,7 @@ exports_files([
     "Cargo.toml",
     "Cargo.lock",
     "aws-lc-macos-headers.patch",
+    "oj-js-code-cache-bounded.patch",
     "llvm-resource-directory.patch",
     "libffi-static-archive.patch",
     "cranelift-assembler-isle.patch",

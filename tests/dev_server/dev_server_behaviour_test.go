@@ -5,9 +5,13 @@ package dev_server_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
+	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -21,6 +25,7 @@ import (
 )
 
 func TestDevServerBehaviour(t *testing.T) {
+	started := time.Now()
 	tree := verify.New(t)
 	target := env(t, "DEV_TARGET")
 	wantPort := env(t, "DEV_PORT")
@@ -118,6 +123,61 @@ func TestDevServerBehaviour(t *testing.T) {
 	write(t, filepath.Join(appRoot, "gen_entry.js"),
 		"import { routes } from \"./generated/routes.ts\";\nexport { routes };\n")
 
+	if target == "dev_with_plugin" {
+		compiledTree := "tests/codegen_tree/compiled"
+		copyResolved(t, filepath.Join(bazelBin, filepath.FromSlash(compiledTree)), tree.Path(compiledTree))
+		copyResolved(t, filepath.Join(appBin, "generated_package"), tree.Path("tests/dev_server/generated_package"))
+		write(t, filepath.Join(appBin, "outside.js"), `export const marker = "OUTSIDE_DECLARED_TREE";`)
+		write(t, filepath.Join(appBin, "generated_package.js"), `export const marker = "OUTSIDE_DECLARED_TREE";`)
+		for _, relative := range []string{"index.js", "dist/client.js", "dist/extension.mjs"} {
+			shadow := filepath.Join(appRoot, "generated_package", relative)
+			mkdir(t, filepath.Dir(shadow))
+			write(t, shadow, `export const marker = "CHECKOUT_PACKAGE_SHADOW";`)
+		}
+		for _, relative := range []string{"index.js", "index.ts", "messages/greeting.js", "messages/greeting.ts"} {
+			shadow := filepath.Join(ws, filepath.FromSlash(compiledTree), filepath.FromSlash(relative))
+			mkdir(t, filepath.Dir(shadow))
+			write(t, shadow, `export const greeting = () => "STALE_CHECKOUT_TREE";`)
+		}
+		for _, relative := range []string{"declared_source/value.ts", "declared_source/value.json", "lib/index.ts"} {
+			root := appBin
+			if relative == "lib/index.ts" {
+				root = appRoot
+			}
+			destination := filepath.Join(root, filepath.FromSlash(relative))
+			mkdir(t, filepath.Dir(destination))
+			write(t, destination, tree.File("tests/dev_server/"+relative).Text())
+		}
+		mkdir(t, filepath.Join(appRoot, "declared_source"))
+		write(t, filepath.Join(appRoot, "declared_source", "value.ts"), `export const generated = "STALE_CHECKOUT_TS";`)
+		write(t, filepath.Join(appRoot, "declared_source", "value.json"), `{"value":"STALE_CHECKOUT_JSON"}`)
+		for _, extension := range []string{"tsx", "js", "mjs"} {
+			name := "extension-" + extension
+			write(t, filepath.Join(appBin, "declared_source", name+"."+extension), tree.File("tests/dev_server/declared_source/"+name+"."+extension).Text())
+			write(t, filepath.Join(appRoot, "declared_source", name+".ts"), `export const marker = "UNDECLARED_EXTENSION_SHADOW";`)
+		}
+		write(t, filepath.Join(appRoot, "declared_source", "extension-tsx.jsx"), `export const marker = "UNDECLARED_JSX_SHADOW";`)
+		for _, relative := range []string{"declared_source/missing.tsx", "declared_source/missing.ts", "declared_source/missing.jsx", "generated_package/dist/missing.js", "declared_missing.css"} {
+			shadow := filepath.Join(appRoot, filepath.FromSlash(relative))
+			mkdir(t, filepath.Dir(shadow))
+			write(t, shadow, `export const marker = "UNDECLARED_MISSING_PRODUCER_SHADOW";`)
+		}
+		write(t, filepath.Join(appRoot, "theme.css"), ".UNDECLARED_ASSET_SHADOW { color: blue; }")
+		for _, publisher := range []string{"tests/dev_server", "tests/dev_server/lib"} {
+			for _, relative := range []string{"settings.mjs", "theme.css", "tests/dev_server_assets/helper.mjs", "tests/dev_server_assets/style.css", "tests/dev_server_assets/nested.css", "tests/dev_server_assets/payload.svg"} {
+				logical := publisher + "/" + relative
+				published := filepath.Join(bazelBin, filepath.FromSlash(logical))
+				mkdir(t, filepath.Dir(published))
+				write(t, published, tree.File(logical).Text())
+			}
+		}
+		for _, relative := range []string{"helper.mjs", "style.css", "nested.css", "payload.svg"} {
+			shadow := filepath.Join(ws, "tests", "dev_server_assets", relative)
+			mkdir(t, filepath.Dir(shadow))
+			write(t, shadow, "UNDECLARED_CHECKOUT_BYTES")
+		}
+	}
+
 	// The config watches its own bazel-bin copy, so the scratch workspace needs
 	// one for the restart decision to have a baseline to move away from.
 	scratchConfig := filepath.Join(bazelBin, "tests", "dev_server", target+"_dev", "vite.config.mjs")
@@ -190,6 +250,935 @@ func TestDevServerBehaviour(t *testing.T) {
 	srv := start(t, launcher.Abs(), ws, tmp, extraArgs...)
 	base := srv.awaitHTTP(t, "/app.ts")
 	t.Logf("%s (%s) is up and answering on %s", target, impl, base)
+
+	if target == "dev_with_plugin" {
+		deadline, ok := t.Deadline()
+		if !ok {
+			seconds, err := strconv.Atoi(os.Getenv("TEST_TIMEOUT"))
+			if err != nil || seconds <= 0 {
+				t.Fatal("Bazel test timeout is unavailable")
+			}
+			deadline = started.Add(time.Duration(seconds) * time.Second)
+		}
+		t.Run("transitioned_source_cannot_select_server_configuration", func(t *testing.T) {
+			var layout struct {
+				Logical   string
+				Producer  string
+				Server    string
+				ServerBin string `json:"server_bin"`
+			}
+			tree.File("tests/dev_server/transitioned_source.json").JSON(&layout)
+			if layout.Producer == layout.Server {
+				t.Fatal("fixture producer did not transition to another configuration")
+			}
+			producer := tree.File(layout.Logical)
+			twin := tree.File("tests/dev_server/transitioned_source.server.ts")
+			if producer.Text() == twin.Text() {
+				t.Fatal("fixture configurations have identical source bytes")
+			}
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			app := filepath.Join(ws, "tests", "dev_server")
+			execRoot := filepath.Join(tmp, "execroot")
+			serverBin := filepath.Join(execRoot, filepath.FromSlash(layout.ServerBin))
+			mkdir(t, app)
+			mkdir(t, serverBin)
+			if err := os.Symlink(serverBin, filepath.Join(ws, "bazel-bin")); err != nil {
+				t.Fatal(err)
+			}
+			for _, input := range []struct {
+				path string
+				file verify.File
+			}{
+				{layout.Producer, producer},
+				{layout.Server, twin},
+			} {
+				destination := filepath.Join(execRoot, filepath.FromSlash(input.path))
+				mkdir(t, filepath.Dir(destination))
+				if err := os.Symlink(input.file.Abs(), destination); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(t, filepath.Join(app, "index.html"), "CONFIGURATION_FIXTURE")
+			write(t, filepath.Join(app, "configuration_entry.js"), `export { configuration } from "./configuration/value.js";`)
+			srv := start(t, tree.File("tests/dev_server/dev_configuration_launcher").Abs(), ws, tmp)
+			base := srv.awaitHTTP(t, "/index.html")
+			entry := get(t, base, "/configuration_entry.js")
+			if entry.status != 200 {
+				t.Fatalf("configuration entry returned HTTP %d: %s\n%s", entry.status, entry.body, srv.log(t))
+			}
+			module := get(t, base, importURL(t, entry.body, "value.ts", ""))
+			if module.status != 200 {
+				t.Fatalf("transitioned source returned HTTP %d: %s\n%s", module.status, module.body, srv.log(t))
+			}
+			module.contains(t, srv, layout.Producer)
+			module.excludes(t, layout.Server, ": string")
+		})
+		t.Run("member_owned_npm_binding_resolves_without_app_link", func(t *testing.T) {
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			app := filepath.Join(ws, "tests", "dev_server")
+			mkdir(t, filepath.Join(app, "member"))
+			write(t, filepath.Join(app, "member", "value.ts"), tree.File("tests/dev_server/member/value.ts").Text())
+			write(t, filepath.Join(app, "index.html"), "MEMBER_NPM_FIXTURE")
+			write(t, filepath.Join(app, "member_entry.js"), `export { marker } from "./member/value.ts";`)
+			srv := start(t, tree.File("tests/dev_server/dev_member_npm_launcher").Abs(), ws, tmp)
+			base := srv.awaitHTTP(t, "/index.html")
+			served := func(path string) response {
+				t.Helper()
+				got := get(t, base, path)
+				if got.status != 200 {
+					t.Fatalf("member npm fixture returned HTTP %d for %s: %s\n%s", got.status, path, got.body, srv.log(t))
+				}
+				return got
+			}
+			module := served(importURL(t, served("/member_entry.js").body, "value.ts", ""))
+			dep := depURL(module.body)
+			if dep == "" {
+				t.Fatalf("member source's `member-only` import resolved to nothing:\n%s\n%s", module.body, srv.log(t))
+			}
+			resolved := served(dep)
+			resolved.contains(t, srv, "MEMBER_IMPORTER_STORE")
+			// A pre-bundle inlines member-dep; a directly served member-only imports it beside its store tree.
+			if !strings.Contains(resolved.body, "MEMBER_TRANSITIVE_STORE") {
+				transitive := depURL(resolved.body)
+				if transitive == "" {
+					t.Fatalf("member-only's own `member-dep` import resolved to nothing:\n%s\n%s", resolved.body, srv.log(t))
+				}
+				served(transitive).contains(t, srv, "MEMBER_TRANSITIVE_STORE")
+			}
+		})
+		t.Run("checkout_install_cannot_shadow_member_npm_binding", func(t *testing.T) {
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			member := filepath.Join(ws, "tests", "dev_server", "member")
+			shadow := filepath.Join(member, "node_modules", "member-only")
+			mkdir(t, shadow)
+			write(t, filepath.Join(member, "value.ts"), tree.File("tests/dev_server/member/value.ts").Text())
+			write(t, filepath.Join(shadow, "package.json"), `{"name":"member-only","version":"0.0.0-CHECKOUT_SHADOW","type":"module","exports":"./index.js"}`)
+			write(t, filepath.Join(shadow, "index.js"), `export const marker = "CHECKOUT_SHADOW";`)
+			srv := start(t, tree.File("tests/dev_server/dev_member_npm_launcher").Abs(), ws, tmp)
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			select {
+			case err := <-srv.wait:
+				srv.wait <- err
+				if err == nil {
+					t.Fatal("checkout install shadowing a member npm binding exited successfully")
+				}
+			case <-timer.C:
+				t.Fatal("checkout install shadowing a member npm binding was not refused before the test deadline")
+			}
+			log := srv.log(t)
+			for _, want := range []string{"conflicting npm installation for member-only", shadow, "declared member importer store"} {
+				if !strings.Contains(log, want) {
+					t.Errorf("member npm startup refusal lacks %q:\n%s", want, log)
+				}
+			}
+		})
+		t.Run("inherited_companion_binding_remains_runtime_reachable", func(t *testing.T) {
+			const pkg = "tests/npm/dev_inherited_types"
+			var previous launcherConfig
+			tree.File(pkg + "/previous_member_dev_launcher.json").JSON(&previous)
+			originalMember := tree.File(pkg + "/node_modules/shared/package.json").Text()
+			member, err := os.ReadFile(filepath.Join(inTree(tree, previous.DevServer.NodeModules), "shared", "package.json"))
+			if err != nil || string(member) != originalMember {
+				t.Fatalf("prior npm_files member was replaced or its link was rebased: %v, %s", err, member)
+			}
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			app := filepath.Join(ws, filepath.FromSlash(pkg))
+			mkdir(t, app)
+			mkdir(t, filepath.Join(ws, "bazel-bin"))
+			entry := filepath.Join(app, "entry.ts")
+			write(t, entry, tree.File(pkg+"/entry.ts").Text())
+			write(t, filepath.Join(app, "index.html"), `<html>INHERITED_NPM_ENTRY<script type="module" src="/entry.ts"></script></html>`)
+			var cfg launcherConfig
+			tree.File(pkg + "/dev_launcher.json").JSON(&cfg)
+			_, viewSuffix, _ := strings.Cut(cfg.DevServer.NodeModules, "/")
+			tree.File(pkg + "/ordinary/" + viewSuffix + "/@types/culori").Contains("DECLARED_ORDINARY_DATA")
+			var expected struct{ Name, Version string }
+			data, err := os.ReadFile(filepath.Join(inTree(tree, cfg.DevServer.NodeModules), "@types", "culori", "package.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &expected); err != nil || expected.Name != "@types/culori" || expected.Version == "" {
+				t.Fatalf("inherited companion metadata is unavailable: %v", err)
+			}
+			srv := start(t, tree.File(pkg+"/dev_launcher").Abs(), ws, tmp)
+			base := srv.awaitHTTP(t, "/index.html")
+			served := func(path string) response {
+				t.Helper()
+				got := get(t, base, path)
+				if got.status != 200 {
+					t.Fatalf("inherited binding returned HTTP %d for %s: %s\n%s", got.status, path, got.body, srv.log(t))
+				}
+				return got
+			}
+			module := served("/entry.ts")
+			dependency := depURL(module.body)
+			if !strings.Contains(dependency, "/deps/") {
+				t.Fatalf("forced culori optimizer did not resolve through the app importer: %s\n%s", module.body, srv.log(t))
+			}
+			served(dependency)
+			if strings.Contains(srv.log(t), "Failed to resolve dependency") {
+				t.Fatalf("forced optimizer lost inherited npm context: %s", srv.log(t))
+			}
+			sock, err := hmrsocket.Dial(strings.TrimPrefix(base, "http://"), "/", "vite-hmr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sock.Close()
+			updated := `import metadata from "@types/culori/package.json";
+export { parse } from "culori";
+export const companion = metadata.name;
+`
+			write(t, entry, updated)
+			// Vite names the module it resolved, past every symlinked ancestor.
+			resolvedEntry, err := filepath.EvalSymlinks(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for {
+				frame, err := sock.Next(time.Until(deadline))
+				if err != nil {
+					t.Fatalf("inherited source edit did not refresh: %v\n%s", err, srv.log(t))
+				}
+				var message struct {
+					Type        string `json:"type"`
+					TriggeredBy string `json:"triggeredBy"`
+				}
+				if err := json.Unmarshal([]byte(frame), &message); err != nil {
+					t.Fatal(err)
+				}
+				if message.Type == "error" {
+					t.Fatalf("inherited source edit failed: %s", frame)
+				}
+				if message.Type == "full-reload" && filepath.Clean(filepath.FromSlash(message.TriggeredBy)) == resolvedEntry {
+					break
+				}
+			}
+			module = served("/entry.ts")
+			metadata := served(importURL(t, module.body, "package.json", ""))
+			for _, value := range []string{expected.Name, expected.Version} {
+				if !strings.Contains(metadata.body, strconv.Quote(value)) {
+					t.Fatalf("live inherited metadata request lost %q: %s", value, metadata.body)
+				}
+			}
+			if got, err := os.ReadFile(entry); err != nil || string(got) != updated {
+				t.Fatalf("server changed the edited source: %v", err)
+			}
+			t.Log("inherited companion served after live edit without rebuilding")
+		})
+		for _, test := range []struct {
+			name, context  string
+			checkoutHelper bool
+		}{
+			{"generated_package_import_cannot_require_checkout_target", "scope", false},
+			{"generated_package_import_cannot_select_checkout_target", "scope", true},
+			{"nested_same_store_preserves_declared_npm_identity", "same_store", false},
+			{"nested_mirrored_store_preserves_declared_npm_identity", "mirrored_store", false},
+			{"nested_install_cannot_override_declared_npm_identity", "different_store", false},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				fixture := "dev_source_contexts"
+				tmp := t.TempDir()
+				ws := filepath.Join(tmp, "ws")
+				app := filepath.Join(ws, "tests", "dev_server")
+				bin := filepath.Join(ws, "bazel-bin", "tests", "dev_server")
+				for _, dir := range []string{app, filepath.Join(app, "scoped"), filepath.Join(app, "npm_context"), filepath.Join(bin, "scoped")} {
+					mkdir(t, dir)
+				}
+				for _, rel := range []string{"scoped/package.json", "npm_context/value.ts"} {
+					write(t, filepath.Join(app, rel), tree.File("tests/dev_server/"+rel).Text())
+				}
+				write(t, filepath.Join(app, "scoped", "helper.mjs"), tree.File("tests/dev_server/scoped/helper.mjs").Text()+`
+export { default as generatedSource } from "#generated-helper?raw";
+`)
+				for _, name := range []string{"generated.ts", "generated-helper.ts", "self-helper.ts"} {
+					generated := tree.File("tests/dev_server/scoped/" + name).Abs()
+					selected := filepath.Join(bin, "scoped", name)
+					if err := os.Symlink(generated, selected); err != nil {
+						t.Fatal(err)
+					}
+					originalInfo, err := os.Stat(generated)
+					if err != nil {
+						t.Fatal(err)
+					}
+					selectedInfo, err := os.Stat(selected)
+					if err != nil || !os.SameFile(originalInfo, selectedInfo) {
+						t.Fatalf("generated input %s lost its exact Bazel File: %v", name, err)
+					}
+				}
+				for _, absent := range []string{filepath.Join(bin, "scoped", "package.json"), filepath.Join(bin, "scoped", "generated.js")} {
+					if _, err := os.Lstat(absent); !os.IsNotExist(err) {
+						t.Fatalf("source-mode fixture unexpectedly staged %s: %v", absent, err)
+					}
+				}
+				tree.Absent("tests/dev_server/scoped/generated.js")
+				checkoutTwin := filepath.Join(app, "scoped", "generated.ts")
+				poison := `export const generated = "POISONED_CHECKOUT_GENERATED"; export const helper = "POISONED_CHECKOUT_HELPER";`
+				write(t, checkoutTwin, poison)
+				write(t, filepath.Join(app, "index.html"), "SOURCE_CONTEXT_FIXTURE")
+				entry := `import { generated, generatedHelper, helper } from "./scoped/generated.js"; export { generated, generatedHelper, helper };`
+				preserved := map[string]string{checkoutTwin: poison}
+				helperTwin := filepath.Join(app, "scoped", "generated-helper.ts")
+				if test.context == "scope" {
+					installed := filepath.Join(bin, "scoped", "node_modules", "@fixture", "declared-scope")
+					mkdir(t, installed)
+					preserved[filepath.Join(installed, "package.json")] = `{"name":"@fixture/declared-scope","type":"module","exports":{"./self-helper":"./helper.mjs"}}`
+					preserved[filepath.Join(installed, "helper.mjs")] = `export const selfHelper = "INSTALLED_PACKAGE_SHADOW";`
+					for file, content := range preserved {
+						write(t, file, content)
+					}
+				}
+				if test.checkoutHelper {
+					preserved[helperTwin] = `export const generatedHelper = "POISONED_CHECKOUT_GENERATED_HELPER";`
+					write(t, helperTwin, preserved[helperTwin])
+				} else if _, err := os.Lstat(helperTwin); !os.IsNotExist(err) {
+					t.Fatalf("generated helper unexpectedly has a checkout target: %v", err)
+				}
+				var nestedModules, declaredModules, declaredVersion string
+				if test.context != "scope" {
+					entry = `import { version } from "./npm_context/value.js"; export { version };`
+					cfg := readLauncherConfig(t, tree, fixture)
+					declaredModules = inTree(tree, cfg.DevServer.NodeModules)
+					var metadata struct{ Version string }
+					data, err := os.ReadFile(filepath.Join(declaredModules, "zod", "package.json"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal(data, &metadata); err != nil || metadata.Version == "" {
+						t.Fatalf("declared npm package has no version: %v", err)
+					}
+					declaredVersion = metadata.Version
+					nestedModules = filepath.Join(app, "npm_context", "node_modules")
+					if test.context == "same_store" {
+						if err := os.Symlink(declaredModules, nestedModules); err != nil {
+							t.Fatal(err)
+						}
+					} else if test.context == "mirrored_store" {
+						// The darwin-sandbox shape: a real directory of links to the declared store's files.
+						store, err := filepath.EvalSymlinks(filepath.Join(declaredModules, "zod"))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := filepath.WalkDir(store, func(file string, entry os.DirEntry, err error) error {
+							if err != nil {
+								return err
+							}
+							relative, err := filepath.Rel(store, file)
+							if err != nil {
+								return err
+							}
+							mirrored := filepath.Join(nestedModules, "zod", relative)
+							if entry.IsDir() {
+								return os.MkdirAll(mirrored, 0o755)
+							}
+							return os.Symlink(file, mirrored)
+						}); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						mkdir(t, filepath.Join(nestedModules, "zod"))
+						preserved[filepath.Join(nestedModules, "zod", "package.json")] = `{"name":"zod","version":"0.0.0-NESTED_CHECKOUT_OVERRIDE","type":"module","exports":{".":"./index.js","./package.json":"./package.json"}}`
+						preserved[filepath.Join(nestedModules, "zod", "index.js")] = `export const z = "NESTED_CHECKOUT_OVERRIDE";`
+						preserved[filepath.Join(nestedModules, ".user-owned")] = "KEEP_USER_INSTALL"
+						for file, content := range preserved {
+							write(t, file, content)
+						}
+					}
+				}
+				write(t, filepath.Join(app, "context_entry.js"), entry)
+				t.Cleanup(func() {
+					for file, want := range preserved {
+						got, err := os.ReadFile(file)
+						if err != nil || string(got) != want {
+							t.Errorf("dev server changed user file %s: %v; got %q", file, err, got)
+						}
+					}
+					if !test.checkoutHelper {
+						if _, err := os.Lstat(helperTwin); !os.IsNotExist(err) {
+							t.Errorf("dev server materialized the generated helper in the checkout: %v", err)
+						}
+					}
+					if test.context == "same_store" {
+						if got, err := os.Readlink(nestedModules); err != nil || got != declaredModules {
+							t.Errorf("dev server replaced the user's same-store link: %q (%v)", got, err)
+						}
+					}
+				})
+				srv := start(t, tree.File("tests/dev_server/"+fixture+"_launcher").Abs(), ws, tmp)
+				if test.context == "different_store" {
+					timer := time.NewTimer(time.Until(deadline))
+					defer timer.Stop()
+					select {
+					case err := <-srv.wait:
+						srv.wait <- err
+						if err == nil {
+							t.Fatal("conflicting npm installation exited successfully")
+						}
+					case <-timer.C:
+						t.Fatal("conflicting npm installation was not refused before the test deadline")
+					}
+					log := srv.log(t)
+					for _, want := range []string{"conflicting npm installation for zod", nestedModules, "declared app store", "Remove the conflicting installation yourself"} {
+						if !strings.Contains(log, want) {
+							t.Errorf("npm startup refusal lacks %q:\n%s", want, log)
+						}
+					}
+					return
+				}
+				base := srv.awaitHTTP(t, "/index.html")
+				get(t, base, "/index.html").contains(t, srv, "SOURCE_CONTEXT_FIXTURE")
+				t.Logf("declared source context %s reached serving", test.context)
+				served := func(path string) response {
+					t.Helper()
+					got := get(t, base, path)
+					if got.status != 200 {
+						t.Fatalf("declared source context %s returned HTTP %d for %s: %s\n%s", test.context, got.status, path, got.body, srv.log(t))
+					}
+					return got
+				}
+				response := served("/context_entry.js")
+				if test.context == "scope" {
+					generatedURL := importURL(t, response.body, "generated.ts", "")
+					module := get(t, base, generatedURL)
+					if module.status != 200 {
+						t.Fatalf("generated package #imports lost authored scope: HTTP %d at %s\n%s\n%s", module.status, generatedURL, module.body, srv.log(t))
+					}
+					module.contains(t, srv, "DECLARED_SCOPED_GENERATED")
+					module.excludes(t, "POISONED_CHECKOUT_GENERATED", "INSTALLED_PACKAGE_SHADOW", "node_modules/@fixture", ": string")
+					module.contains(t, srv, "selfHelper")
+					self := served(importURL(t, module.body, "self-helper.ts", ""))
+					self.contains(t, srv, "DECLARED_SELF_REFERENCE_HELPER")
+					self.excludes(t, "INSTALLED_PACKAGE_SHADOW", ": string")
+					helper := served(importURL(t, module.body, "helper.mjs", ""))
+					helper.contains(t, srv, "AUTHORED_SCOPE_HELPER")
+					helper.excludes(t, "POISONED_CHECKOUT_HELPER")
+					for _, request := range []struct{ body, query string }{
+						{module.body, ""},
+						{helper.body, "raw"},
+					} {
+						generatedHelper := served(importURL(t, request.body, "generated-helper.ts", request.query))
+						generatedHelper.contains(t, srv, "DECLARED_GENERATED_SCOPE_HELPER")
+						generatedHelper.excludes(t, "POISONED_CHECKOUT_GENERATED_HELPER")
+						if request.query == "raw" {
+							generatedHelper.contains(t, srv, ": string")
+						} else {
+							generatedHelper.excludes(t, ": string")
+						}
+					}
+					return
+				}
+				module := served(importURL(t, response.body, "value.ts", ""))
+				metadata := served(importURL(t, module.body, "package.json", ""))
+				if strings.Contains(metadata.body, "NESTED_CHECKOUT_OVERRIDE") || !strings.Contains(metadata.body, strconv.Quote(declaredVersion)) {
+					t.Fatalf("nested installation changed declared npm identity: want zod %q, served %s\n%s", declaredVersion, metadata.finalURL, metadata.body)
+				}
+			})
+		}
+		t.Run("shared_backing_scalars_cannot_replace_selected_scope", func(t *testing.T) {
+			tmp := t.TempDir()
+			ws := filepath.Join(tmp, "ws")
+			app := filepath.Join(ws, "tests", "dev_server")
+			bin := filepath.Join(ws, "bazel-bin", "tests", "dev_server", "shared_scalars")
+			backing := tree.File("tests/dev_server/shared_scalars/a/value.ts")
+			if backing.Text() != tree.File("tests/dev_server/shared_scalars/b/value.ts").Text() {
+				t.Fatal("shared-backing fixture has different declared source bytes")
+			}
+			backingInfo, err := os.Stat(backing.Abs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, side := range []string{"a", "b"} {
+				mkdir(t, filepath.Join(bin, side))
+				for _, name := range []string{"value.ts", "helper.ts", "scoped-helper.ts", "imports.ts", "self.ts", "package.json"} {
+					source := tree.File("tests/dev_server/shared_scalars/" + side + "/" + name)
+					if name == "value.ts" {
+						source = backing
+					}
+					if err := os.Symlink(source.Abs(), filepath.Join(bin, side, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				selectedInfo, err := os.Stat(filepath.Join(bin, side, "value.ts"))
+				if err != nil || !os.SameFile(backingInfo, selectedInfo) {
+					t.Fatalf("declared scalar %s does not share its backing File: %v", side, err)
+				}
+			}
+			// Declared outputs are addressed beneath the resolved bazel-bin.
+			resolvedBin, err := filepath.EvalSymlinks(bin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mkdir(t, app)
+			write(t, filepath.Join(app, "index.html"), "SHARED_SCALAR_FIXTURE")
+			srv := start(t, tree.File("tests/dev_server/dev_source_contexts_launcher").Abs(), ws, tmp)
+			base := srv.awaitHTTP(t, "/index.html")
+			served := func(t *testing.T, request string) response {
+				t.Helper()
+				got := get(t, base, request)
+				if got.status != 200 {
+					t.Fatalf("shared scalar returned HTTP %d for %s: %s\n%s", got.status, request, got.body, srv.log(t))
+				}
+				return got
+			}
+			for _, side := range []string{"b", "a"} {
+				other := "a"
+				if side == "a" {
+					other = "b"
+				}
+				for _, mode := range []string{"imports", "self"} {
+					t.Run(side+"_"+mode, func(t *testing.T) {
+						entry := served(t, "/@fs"+filepath.ToSlash(filepath.Join(bin, side, mode+".ts")))
+						valueURL := importURL(t, entry.body, "value.ts", "")
+						selected, err := url.Parse(valueURL)
+						want := "/@fs" + filepath.ToSlash(filepath.Join(resolvedBin, side, "value.ts"))
+						if err != nil || selected.Path != want {
+							t.Fatalf("%s selected %q, want declared scalar %q: %v", mode, valueURL, want, err)
+						}
+						value := served(t, valueURL)
+						for _, helper := range []struct{ file, marker string }{
+							{"helper.ts", "DECLARED_RELATIVE_"},
+							{"scoped-helper.ts", "DECLARED_SCOPE_"},
+						} {
+							response := served(t, importURL(t, value.body, helper.file, ""))
+							response.contains(t, srv, helper.marker+strings.ToUpper(side))
+							response.excludes(t, helper.marker+strings.ToUpper(other))
+						}
+					})
+				}
+			}
+		})
+		t.Run("generated_tree_uses_package_main_and_vite_extensions", func(t *testing.T) {
+			for _, test := range []struct{ name, specifier, file, marker string }{
+				{"package_main", "./generated_package", "client.js", "DECLARED_PACKAGE_MAIN"},
+				{"extensionless_mjs", "./generated_package/dist/extension", "extension.mjs", "DECLARED_EXTENSIONLESS_MJS"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					entry := "/generated_package_" + test.name + ".js"
+					write(t, filepath.Join(appRoot, strings.TrimPrefix(entry, "/")), "export { marker } from "+strconv.Quote(test.specifier)+";\n")
+					module := get(t, base, entry)
+					if module.status != 200 {
+						t.Fatalf("generated package entry returned HTTP %d: %s\n%s", module.status, module.body, srv.log(t))
+					}
+					selected := get(t, base, importURL(t, module.body, test.file, ""))
+					selected.contains(t, srv, test.marker)
+					selected.excludes(t, "CHECKOUT_PACKAGE_SHADOW", "WRONG_GENERATED_INDEX", "OUTSIDE_DECLARED_TREE")
+				})
+			}
+			t.Run("package_main_cannot_escape_declared_tree", func(t *testing.T) {
+				write(t, filepath.Join(appRoot, "generated_package_escape.js"), `export { marker } from "./generated_package/escape";`)
+				module := get(t, base, "/generated_package_escape.js")
+				if module.status == 200 || !strings.Contains(module.body, "outside declared directory") {
+					t.Fatalf("escaping package main was not rejected: HTTP %d: %s\n%s", module.status, module.body, srv.log(t))
+				}
+			})
+		})
+		t.Run("generated_scalars_override_checkout_extension_candidates", func(t *testing.T) {
+			for _, extension := range []string{"tsx", "js", "mjs"} {
+				t.Run(extension, func(t *testing.T) {
+					name := "extension-" + extension
+					entry := "/generated_scalar_" + extension + ".js"
+					write(t, filepath.Join(appRoot, strings.TrimPrefix(entry, "/")), "export { marker } from "+strconv.Quote("./declared_source/"+name)+";\n")
+					module := get(t, base, entry)
+					if module.status != 200 {
+						t.Fatalf("generated scalar entry returned HTTP %d: %s\n%s", module.status, module.body, srv.log(t))
+					}
+					selected := get(t, base, importURL(t, module.body, name+"."+extension, ""))
+					selected.contains(t, srv, "DECLARED_SCALAR_"+strings.ToUpper(extension))
+					selected.excludes(t, "UNDECLARED_EXTENSION_SHADOW")
+				})
+			}
+		})
+		requireMissingProducer := func(t *testing.T, got response, relative string) {
+			t.Helper()
+			physicalBin, err := filepath.EvalSymlinks(appBin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			producer := filepath.ToSlash(filepath.Join(physicalBin, filepath.FromSlash(relative)))
+			if got.status < 400 || !(strings.Contains(got.body, "ENOENT") || strings.Contains(got.body, "Failed to load url")) || !strings.Contains(got.body, producer) {
+				t.Fatalf("missing producer %s did not report its filesystem error: HTTP %d: %s\n%s", producer, got.status, got.body, srv.log(t))
+			}
+			got.excludes(t, "UNDECLARED_MISSING_PRODUCER_SHADOW")
+		}
+		t.Run("root_relative_requests_retain_declared_identity", func(t *testing.T) {
+			for _, test := range []struct{ name, request, marker string }{
+				{"scalar", "/declared_source/value.ts", "DECLARED_GENERATED_TS_V1"},
+				{"tree", "/generated_package/dist/client.js", "DECLARED_PACKAGE_MAIN"},
+				{"asset", "/theme.css?raw", ".first-publisher"},
+				{"missing_scalar", "/declared_source/missing.tsx", ""},
+				{"missing_tree", "/generated_package/dist/missing.js", ""},
+				{"missing_asset", "/declared_missing.css?raw", ""},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					selected := get(t, base, test.request)
+					selected.excludes(t, "STALE_CHECKOUT_TS", "CHECKOUT_PACKAGE_SHADOW", "UNDECLARED_ASSET_SHADOW", "UNDECLARED_MISSING_PRODUCER_SHADOW")
+					if test.marker == "" {
+						requireMissingProducer(t, selected, strings.TrimPrefix(strings.Split(test.request, "?")[0], "/"))
+						return
+					}
+					if selected.status != 200 {
+						t.Fatalf("declared root request returned HTTP %d: %s\n%s", selected.status, selected.body, srv.log(t))
+					}
+					selected.contains(t, srv, test.marker)
+				})
+			}
+		})
+		t.Run("jsx_imports_retain_declared_typescript_identity", func(t *testing.T) {
+			for _, name := range []string{"extension-tsx", "missing"} {
+				t.Run(name, func(t *testing.T) {
+					entry := "/generated_jsx_" + name + ".js"
+					write(t, filepath.Join(appRoot, strings.TrimPrefix(entry, "/")), "export { marker } from "+strconv.Quote("./declared_source/"+name+".jsx")+";\n")
+					module := get(t, base, entry)
+					if name == "missing" && module.status != 200 {
+						requireMissingProducer(t, module, "declared_source/missing.tsx")
+						return
+					}
+					if module.status != 200 {
+						t.Fatalf("declared JSX entry returned HTTP %d: %s\n%s", module.status, module.body, srv.log(t))
+					}
+					selected := get(t, base, importURL(t, module.body, name+".tsx", ""))
+					selected.excludes(t, "UNDECLARED_JSX_SHADOW", "UNDECLARED_EXTENSION_SHADOW", "UNDECLARED_MISSING_PRODUCER_SHADOW")
+					if name == "missing" {
+						requireMissingProducer(t, selected, "declared_source/missing.tsx")
+						return
+					}
+					if selected.status != 200 {
+						t.Fatalf("declared JSX producer returned HTTP %d: %s\n%s", selected.status, selected.body, srv.log(t))
+					}
+					selected.contains(t, srv, "DECLARED_SCALAR_TSX")
+				})
+			}
+		})
+		t.Run("generated_sources_override_checkout_twins_and_refresh_without_emit", func(t *testing.T) {
+			phase, boundary, acceptedURL, lastFrame := "load generated imports", "", "", ""
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("phase=%s boundary=%q accepted=%q last frame=%q\n%s", phase, boundary, acceptedURL, lastFrame, srv.log(t))
+				}
+			})
+			t.Log(phase)
+			served := func(path string) response {
+				t.Helper()
+				got := get(t, base, path)
+				if got.status != 200 {
+					t.Fatalf("generated request %s returned %d: %s", path, got.status, got.body)
+				}
+				return got
+			}
+			entry := "/declared_entry.js"
+			write(t, filepath.Join(appRoot, "declared_entry.js"), `
+import { generated, packageName } from "./declared_source/value.js";
+import payload from "./declared_source/value.json";
+import { greeting } from "../codegen_tree/compiled/index.js";
+export { generated, packageName, payload, greeting };
+if (import.meta.hot) import.meta.hot.accept(["./declared_source/value.js", "./declared_source/value.json", "../codegen_tree/compiled/index.js"], () => {});
+`)
+			entryResponse := served(entry)
+			entry = strings.TrimPrefix(entryResponse.finalURL, base)
+			sourceURL := importURL(t, entryResponse.body, "value.ts", "")
+			jsonURL := importURL(t, entryResponse.body, "value.json", "")
+			treeIndexURL := importURL(t, entryResponse.body, "index.js", "")
+			treeIndex := served(treeIndexURL)
+			treeIndex.excludes(t, "STALE_CHECKOUT_TREE")
+			treeURL := importURL(t, treeIndex.body, "greeting.js", "")
+			greeting := served(treeURL)
+			greeting.contains(t, srv, "greeting: ")
+			greeting.excludes(t, "STALE_CHECKOUT_TREE")
+			accepted := regexp.MustCompile(`import\.meta\.hot\.accept\(\s*(\[[^\]]+\])`).FindStringSubmatch(entryResponse.body)
+			if accepted == nil {
+				t.Fatalf("generated entry has no rewritten HMR dependencies: %s", entryResponse.body)
+			}
+			source := served(sourceURL)
+			source.contains(t, srv, "DECLARED_GENERATED_TS_V1")
+			source.excludes(t, "STALE_CHECKOUT_TS", ": string")
+			served(jsonURL).contains(t, srv, "DECLARED_GENERATED_JSON_V1")
+			served(importURL(t, source.body, "index.ts", "")).contains(t, srv, "@devserver/lib")
+			if _, err := os.Stat(filepath.Join(appBin, "declared_source", "value.js")); !os.IsNotExist(err) {
+				t.Fatalf("source fixture unexpectedly has emitted JavaScript: %v", err)
+			}
+			phase = "connect generated HMR"
+			t.Log(phase)
+			// Vite replays the last error raised with no client connected, here an earlier subtest's missing producer, to the next client.
+			primer, err := hmrsocket.Dial(strings.TrimPrefix(base, "http://"), "/", "vite-hmr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			primer.Close()
+			sock, err := hmrsocket.Dial(strings.TrimPrefix(base, "http://"), "/", "vite-hmr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sock.Close()
+			before := restartCount(t, srv)
+			for _, changed := range []struct {
+				file, url, acceptedFile, before, marker string
+			}{
+				{"tests/dev_server/declared_source/value.ts", sourceURL, "value.ts", "DECLARED_GENERATED_TS_V1", "DECLARED_GENERATED_TS_V2"},
+				{"tests/dev_server/declared_source/value.json", jsonURL, "value.json", "DECLARED_GENERATED_JSON_V1", "DECLARED_GENERATED_JSON_V2"},
+				{"tests/codegen_tree/compiled/messages/greeting.js", treeURL, "index.js", "greeting: ", "TREE_GREETING_V2: "},
+			} {
+				phase = "replace " + changed.file
+				boundary, acceptedURL = entry, importURL(t, accepted[1], changed.acceptedFile, "")
+				lastFrame = ""
+				t.Logf("phase=%s boundary=%q accepted=%q", phase, boundary, acceptedURL)
+				original := tree.File(changed.file).Text()
+				file := filepath.Join(bazelBin, filepath.FromSlash(changed.file))
+				if err := os.Remove(file); err != nil {
+					t.Fatal(err)
+				}
+				write(t, file, strings.ReplaceAll(original, changed.before, changed.marker))
+				changedFile, err := filepath.EvalSymlinks(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				phase = "await HMR for " + changed.file
+				for {
+					frame, err := sock.Next(time.Until(deadline))
+					if err != nil {
+						t.Fatalf("generated %s HMR: %v", changed.file, err)
+					}
+					lastFrame = frame
+					t.Logf("phase=%s frame=%s", phase, frame)
+					var message struct {
+						Type        string `json:"type"`
+						TriggeredBy string `json:"triggeredBy"`
+						Updates     []struct {
+							Path         string `json:"path"`
+							AcceptedPath string `json:"acceptedPath"`
+						} `json:"updates"`
+					}
+					if err := json.Unmarshal([]byte(frame), &message); err != nil {
+						t.Fatal(err)
+					}
+					// FSEvents can deliver earlier subtests' writes late; only this file's reload counts.
+					if message.Type == "full-reload" && message.TriggeredBy != changedFile {
+						continue
+					}
+					if message.Type == "full-reload" || message.Type == "error" {
+						t.Fatalf("generated source HMR boundary lost: %s", frame)
+					}
+					matched := false
+					for _, update := range message.Updates {
+						if update.Path == entry && update.AcceptedPath == acceptedURL {
+							matched = true
+						}
+					}
+					if !matched {
+						continue
+					}
+					phase = "fetch rebuilt " + changed.file
+					fresh := get(t, base, changed.url)
+					if fresh.status != 200 || !strings.Contains(fresh.body, changed.marker) {
+						t.Fatalf("generated %s HMR served stale bytes (%d): %s", changed.file, fresh.status, fresh.body)
+					}
+					break
+				}
+			}
+			if after := restartCount(t, srv); after != before {
+				t.Fatalf("generated source rebuild restarted Vite: %d -> %d", before, after)
+			}
+		})
+		t.Run("published_assets_keep_context_bytes_and_rebuild_updates", func(t *testing.T) {
+			phase, lastFrame := "native publisher imports", ""
+			var pending map[string]string
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("phase=%s pending=%v last frame=%q\n%s", phase, pending, lastFrame, srv.log(t))
+				}
+			})
+			t.Log(phase)
+			served := func(url string) response {
+				t.Helper()
+				got := get(t, base, url)
+				if got.status != 200 {
+					t.Fatalf("published request %s returned %d: %s", url, got.status, got.body)
+				}
+				return got
+			}
+			publishers := []string{"tests/dev_server", "tests/dev_server/lib"}
+			cmd := exec.Command(node.Abs(), "--input-type=module", "-e", `
+import { pathToFileURL } from 'node:url';
+const names = [];
+for (const file of process.argv.slice(1)) names.push((await import(pathToFileURL(file).href)).name);
+process.stdout.write(JSON.stringify(names));
+`, tree.File(publishers[0]+"/tests/dev_server_assets/helper.mjs").Abs(), tree.File(publishers[1]+"/tests/dev_server_assets/helper.mjs").Abs())
+			nativeJSON, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("native published modules: %v\n%s", err, nativeJSON)
+			}
+			var nativeNames []string
+			if err := json.Unmarshal(nativeJSON, &nativeNames); err != nil || !slices.Equal(nativeNames, []string{"FIRST_PUBLISHER", "SECOND_PUBLISHER"}) {
+				t.Fatalf("native publication contexts: %s (%v)", nativeJSON, err)
+			}
+			exportedString := func(body string) string {
+				t.Helper()
+				_, encoded, ok := strings.Cut(body, "export default ")
+				var value string
+				if !ok {
+					t.Fatalf("asset module has no default export: %s", body)
+				}
+				if err := json.NewDecoder(strings.NewReader(encoded)).Decode(&value); err != nil {
+					t.Fatalf("asset module default export: %v\n%s", err, body)
+				}
+				return value
+			}
+			assetBytes := func(value string) string {
+				t.Helper()
+				if strings.HasPrefix(value, "data:") {
+					media, encoded, ok := strings.Cut(value, ",")
+					if !ok || strings.SplitN(media, ";", 2)[0] != "data:image/svg+xml" {
+						t.Fatalf("asset URL is not SVG data: %s", value)
+					}
+					decoded, err := url.PathUnescape(encoded)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.HasSuffix(media, ";base64") {
+						bytes, err := base64.StdEncoding.DecodeString(decoded)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return string(bytes)
+					}
+					return decoded
+				}
+				baseURL, err := url.Parse(base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assetURL, err := baseURL.Parse(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := get(t, assetURL.String(), "")
+				if got.status != 200 {
+					t.Fatalf("asset URL %s returned %d: %s", value, got.status, got.body)
+				}
+				return got.body
+			}
+			svgTokens := func(body string) []xml.Token {
+				t.Helper()
+				decoder := xml.NewDecoder(strings.NewReader(strings.TrimSpace(body)))
+				var tokens []xml.Token
+				for {
+					token, err := decoder.Token()
+					if err == io.EOF {
+						return tokens
+					}
+					if err != nil {
+						t.Fatalf("invalid SVG: %v\n%s", err, body)
+					}
+					tokens = append(tokens, xml.CopyToken(token))
+				}
+			}
+			var helperURLs, cssURLs []string
+			for i, publisher := range publishers {
+				phase = "fetch published bytes for " + publisher
+				t.Log(phase)
+				logical := publisher + "/tests/dev_server_assets/"
+				entry := filepath.Join(appRoot, "published_"+strconv.Itoa(i)+".js")
+				asset := filepath.Join(ws, filepath.FromSlash(logical+"payload.svg"))
+				write(t, entry, "import { name } from "+strconv.Quote(filepath.Join(ws, filepath.FromSlash(logical+"helper.mjs")))+
+					"; import "+strconv.Quote(filepath.Join(ws, filepath.FromSlash(logical+"style.css")))+
+					"; import raw from "+strconv.Quote(asset+"?raw")+
+					"; import assetURL from "+strconv.Quote(asset+"?url")+"; export { name, raw, assetURL };")
+				entryResponse := served("/" + filepath.Base(entry))
+				helperURL := importURL(t, entryResponse.body, "helper.mjs", "")
+				helper := served(helperURL)
+				settings := served(importURL(t, helper.body, "settings.mjs", ""))
+				settings.contains(t, srv, nativeNames[i])
+				helperURLs = append(helperURLs, helperURL)
+				cssURL := importURL(t, entryResponse.body, "style.css", "") + "?direct"
+				css := served(cssURL)
+				css.contains(t, srv, []string{".first-publisher", ".second-publisher"}[i])
+				cssURLs = append(cssURLs, cssURL)
+				match := regexp.MustCompile(`url\(\s*(?:"([^"]*)"|'([^']*)'|([^\s)]*))\s*\)`).FindStringSubmatch(css.body)
+				if match == nil {
+					t.Fatalf("nested CSS has no payload URL: %s", css.body)
+				}
+				declared := tree.File(logical + "payload.svg").Text()
+				payload := assetBytes(strings.Join(match[1:], ""))
+				if !reflect.DeepEqual(svgTokens(payload), svgTokens(declared)) {
+					t.Fatalf("CSS payload escaped %s: %s", logical, payload)
+				}
+				if raw := exportedString(served(importURL(t, entryResponse.body, "payload.svg", "raw")).body); raw != declared {
+					t.Fatalf("raw asset escaped %s: %s", logical, raw)
+				}
+				payload = assetBytes(exportedString(served(importURL(t, entryResponse.body, "payload.svg", "url")).body))
+				if !reflect.DeepEqual(svgTokens(payload), svgTokens(declared)) {
+					t.Fatalf("URL asset escaped %s: %s", logical, payload)
+				}
+			}
+			if helperURLs[0] == helperURLs[1] || cssURLs[0] == cssURLs[1] {
+				t.Fatalf("publisher contexts collapsed: helpers %v; CSS %v", helperURLs, cssURLs)
+			}
+			phase = "connect published HMR"
+			t.Log(phase)
+			sock, err := hmrsocket.Dial(strings.TrimPrefix(base, "http://"), "/", "vite-hmr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sock.Close()
+			pending = map[string]string{helperURLs[0]: "PUBLISHED_REBUILD", cssURLs[0]: "published-rebuild"}
+			phase = "replace published outputs"
+			t.Logf("phase=%s pending=%v", phase, pending)
+			var changedFiles []string
+			for relative, addition := range map[string]string{
+				"helper.mjs": "\nexport const revision = 'PUBLISHED_REBUILD';\n",
+				"style.css":  "\n.published-rebuild { color: purple; }\n",
+			} {
+				logical := publishers[0] + "/tests/dev_server_assets/" + relative
+				file := filepath.Join(bazelBin, filepath.FromSlash(logical))
+				bytes := tree.File(logical).Text()
+				if err := os.Remove(file); err != nil {
+					t.Fatal(err)
+				}
+				write(t, file, bytes+addition)
+				resolved, err := filepath.EvalSymlinks(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changedFiles = append(changedFiles, resolved)
+			}
+			phase = "await published HMR"
+			for len(pending) > 0 {
+				frame, err := sock.Next(time.Until(deadline))
+				if err != nil {
+					t.Fatalf("published output updates %v: %v", pending, err)
+				}
+				lastFrame = frame
+				t.Logf("phase=%s frame=%s", phase, frame)
+				var message struct {
+					Type        string `json:"type"`
+					TriggeredBy string `json:"triggeredBy"`
+					Updates     []struct {
+						Path string `json:"path"`
+					} `json:"updates"`
+				}
+				if err := json.Unmarshal([]byte(frame), &message); err != nil {
+					t.Fatal(err)
+				}
+				// FSEvents can deliver earlier writes late; only the replaced outputs' reloads count.
+				if message.Type == "full-reload" && !slices.Contains(changedFiles, message.TriggeredBy) {
+					continue
+				}
+				if message.Type == "full-reload" || message.Type == "error" {
+					t.Fatalf("published HMR boundaries lost: %s", frame)
+				}
+				for _, update := range message.Updates {
+					if marker, ok := pending[update.Path]; ok {
+						served(update.Path).contains(t, srv, marker)
+						delete(pending, update.Path)
+					}
+				}
+			}
+
+		})
+	}
 
 	if target == "dev_oj_source" {
 		t.Run("source_app_resolves_js_import_to_source_library_without_emit", func(t *testing.T) {
@@ -492,7 +1481,7 @@ func TestDevServerBehaviour(t *testing.T) {
 			for time.Now().Before(deadline) {
 				frame, err := sock.Next(time.Until(deadline))
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("%v\n%s", err, srv.log(t))
 				}
 				var message struct {
 					Updates []struct {
@@ -561,6 +1550,18 @@ func TestDevServerBehaviour(t *testing.T) {
 			t.Errorf("the server never came back after restarting\n%s", srv.log(t))
 		}
 	})
+}
+
+func importURL(t *testing.T, body, filename, query string) string {
+	t.Helper()
+	for _, match := range regexp.MustCompile(`["']([^"']+)["']`).FindAllStringSubmatch(body, -1) {
+		parsed, err := url.Parse(match[1])
+		if err == nil && strings.HasPrefix(parsed.Path, "/") && filepath.Base(parsed.Path) == filename && (query == "" || parsed.Query().Has(query)) {
+			return match[1]
+		}
+	}
+	t.Fatalf("no %s URL with query %q in %s", filename, query, body)
+	return ""
 }
 
 func restartCount(t *testing.T, s *server) int {

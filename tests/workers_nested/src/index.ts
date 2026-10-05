@@ -1,5 +1,6 @@
 import { z } from "zod";
 import greeting from "./greeting.txt";
+import "./layout";
 
 export const moduleUrl = import.meta.url;
 

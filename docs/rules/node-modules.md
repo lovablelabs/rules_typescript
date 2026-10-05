@@ -99,6 +99,8 @@ target's `NpmHoistInfo` on every importer of the chain), and a
 view's `TsInfo` and `NpmPackageInfo`, so a target names it in `deps` where it
 named the view ([Providers](providers.md#nodemodulesinfo)).
 
+Native executables derive a build-owned runtime view from these same declared Files. Each selected store has one copied authority per view; importer aliases use relative links to it, preserving the package's peer graph and singleton identity. Package the complete view with its generated config. Copy cost is not measured; runtime wrappers are resolved from their original tool runfiles.
+
 ## One Link per Name
 
 Two resolutions of one name in `deps` is one link name twice, and fails:
@@ -140,8 +142,9 @@ The call declares, `manual` and public:
   `node_modules/.pnpm/<key>/node_modules/<name>`, where `<key>` is
   `<name with / as +>@<version>` plus `_<peer id>` when pnpm resolved the
   package against a peer set (`NpmPackageInfo.peer_id`). Its one action,
-  `NpmStore`, copies the fetched package's files into the tree with
-  `tsaction stage`; beside the tree it declares one symlink per dependency
+  `NpmStore`, copies the fetched package directory into the tree with
+  `tsaction stage`, the directory one source artifact rather than one target
+  per file; beside the tree it declares one symlink per dependency
   edge the lockfile records, `node_modules/.pnpm/<key>/node_modules/<dep>` ->
   `../../<dep key>/node_modules/<dep>`, under the name the snapshot imports
   the dependency by, so an npm alias is a link name and not a second copy. An
@@ -242,8 +245,9 @@ twin an importer on the chain links, the member links `deps` name, every store
 tree and edge link their closures hold, the hoist links whose names the
 closure holds with the trees they enter ([The Store](#the-store)), and each
 first-party dep's (`TsInfo.npm_files`). tsaction lays a program root out
-under the target's output directory, the action's sources at their paths,
-with each importer's `node_modules` at the importer's directory -- the
+under the target's output directory, linking declared Files at logical
+compiler paths, with each importer's `node_modules` at the importer's
+directory -- the
 lockfile's root importer's at the program root's `node_modules` -- so a source
 at `web/src/a.ts` walks up through
 `web/node_modules` to the root's, and a dep's declaration under
@@ -266,7 +270,8 @@ interface, documented under
 | Attribute               | Type         | Default  | Description                                                                                                                                                                                                                  |
 | ----------------------- | ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `entry_script`          | `string`     | required | The bin entry's path inside the package, e.g. `vitest.mjs`                                                                                                                                                                   |
-| `package_files`         | `label_list` | `[]`     | Every file of the package, from its `ts_npm_package` target                                                                                                                                                                  |
+| `package_files`         | `label_list` | `[]`     | Every file of the package, for a target with no `store`; a generated target runs the script from its store tree                                                                                                             |
+| `entry_missing`         | `string`     | `""`     | The error `npm_import` found at fetch time when the package lacks `entry_script`, reported when the target is analysed                                                                                                      |
 | `optional_dep_packages` | `label_list` | `[]`     | Sibling package targets holding the platform-specific native binaries the script resolves at run time. The launcher links them under a `node_modules/` so `require.resolve()` finds them inside a sandbox or a runfiles tree |
 | `runtime`               | `label`      | `None`   | A JS runtime binary for this target, taking priority over the `js_runtime` toolchain                                                                                                                                         |
 

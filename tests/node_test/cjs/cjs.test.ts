@@ -6,10 +6,9 @@ import { version } from "typescript";
 
 import { bump, dir } from "./helper";
 
-test("runs as CommonJS at its runfiles path", () => {
+test("runs as CommonJS at its runtime view path", () => {
   assert.equal(typeof require, "function");
-  const suffix = ".runfiles/_main/tests/node_test/cjs";
-  assert.ok(__dirname.endsWith(suffix), __dirname);
+  assert.equal(__dirname, join(process.cwd(), "_main/tests/node_test/cjs"));
 });
 
 test("an extensionless relative require keeps the runfiles path", () => {

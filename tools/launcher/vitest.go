@@ -31,20 +31,20 @@ func planVitest(
 			break
 		}
 		if arg == "--changed" || strings.HasPrefix(arg, "--changed=") {
-			return nil, fmt.Errorf("ts_test: Vitest --changed cannot select tests in Bazel runfiles without Git source history; let Bazel reuse unchanged test targets or pass an explicit compiled-file filter")
+			return nil, fmt.Errorf("ts_test: Vitest --changed cannot select tests in Bazel runfiles without Git source history; let Bazel reuse unchanged test targets or pass an explicit source-file filter")
 		}
 	}
 	var reads *readsRun
 	defer func() {
-		if err != nil && plan.Cleanup != nil {
+		if err != nil || plan.ExitEarly {
 			plan.Cleanup()
-		}
-		if reads != nil && (err != nil || plan.ExitEarly) {
-			_ = os.Remove(reads.record)
 		}
 	}()
 	if readsRequested {
-		if r, reads, err = startReads(cfg.Label, r); err != nil {
+		if reads, err = startReads(cfg.Label); err != nil {
+			return nil, err
+		}
+		if err := plan.own(reads.record, false); err != nil {
 			return nil, err
 		}
 	}
@@ -57,22 +57,39 @@ func planVitest(
 	if len(listed) > 0 && len(files) == 0 {
 		return emptyShard(plan, shard), nil
 	}
+	tree, err := os.MkdirTemp(os.Getenv("TEST_TMPDIR"), "ts_test_runfiles")
+	if err != nil {
+		return nil, err
+	}
+	if err := plan.own(tree, true); err != nil {
+		return nil, err
+	}
+	if r, err = r.Stage(tree, cfg.RuntimeModules); err != nil {
+		return nil, err
+	}
+	plan.runfilesEnv = r.Env()
+	for i := range files {
+		if files[i].path, err = r.Path(files[i].rlocation); err != nil {
+			return nil, err
+		}
+	}
 	filesRoot, err := stageTestRoot(files)
 	if err != nil {
 		return nil, err
 	}
-	plan.Cleanup = func() { _ = os.RemoveAll(filesRoot) }
-	plan.setEnv("TS_TEST_FILES_ROOT", filesRoot)
-	tree := r.Dir()
-	if tree == "" {
-		tree = filesRoot
+	if err := plan.own(filesRoot, true); err != nil {
+		return nil, err
 	}
+	plan.setEnv("TS_TEST_FILES_ROOT", filesRoot)
 	nodeModules, err := installNodeModules(
-		r, plan, tree, cfg.Workspace, v.NodeModules)
+		plan, tree, cfg.Workspace, v.NodeModules)
 	if err != nil {
 		return nil, err
 	}
 	if err := stageFiles(r, tree, v.Stage); err != nil {
+		return nil, err
+	}
+	if err := placeNpmContexts(r, v.NpmContexts, v.NpmBindings, cfg.RuntimeModules); err != nil {
 		return nil, err
 	}
 	configFile := filepath.Join(tree, filepath.FromSlash(v.ConfigFile))
@@ -109,7 +126,33 @@ func planVitest(
 // stageFiles writes each entry as a regular file under the tree: a config's
 // __dirname and its bare-import walk-up then start at its package path.
 func stageFiles(r *Resolver, tree string, stage map[string]string) error {
-	for _, from := range slices.Sorted(maps.Keys(stage)) {
+	root, err := os.OpenRoot(tree)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	paths := slices.Sorted(maps.Keys(stage))
+	for _, from := range paths {
+		dst := filepath.FromSlash(stage[from])
+		if !filepath.IsLocal(dst) || dst == "." {
+			return fmt.Errorf("ts_test: config staging destination %q is outside the runfiles tree", stage[from])
+		}
+		parent := "."
+		for _, part := range strings.Split(filepath.Dir(dst), string(filepath.Separator)) {
+			parent = filepath.Join(parent, part)
+			info, err := root.Lstat(parent)
+			if os.IsNotExist(err) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("ts_test: cannot stage config %q beneath non-directory or symlink entry %q; expose its runfiles individually", stage[from], parent)
+			}
+		}
+	}
+	for _, from := range paths {
 		src, err := r.Path(from)
 		if err != nil {
 			return err
@@ -118,14 +161,14 @@ func stageFiles(r *Resolver, tree string, stage map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("ts_test: reading %s: %w", from, err)
 		}
-		dst := filepath.Join(tree, filepath.FromSlash(stage[from]))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		dst := filepath.FromSlash(stage[from])
+		if err := root.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(dst); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
+		if err := root.WriteFile(dst, data, 0o644); err != nil {
 			return err
 		}
 	}

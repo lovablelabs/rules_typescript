@@ -26,19 +26,18 @@ store; a workspace member's hub view forwards the member's.
                         "the ones it passes through from srcs. A global one " +
                         "is in scope in a consumer only when the consumer's " +
                         "tsconfig `types` names it.",
-        "data": "depset of File: the other srcs, staged at their " +
-                "package-relative paths beside the .js.",
-        "manifest": "File or None: the package.json at the package's root " +
-                    "as built: source targets remain unchanged with emit=False; otherwise " +
+        "data": "depset of File: non-program srcs and explicit package assets. " +
+                "Assets and JSON modules share the compiler-owned logical layout.",
+        "manifest": "File or None: the local package-root package.json from srcs or package_scopes " +
+                    "as built: target paths follow published Files; source extensions remain unchanged with emit=False, otherwise " +
                     "every source-file target is rewritten to the " +
                     "emitted file, <name>.package.json. A dependent's " +
                     "program root lays it at the package's path and the " +
-                    "member's store tree copies it there; the src as written " +
-                    "is in `data`.",
+                    "member's store tree copies it there. The runtime scope projection " +
+                    "or the imported JSON module is in `data`.",
         "sources": "depset of File: the srcs the program reads as its own " +
-                   "-- .ts, .tsx, JavaScript and declarations. A ts_test in " +
-                   "the same package stages them at their source paths; one " +
-                   "under the same tsconfig checks them as its own program's.",
+                   "-- original .ts, .tsx, JavaScript and declarations, independently of runtime placement. " +
+                   "A ts_test under the same tsconfig checks them as its own program's.",
         "tsconfig": "File or None: the tsconfig.json the program's options " +
                     "come from, the `tsconfig` attribute's file. A ts_test " +
                     "under the same file checks this target's sources as " +
@@ -66,14 +65,36 @@ store; a workspace member's hub view forwards the member's.
                      "holds with the trees they enter, and its first-party " +
                      "deps' npm_files. An action stages this and nothing " +
                      "else of the store.",
-        "owners": "depset of struct(label, files, declarations, type_inputs, importers): one " +
+        "owners": "depset of struct(label, files, declarations, type_inputs, importers) " +
+                  "with optional declaration_files, canonical_links, asset_files, runtime_files, runtime_scopes, scope_manifest, replaced_scope and npm_bindings: one " +
                   "record per first-party target in the closure, this one " +
                   "first -- the label a deps list writes, the sources, " +
                   "declarations, data and manifest as built it stages, and " +
                   "its declarations, consumer type inputs and npm importer directories. The tsgo action names the owner " +
                   "of a listed file from `files`; a consumer's program " +
-                  "reads the `type_inputs` of every record but a dep's it " +
-                  "holds as sources. An npm package's declarations reach a " +
+                  "reads every record's `type_inputs`; when it holds a dep " +
+                  "as sources, only that dep's declarations are replaced. " +
+                  "Declared package scopes retain their original File paths " +
+                  "for published sources and passthrough declarations. " +
+                  "Explicit type_inputs never become runtime data or roots; package_scopes " +
+                  "also supply runtime data without module mappings. Their original Files " +
+                  "remain compiler inputs when runtime placement changes. Optional runtime_scopes " +
+                  "holds immutable (original scope File, runtime File) pairs, separate from module " +
+                  "mappings. Consumers reuse a pair only while its runtime File is in transitive_data. " +
+                  "Prior records may omit these pairs; ordinary runtime data passes through, but " +
+                  "a new scope placement cannot reuse an unproven occupant at its destination. " +
+                  "Optional runtime_files holds immutable (source File, runtime File) pairs " +
+                  "constructed by this owner for runtime File identity and package-scope projection; " +
+                  "an empty tuple asserts no runtime mappings. Prior records may omit " +
+                  "the field: their published runtime Files and record are preserved, " +
+                  "without inventing source/runtime mappings. " +
+                  "Optional canonical_links holds exact (link File, canonical File) pairs for identity-preserving placement; module aliases retain their canonical owner context, while metadata-only scope aliases may be copied at their admitted coordinates. " +
+                  "Optional asset_files holds immutable (original File, logical coordinate, published File) triples for unchanged-byte ordinary data. Coordinates are producer package-local paths, with external/<repository>/ prefixes for external producers. Only live transitive_data Files contribute views; duplicate aliases retain the same original File and conflicting origins at one coordinate fail. JSON modules and scope projections use runtime_files/runtime_scopes instead; an explicit data File may also be a compiler input. Older records may omit the field without inferred origins. " +
+                  "Optional declaration_files holds exact (source File, declaration File) pairs from the producer; prior owners may omit them. " +
+                  "Optional npm_bindings retains (package name, importer link File, store tree File) " +
+                  "facts for runtime lookup placement; it describes declared lookup contexts, not " +
+                  "module imports. Prior records may omit it. " +
+                  "An npm package's declarations reach a " +
                   "consumer through `npm_files`, not through a record.",
     },
 )
@@ -109,11 +130,17 @@ def ts_info(
     leaves unsaid is the direct set, and `label` makes it the one owner."""
     owners = _EMPTY
     if label:
+        # Generated trees publish a canonical subtree; analysis cannot enumerate their modules.
+        runtime_files = depset(
+            [file for file in data.to_list() if file.extension == "json"],
+            transitive = [js, runtime_sources],
+        ).to_list()
         owners = depset([struct(
             label = label_text(label),
             files = depset(transitive = [sources, declarations, data]),
             declarations = declarations,
             type_inputs = declarations,
+            runtime_files = tuple([(file, file) for file in runtime_files]),
             importers = (),
         )])
     return TsInfo(
@@ -163,18 +190,18 @@ into the launcher's config and the runfiles of one test.
                   "test's analysis. `test` is the struct ts_test builds from " +
                   "the compile (entry_points, entry_extensions, " +
                   "test_files_list, chain, transitive_js, es_twins, placed, " +
-                  "runtime_data_sets, runtime_sources, package_sources, inline_members, " +
+                  "runtime_data_sets, runtime_sources, runtime_inputs, runtime_files, asset_files, canonical_links, package_sources, inline_members, " +
                   "runner); `chain` is " +
                   "struct(dirs, rlocations, npm_files): the chain's " +
                   "node_modules directories nearest first, as bin-dir paths " +
                   "and as runfiles paths, and the store files the test " +
-                  "reaches; `placed` the compiled files of the srcs outside " +
-                  "the test's package by the runfiles path each is held at, " +
-                  "the src's own, which the rule links and the vitest " +
-                  "runner's module ids name; the result " +
+                  "reaches; `placed` is an empty compatibility mapping for " +
+                  "older launch callbacks. `runtime_files` holds live exact " +
+                  "source/runtime File pairs; `runtime_inputs` selects the " +
+                  "test entry pairs. The result " +
                   "carries `mode` and `section` (the launcher config's mode " +
                   "and that mode's section), `env`, `files`, `symlinks` and " +
-                  "`transitive_files` for the runfiles, and `output_groups`.",
+                  "`transitive_files` for the runfiles, and `output_groups`. Optional `replacements` maps an omitted original File to its explicit replacement File; the runner must bind that original's path through `symlinks`, and final runfiles admission verifies the exact File.",
     },
 )
 
@@ -209,11 +236,11 @@ NpmPackageInfo = provider(
                        "the extracted package. None on a pnpm workspace " +
                        "member, which was never extracted from a tarball: " +
                        "its compile writes the manifest as built.",
-        "package_root": "string: exec-root-relative directory the files in `all_files` hang off -- where `package_dir` sits for an extracted tarball, the member's directory under bazel-bin for a workspace member. A file outside it stages at the package root under its basename.",
-        "all_files": "depset of File: every file of this package " +
-                     "(package.json, .js, .d.ts, other assets), the files " +
-                     "its store tree copies; a member's are its outputs, " +
-                     "the manifest as built in place of the src.",
+        "package_root": "string: exec-root-relative directory the files in `all_files` hang off -- the store tree for an extracted tarball, the member's directory under bazel-bin for a workspace member.",
+        "all_files": "depset of File: this package's files: the store " +
+                     "tree alone for an extracted tarball; a member's " +
+                     "outputs, the files its store tree copies, the " +
+                     "manifest as built in place of the src.",
         "transitive_deps": "depset of NpmPackageInfo: Transitive npm dependencies.",
         "store": "NpmStoreInfo: this resolution's store tree and the links " +
                  "beside it (npm/private/store.bzl), one per snapshot, in " +
@@ -331,17 +358,155 @@ Mode 2 — Generated config (use_generated_config = True):
   ts/private/bundle_action.bzl for the outputs it must produce.
 """,
     fields = {
-        "bundler_binary": "File: The bundler CLI executable.",
+        "bundler_binary": "File or FilesToRunProvider: The bundler CLI executable. Use files_to_run for tools with runfiles.",
         "config_file": "File or None: Optional static bundler config file passed via --config (mode 1 only).",
         "runtime_deps": "depset of File: Additional files needed by the bundler at runtime.",
         "use_generated_config": "bool: When True, ts_binary generates a vite.config.mjs and invokes bundler_binary in mode 2. Default False.",
     },
 )
 
-def require_emitted(consumer, info, requirement):
-    if not info.transitive_runtime_sources:
-        return
+def runtime_scope_destinations(scopes, source, runtime_path):
+    source_dir = source.short_path.split("/")[:-1]
+    runtime_dir = runtime_path.split("/")[:-1]
+    nearest = {}
+    depth = -1
+    for scope in scopes:
+        if source.owner.workspace_root != scope.owner.workspace_root:
+            continue
+        scope_dir = scope.short_path.split("/")[:-1]
+        if source_dir[:len(scope_dir)] != scope_dir:
+            continue
+        scope_depth = len(scope_dir)
+        if scope_depth > depth:
+            nearest = {}
+            depth = scope_depth
+        if scope_depth == depth:
+            distance = len(source_dir) - scope_depth
+            nearest[scope] = "/".join(runtime_dir[:len(runtime_dir) - distance] + [scope.basename]) if distance <= len(runtime_dir) else None
+    return nearest
 
-    # Only the failure path materialises labels to identify the targets to fix.
-    owners = info.runtime_source_owners.to_list()
-    fail("{}: {} requires emitted JavaScript or declarations from {}. Set emit = True on those targets, or use a source-native consumer.".format(consumer, requirement, ", ".join(owners)))
+def is_javascript(file):
+    return not file.is_directory and file.extension in ["js", "mjs", "cjs"]
+
+def runtime_links(owners):
+    links = {}
+    for owner in owners:
+        for link, canonical in getattr(owner, "canonical_links", ()):
+            links.setdefault(link, {})[canonical] = True
+    return links
+
+def canonical_runtime_file(file, links):
+    for _ in range(len(links) + 1):
+        targets = links.get(file)
+        if targets == None:
+            return file
+        if len(targets) != 1:
+            fail("runtime alias '{}' has conflicting canonical Files. Did you mean to retain one producer identity?".format(file.path))
+        file = targets.keys()[0]
+    fail("runtime aliases contain a cycle at '{}'. Did you mean to link each publication to its producer's runtime File?".format(file.path))
+
+def runtime_mappings(owners, live):
+    aliases = runtime_links(owners)
+    mappings = [
+        (owner, [
+            (source, runtime)
+            for source, runtime in list(getattr(owner, "runtime_files", ())) + [
+                (original, published)
+                for original, _coordinate, published in getattr(owner, "asset_files", ())
+                if is_javascript(published) and published not in aliases
+            ]
+            if runtime in live
+        ])
+        for owner in owners
+    ]
+    origins = {}
+    for _owner, pairs in mappings:
+        for source, runtime in pairs:
+            previous = origins.setdefault(runtime, source)
+            if previous != source:
+                fail("runtime File '{}' has conflicting source Files '{}' and '{}'. Did you mean to retain one producing source identity?".format(runtime.path, previous.short_path, source.short_path))
+    return mappings
+
+def require_emitted(consumer, info, requirement, runtime_path = None, runtime_files = None):
+    require_emitted_inputs(consumer, info, requirement)
+    require_runtime_scopes(consumer, info, requirement, runtime_path = runtime_path, runtime_files = runtime_files)
+
+def require_emitted_inputs(consumer, info, requirement):
+    if info.transitive_runtime_sources:
+        owners = info.runtime_source_owners.to_list()
+        fail("{}: {} requires emitted JavaScript or declarations from {}. Set emit = True on those targets, or use a source-native consumer.".format(consumer, requirement, ", ".join(owners)))
+
+def require_runtime_scopes(consumer, info, requirement, runtime_path = None, runtime_files = None, module_paths = None, owners = None, staged_scopes = {}):
+    def placed_path(file):
+        return runtime_path(file) if runtime_path != None else file.path
+
+    available = runtime_files if runtime_files != None else {placed_path(file): file for file in info.transitive_data.to_list()}
+    owners = info.owners.to_list() if owners == None else owners
+    selected = module_paths
+    if selected == None:
+        javascript = {file: True for file in info.transitive_js.to_list()}
+        live_modules = javascript | {file: True for file in info.transitive_data.to_list()}
+        modules = {(source, runtime): True for _owner, pairs in runtime_mappings(owners, live_modules) for source, runtime in pairs if runtime in javascript or is_javascript(runtime)}
+        selected = [(source, runtime, placed_path(runtime)) for source, runtime in modules]
+    scopes = {}
+    provenance = {}
+    for owner in owners:
+        for source, runtime in getattr(owner, "runtime_files", ()):
+            if source.basename == "package.json":
+                scopes[source] = True
+                provenance.setdefault(runtime, {})[source] = True
+        for source, runtime in getattr(owner, "runtime_scopes", ()):
+            scopes[source] = True
+            provenance.setdefault(runtime, {})[source] = True
+    for source, runtime, path in selected:
+        runtime_dir = path.split("/")[:-1]
+        destinations = runtime_scope_destinations(scopes, source, path)
+        nearest = None
+        for depth in range(len(runtime_dir), -1, -1):
+            parent = "/".join(runtime_dir[:depth])
+            if depth and available.get(parent) != None:
+                fail(("{}: {} cannot establish package scope for '{}' beneath opaque runtime directory '{}'. " +
+                      "Did you mean to keep the directory outside this module's runtime path, or publish its module and scope as individual Files?").format(
+                    consumer,
+                    requirement,
+                    runtime.short_path,
+                    parent,
+                ))
+            candidate = "/".join(runtime_dir[:depth] + ["package.json"])
+            if nearest == None and candidate in available:
+                nearest = candidate
+        if nearest != None and staged_scopes.get(nearest) in destinations:
+            continue
+        if not destinations and nearest != None:
+            fail(("{}: {} module '{}' has no source package scope but acquires runtime manifest '{}'. " +
+                  "Did you mean to remove that runtime manifest or declare the module's source scope explicitly?").format(
+                consumer,
+                requirement,
+                source.short_path,
+                nearest,
+            ))
+        for scope, destination in destinations.items():
+            placed = available.get(destination)
+            if placed == scope or (placed != None and provenance.get(placed, {}).keys() == [scope]):
+                if nearest != destination:
+                    fail(("{}: {} package scope '{}' at '{}' is shadowed by runtime manifest '{}' for '{}'. " +
+                          "Did you mean to remove the closer runtime manifest or declare that module's source scope explicitly?").format(
+                        consumer,
+                        requirement,
+                        scope.short_path,
+                        destination,
+                        nearest,
+                        runtime.short_path,
+                    ))
+                continue
+            fail(("{}: {} requires runtime package scope '{}' from {} at '{}' for '{}'. " +
+                  "Did you mean to generate the scope's package too, or depend on a ts_compile " +
+                  "there with that package.json in srcs? Compilation alone may retain the " +
+                  "original metadata, but a runnable consumer needs the translated scope.").format(
+                consumer,
+                requirement,
+                scope.short_path,
+                scope.owner,
+                destination if destination != None else "outside the execution root",
+                runtime.short_path,
+            ))

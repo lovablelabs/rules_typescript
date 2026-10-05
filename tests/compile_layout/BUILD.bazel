@@ -55,10 +55,10 @@ ts_compile(
         "gamma/data.json",
         "gamma/index.ts",
         "gamma/logo.svg",
-        "gamma/package.json",
         "gamma/styles.css",
     ],
     emit = True,  # keep
+    package_scopes = ["gamma/package.json"],
 )
 
 ts_compile(

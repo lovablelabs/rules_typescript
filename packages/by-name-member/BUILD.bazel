@@ -26,12 +26,10 @@ node_modules_member(
 # keep
 ts_compile(
     name = "by-name-member",
-    srcs = [
-        "package.json",
-        "src/index.ts",
-    ],
+    srcs = ["src/index.ts"],
     emit = True,  # keep
     node_modules = ":node_modules",
+    package_scopes = ["package.json"],
     tsconfig = "tsconfig.ts_extensions.json",
     visibility = ["//visibility:public"],
     deps = [":node_modules/subpath-member"],

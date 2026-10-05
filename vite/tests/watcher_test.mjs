@@ -100,13 +100,24 @@ function fakeDevServer(watcher) {
       this.restarts++;
       return Promise.resolve();
     },
-    config: { root: tmpRoot, logger },
+    config: { root: tmpRoot, cacheDir: path.join(tmpRoot, '.vite'), logger },
+    environments: {
+      client: {
+        config: { root: tmpRoot, resolve: { extensions: [] } },
+        async transformRequest() { return null; },
+      },
+    },
     moduleGraph: {
       getModulesByFile: (file) => file.startsWith(tmpRoot + path.sep)
         ? new Set([{ file, url: "/@fs" + file }])
         : undefined,
       invalidateModule: (mod) => invalidated.push(mod.file),
       invalidateAll: () => invalidated.push('*'),
+    },
+    reloadModule(mod) {
+      invalidated.push(mod.file);
+      sent.push({ type: 'update', updates: [{ path: mod.url }] });
+      return Promise.resolve();
     },
     ws: { send: (payload) => sent.push(payload) },
   };
@@ -132,17 +143,13 @@ const skip = (why) => {
   throw new Skipped(why);
 };
 
-// fs.watch reaches the filesystem through FSEvents on macOS, and a sandboxed CI
-// runner can leave a recursive watch that never fires at all -- which makes the
-// two fallback tests below time out and the third, asserting that nothing
-// arrives after stop(), vacuously green. Probing once tells the three of them
-// apart from a real regression.
+// Some sandboxed filesystems accept fs.watch without delivering events.
 let fsWatchDelivers = null;
 async function fsWatchDeliversEvents() {
   if (fsWatchDelivers !== null) return fsWatchDelivers;
   const bin = newBazelBin();
   let fired = false;
-  const probe = fs.watch(bin, { recursive: true, persistent: true }, () => {
+  const probe = fs.watch(bin, { persistent: true }, () => {
     fired = true;
   });
   try {
@@ -156,7 +163,7 @@ async function fsWatchDeliversEvents() {
   return fired;
 }
 
-const NO_FS_EVENTS = 'recursive fs.watch delivered no events in this environment';
+const NO_FS_EVENTS = 'fs.watch delivered no events in this environment';
 
 const ARM_SENTINEL = '__arm__.js';
 const ARM_DEADLINE_MS = 30000;
@@ -191,23 +198,136 @@ async function startArmed(start, bin, batches, debounceMs) {
 
 // ── The fs.watch fallback: real files, real events ───────────────────────────
 
-test('fs.watch fallback reports a newly written .js file', async () => {
+for (const recursiveWatch of [false, true]) test(`native watches follow replaced child directories and release retired handles (${recursiveWatch ? 'recursive' : 'per-directory'})`, async () => {
   if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
-  const bin = newBazelBin();
+  const realBin = newBazelBin();
+  const bin = realBin + '-link';
+  fs.symlinkSync(realBin, bin, 'dir');
   const batches = [];
   const watcher = new BazelWatcher({
     bazelBin: bin,
     debounceMs: 20,
+    recursiveWatch,
+    declaredFiles: { app: { path: path.join(realBin, 'app.js'), context: 'source' } },
     onRebuild: (changed) => batches.push([...changed]),
   });
 
-  await startArmed(() => watcher.start(), bin, batches, 20);
+  const nativeWatch = fs.watch;
+  const handles = new Map();
+  fs.watch = (file, ...args) => {
+    if (args[0]?.recursive === undefined) return nativeWatch(file, ...args);
+    assert(![...handles.values()].includes(file), `duplicate native handle for ${file}`);
+    const handle = nativeWatch(file, ...args);
+    handles.set(handle, file);
+    const close = handle.close.bind(handle);
+    handle.close = () => {
+      handles.delete(handle);
+      close();
+    };
+    return handle;
+  };
   try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    const identities = [...handles.values()].map((file) => {
+      const stat = fs.statSync(file);
+      return `${stat.dev}:${stat.ino}`;
+    });
+    assert.equal(new Set(identities).size, identities.length, 'canonical root gained a duplicate handle');
     fs.writeFileSync(path.join(bin, 'app.js'), 'export const a = 1;\n');
     await waitUntil('the first rebuild batch', () => batches.length > 0);
     assert.deepEqual(batches[0], [path.join(bin, 'app.js')]);
+
+    const staged = path.join(tmpRoot, path.basename(bin) + '-staged');
+    const compiled = path.join(bin, 'compiled');
+    const nested = path.join(compiled, 'nested');
+    const entry = path.join(nested, 'entry.js');
+    fs.mkdirSync(path.join(staged, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(staged, 'nested', 'entry.js'), 'export const value = 1;');
+    fs.symlinkSync('entry.js', path.join(staged, 'nested', 'alias.js'));
+    batches.length = 0;
+    fs.renameSync(staged, compiled);
+    await waitUntil('the populated directory import', () =>
+      batches.some((batch) => batch.includes(entry)),
+    );
+    const retired = [...handles].filter(([, file]) =>
+      file === compiled || file.startsWith(compiled + path.sep),
+    );
+    // On darwin a directory handle restarts the shared FSEvents stream, which dropped the next write.
+    const directoryHandles = recursiveWatch ? 0 : 1;
+    assert.equal(retired.length, 1 + 2 * directoryHandles);
+    // Node's Linux recursive emulation keys its watches by path, so it never reports an in-place replacement.
+    if (recursiveWatch && process.platform === 'linux') return;
+
+    fs.renameSync(compiled, staged);
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(entry, 'export const value = 2;');
+    batches.length = 0;
+    await waitUntil('the replaced directory coordinate', () =>
+      batches.some((batch) => batch.includes(compiled)),
+    );
+    for (const [handle] of retired) {
+      assert(!handles.has(handle), 'the old directory handle was retained');
+    }
+    assert.equal([...handles.values()].filter((file) => file === nested).length, directoryHandles);
+
+    batches.length = 0;
+    fs.writeFileSync(entry, 'export const value = 3;');
+    await waitUntil('the replacement directory leaf update', () =>
+      batches.some((batch) => batch.includes(entry)),
+    );
+    batches.length = 0;
+    fs.rmSync(compiled, { recursive: true });
+    await waitUntil('the removed directory coordinate', () =>
+      batches.some((batch) => batch.includes(compiled)),
+    );
+    assert(![...handles.values()].some((file) =>
+      file === compiled || file.startsWith(compiled + path.sep),
+    ));
+  } finally {
+    fs.unlinkSync(bin);
+    await watcher.stop();
+    fs.watch = nativeWatch;
+  }
+  assert.equal(handles.size, 0, 'stop left native handles open');
+});
+
+for (const recursiveWatch of [false, true]) test(`a write right after a directory rename inside bazel-bin is not dropped (${recursiveWatch ? 'recursive' : 'per-directory'})`, async () => {
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  if (!recursiveWatch && process.platform === 'darwin') skip('per-directory watches can drop this write on darwin');
+  const realBin = newBazelBin();
+  const bin = realBin + '-link';
+  fs.symlinkSync(realBin, bin, 'dir');
+  const pending = path.join(realBin, 'cache', 'pending');
+  fs.mkdirSync(pending, { recursive: true });
+  fs.writeFileSync(path.join(pending, 'dependency.js'), 'export const dependency = 1;');
+  fs.mkdirSync(path.join(realBin, 'app'));
+  const page = path.join(bin, 'app', 'page.js');
+  fs.writeFileSync(page, 'export const page = 1;');
+  const batches = [];
+  const watcher = new BazelWatcher({
+    bazelBin: bin,
+    debounceMs: 20,
+    recursiveWatch,
+    onRebuild: (changed) => batches.push([...changed]),
+  });
+  const nativeWatch = fs.watch;
+  const opened = [];
+  fs.watch = (file, ...args) => {
+    if (args[0]?.recursive !== undefined) opened.push(file);
+    return nativeWatch(file, ...args);
+  };
+  try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    opened.length = 0;
+    fs.renameSync(pending, path.join(realBin, 'cache', 'ready'));
+    fs.writeFileSync(page, 'export const page = 2;');
+    await waitUntil('the page.js update after the rename', () => batches.some((batch) => batch.includes(page)));
+    if (recursiveWatch) {
+      assert.deepEqual(opened, [], 'the rename opened a directory handle, restarting the FSEvents stream');
+    }
   } finally {
     await watcher.stop();
+    fs.watch = nativeWatch;
   }
 });
 
@@ -311,12 +431,39 @@ test("an injected source is added to, filtered, and left open by stop()", async 
 
 // ── The failure is never silent ──────────────────────────────────────────────
 
-test('start() rejects with an actionable message when bazel-bin is missing', async () => {
+test('start() rejects missing trees and closes partial native watches', async () => {
   const watcher = new BazelWatcher({
     bazelBin: path.join(tmpRoot, 'no-such-bazel-bin'),
     onRebuild: () => {},
   });
   await assert.rejects(() => watcher.start(), /bazel-bin does not exist/);
+
+  const bin = newBazelBin();
+  fs.mkdirSync(path.join(bin, 'child'));
+  const nativeWatch = fs.watch;
+  const opened = [];
+  fs.watch = (file, ...args) => {
+    if (file !== bin) throw new Error('child watch cannot start');
+    const handle = nativeWatch(file, ...args);
+    const record = { handle, closed: false };
+    opened.push(record);
+    const close = handle.close.bind(handle);
+    handle.close = () => {
+      record.closed = true;
+      close();
+    };
+    return handle;
+  };
+  try {
+    const partial = new BazelWatcher({ bazelBin: bin, recursiveWatch: false, onRebuild() {} });
+    await assert.rejects(() => partial.start(), /child watch cannot start/);
+    assert.equal(opened.length, 1);
+    assert(opened[0].closed, 'failed startup left the root watch open');
+    await partial.stop();
+  } finally {
+    fs.watch = nativeWatch;
+    for (const { handle } of opened) handle.close();
+  }
 });
 
 // ── The plugin end to end ────────────────────────────────────────────────────
@@ -346,32 +493,193 @@ test('nested manual configs resolve tool paths from the selected workspace', () 
   }
 });
 
-test('configureServer owns its watcher and sends HMR updates', async () => {
-  const bin = newBazelBin();
+test('Vite cache and declared output replacements preserve HMR across producer configurations', async () => {
+  const realBin = newBazelBin();
+  const bin = realBin + '-link';
+  fs.symlinkSync(realBin, bin, 'dir');
   const source = fakeViteWatcher();
   const server = fakeDevServer(source);
-  const plugin = bazelPlugin({ bazelBin: bin, hmrDebounceMs: 20 });
+  server.config.cacheDir = path.join(realBin, 'optimizer-output');
+  const outputDir = path.join(bin, 'optimizer-output-sources');
+  const cacheTemp = path.join(server.config.cacheDir, 'pending');
+  fs.mkdirSync(cacheTemp, { recursive: true });
+  fs.writeFileSync(path.join(cacheTemp, 'dependency.js'), 'export const dependency = 1;');
+  const producerTarget = fs.mkdtempSync(path.join(tmpRoot, 'producer-config-'));
+  const producer = producerTarget + '-link';
+  fs.symlinkSync(producerTarget, producer, 'dir');
+  const inputs = [
+    ['page.ts', 'source', 'export const page = 1;'],
+    ['payload.json', 'source', '{"value":1}'],
+    ['styles.css', 'asset', 'body { color: blue; }'],
+    ['cross-config.json', 'source', '{"value":1}', producer],
+  ];
+  fs.mkdirSync(outputDir);
+  const declaredFiles = {};
+  for (const [name, context, content, directory = outputDir] of inputs) {
+    const file = path.join(directory, name);
+    fs.writeFileSync(file, content);
+    declaredFiles[`app/${name}`] = { path: file, context };
+  }
+  const generatedTree = path.join(producer, 'generated-tree');
+  const treeTargets = ['initial', 'replacement'].map((name) => {
+    const directory = fs.mkdtempSync(path.join(tmpRoot, `generated-tree-${name}-`));
+    fs.mkdirSync(path.join(directory, 'messages'));
+    fs.writeFileSync(path.join(directory, 'messages/greeting.js'), 'export const greeting = 1;');
+    return directory;
+  });
+  fs.symlinkSync(treeTargets[0], generatedTree, 'dir');
+  const nested = path.join(generatedTree, 'messages/greeting.js');
+  const loaded = new Set([
+    path.join(bin, ARM_SENTINEL),
+    ...Object.values(declaredFiles).map((file) => file.path),
+    nested,
+  ]);
+  declaredFiles['app/generated-tree'] = { path: generatedTree, context: 'source', directory: true };
+  server.moduleGraph.getModulesByFile = (file) => loaded.has(file)
+    ? new Set([{ file, url: '/@fs' + file }])
+    : undefined;
+  const plugin = bazelPlugin({ bazelBin: bin, hmrDebounceMs: 20, mode: 'serve', declaredFiles });
 
   plugin.configResolved(server.config);
-  const post = await startArmed(() => installPlugin(plugin, server), bin, server.sent, 20);
+  try {
+    const post = await startArmed(() => installPlugin(plugin, server), bin, server.sent, 20);
+    assert.equal(post, undefined, 'configureServer must return nothing: Vite calls what it returns');
+    assert.deepEqual(source.added, [], 'the plugin does not depend on the server watcher');
 
-  assert.equal(post, undefined, 'configureServer must return nothing: Vite calls what it returns');
-  assert.deepEqual(source.added, [], 'the plugin does not depend on the server watcher');
-
-  const changed = path.join(bin, 'app', 'page.js');
-  fs.mkdirSync(path.dirname(changed), { recursive: true });
-  fs.writeFileSync(changed, 'export const page = 1;');
-  await waitUntil('an HMR update on the wire', () => server.sent.length > 0);
-
-  assert.equal(server.sent[0].type, 'update');
-  assert.deepEqual(
-    server.sent[0].updates.map((u) => u.path),
-    ["/@fs" + changed],
-  );
-  assert.deepEqual(server.warnings, []);
-
-  plugin.closeBundle();
+    fs.renameSync(cacheTemp, path.join(server.config.cacheDir, 'ready'));
+    for (const [name, _context, content, directory = outputDir] of inputs) {
+      const changed = path.join(directory, name);
+      fs.writeFileSync(changed, content + '\n');
+      await waitUntil('an HMR update for ' + name, () =>
+        server.sent.some((event) =>
+          event.type === 'update' && event.updates.some((update) => update.path === '/@fs' + changed),
+        ),
+      );
+      assert(server.invalidated.includes(changed));
+      assert(!server.sent.some((event) => event.type === 'full-reload'));
+    }
+    const css = path.join(outputDir, 'styles.css');
+    const replacement = path.join(tmpRoot, path.basename(bin) + '-replacement.css');
+    for (const revision of ['first', 'second']) {
+      server.sent.length = 0;
+      server.invalidated.length = 0;
+      if (revision === 'second') fs.rmSync(server.config.cacheDir, { recursive: true });
+      fs.writeFileSync(replacement, `body { --revision: ${revision}; }\n`);
+      fs.renameSync(replacement, css);
+      await waitUntil('an HMR update for the ' + revision + ' atomic CSS replacement', () =>
+        server.sent.some((event) =>
+          event.type === 'update' && event.updates.some((update) => update.path === '/@fs' + css),
+        ),
+      );
+      assert(server.invalidated.includes(css));
+      assert(!server.sent.some((event) => event.type === 'full-reload'));
+    }
+    const scalar = path.join(producer, 'cross-config.json');
+    for (const revision of [2, 3]) {
+      server.sent.length = 0;
+      server.invalidated.length = 0;
+      fs.writeFileSync(scalar + '.next', JSON.stringify({ value: revision }));
+      fs.renameSync(scalar + '.next', scalar);
+      await waitUntil('an HMR update for atomic cross-config scalar replacement ' + revision, () =>
+        server.sent.some((event) =>
+          event.type === 'update' && event.updates.some((update) => update.path === '/@fs' + scalar),
+        ),
+      );
+      assert(server.invalidated.includes(scalar));
+      assert(!server.sent.some((event) => event.type === 'full-reload'));
+    }
+    for (const [index, target] of treeTargets.entries()) {
+      if (index > 0) {
+        server.sent.length = 0;
+        fs.symlinkSync(target, generatedTree + '.next', 'dir');
+        fs.renameSync(generatedTree + '.next', generatedTree);
+        await waitUntil('the cross-config declared tree replacement reload', () =>
+          server.sent.some((event) => event.type === 'full-reload'),
+        );
+      }
+      server.sent.length = 0;
+      server.invalidated.length = 0;
+      fs.writeFileSync(path.join(target, 'messages/greeting.js'), `export const greeting = ${index + 2};`);
+      await waitUntil('an HMR update for cross-config nested tree member revision ' + index, () =>
+        server.sent.some((event) =>
+          event.type === 'update' && event.updates.some((update) => update.path === '/@fs' + nested),
+        ),
+      );
+      assert(server.invalidated.includes(nested));
+      assert(!server.sent.some((event) => event.type === 'full-reload'));
+    }
+    server.sent.length = 0;
+    server.invalidated.length = 0;
+    fs.renameSync(outputDir, path.join(tmpRoot, path.basename(bin) + '-removed'));
+    await waitUntil('the removed module directory reload', () =>
+      server.sent.some((event) => event.type === 'full-reload'),
+    );
+    assert(server.invalidated.includes('*'));
+    assert.deepEqual(server.warnings, []);
+  } finally {
+    plugin.closeBundle();
+  }
   assert.equal(source.listenerCount('change'), 0);
+});
+
+test('unloaded authored source edits stay out of the Bazel reload path', async () => {
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const bin = newBazelBin();
+  const workspaceRoot = fs.mkdtempSync(path.join(tmpRoot, 'authored-watch-'));
+  const authoredDirectory = path.join(workspaceRoot, 'authored');
+  const sharedDirectory = path.join(workspaceRoot, 'shared');
+  fs.mkdirSync(authoredDirectory);
+  fs.mkdirSync(sharedDirectory);
+  const authored = [
+    path.join(authoredDirectory, 'unloaded.ts'),
+    path.join(sharedDirectory, 'unloaded.ts'),
+  ];
+  const generated = path.join(sharedDirectory, 'generated.json');
+  for (const file of authored) fs.writeFileSync(file, 'export const value = 1;');
+  fs.writeFileSync(generated, '{"value":1}');
+  const declaredFiles = Object.fromEntries(authored.map((file) => [
+    path.relative(workspaceRoot, file), { path: file, context: 'source', isSource: true },
+  ]));
+  declaredFiles['app/generated.json'] = { path: generated, context: 'source', isSource: false };
+  const server = fakeDevServer(fakeViteWatcher());
+  const loaded = new Set([path.join(bin, ARM_SENTINEL), generated]);
+  server.moduleGraph.getModulesByFile = (file) => loaded.has(file)
+    ? new Set([{ file, url: '/@fs' + file }])
+    : undefined;
+  const plugin = bazelPlugin({
+    bazelBin: bin, workspaceRoot, mode: 'serve', declaredFiles, hmrDebounceMs: 20,
+  });
+  const nativeWatch = fs.watch;
+  const subscribed = new Set();
+  const observed = new Set();
+  fs.watch = (file, options, listener) => {
+    subscribed.add(file);
+    return nativeWatch(file, options, (event, filename) => {
+      if (filename !== null) observed.add(path.resolve(file, filename.toString()));
+      listener(event, filename);
+    });
+  };
+  plugin.configResolved(server.config);
+  try {
+    await startArmed(() => installPlugin(plugin, server), bin, server.sent, 20);
+    server.invalidated.length = 0;
+    for (const file of authored) fs.writeFileSync(file, 'export const value = 2;');
+    await waitUntil('the authored edit beside a generated output', () => observed.has(authored[1]));
+    fs.writeFileSync(generated, '{"value":2}');
+    await waitUntil('the generated update or an unwanted authored reload', () =>
+      server.sent.some((event) => event.type === 'full-reload' ||
+        (event.type === 'update' && event.updates.some((update) => update.path === '/@fs' + generated))),
+    );
+    assert(!server.sent.some((event) => event.type === 'full-reload'),
+      'an unloaded authored source edit reached the Bazel reload path');
+    assert(!server.invalidated.includes('*'), 'an authored edit invalidated the complete module graph');
+    assert(server.invalidated.includes(generated), 'the generated output lost its HMR notification');
+    assert(!subscribed.has(authoredDirectory), 'Bazel subscribed to an authored-only directory');
+    assert.deepEqual(server.watcher.added, []);
+  } finally {
+    plugin.closeBundle();
+    fs.watch = nativeWatch;
+  }
 });
 
 test('a watcher that cannot start warns, and throws when hmr is required', async () => {
@@ -474,7 +782,8 @@ test('a config input a restart cannot fix says so', async () => {
   });
 
   plugin.configResolved(server.config);
-  await installPlugin(plugin, server);
+  // macOS FSEvents drops writes made before its stream is live.
+  await startArmed(() => installPlugin(plugin, server), bin, server.sent, 20);
 
   fs.writeFileSync(npmTree, '{"version":"7.0.0"}\n');
   await waitUntil('the restart', () => server.restarts > 0);
@@ -495,6 +804,129 @@ test('hmr: false starts no watcher at all', async () => {
   assert.equal(post, undefined);
   assert.deepEqual(source.added, []);
   assert.deepEqual(server.warnings, []);
+});
+
+test('native watches retain nested declared tree updates across symlink replacement', async () => {
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const realBin = newBazelBin();
+  const bin = realBin + '-link';
+  fs.symlinkSync(realBin, bin, 'dir');
+  const external = fs.mkdtempSync(path.join(tmpRoot, 'watch-target-'));
+  const target = path.join(external, 'value.js');
+  const nextTarget = path.join(external, 'next.js');
+  const targetDirectory = path.join(external, 'directory');
+  fs.writeFileSync(target, '1');
+  fs.writeFileSync(nextTarget, '2');
+  const replacementDirectory = path.join(external, 'replacement-directory');
+  const privateDirectory = path.join(external, 'private-directory');
+  fs.mkdirSync(path.join(privateDirectory, 'nested'), { recursive: true });
+  for (const directory of [targetDirectory, replacementDirectory]) {
+    fs.mkdirSync(path.join(directory, 'messages'), { recursive: true });
+    fs.writeFileSync(path.join(directory, 'messages/greeting.js'), 'export const greeting = 1;');
+    fs.symlinkSync(directory, path.join(directory, 'cycle'), 'dir');
+    fs.symlinkSync(privateDirectory, path.join(directory, 'private'), 'dir');
+  }
+  const linkedFile = path.join(bin, 'linked.js');
+  const linkedDirectory = path.join(bin, 'linked-directory');
+  const cycleA = path.join(bin, 'cycle-a.js');
+  const cycleB = path.join(bin, 'cycle-b.js');
+  const lateCycle = path.join(bin, 'late-cycle');
+  const healthy = path.join(bin, 'healthy.js');
+  fs.symlinkSync(target, linkedFile);
+  fs.symlinkSync(targetDirectory, linkedDirectory, 'dir');
+  fs.symlinkSync('cycle-b.js', cycleA);
+  fs.symlinkSync('cycle-a.js', cycleB);
+  assert.throws(() => fs.statSync(cycleA), { code: 'ELOOP' });
+  fs.symlinkSync(path.join(external, 'missing'), path.join(bin, 'dangling'));
+  fs.symlinkSync(path.join(target, 'child'), path.join(bin, 'not-directory'));
+  fs.writeFileSync(healthy, '1');
+  const batches = [];
+  const watcher = new BazelWatcher({
+    bazelBin: bin,
+    debounceMs: 20,
+    declaredFiles: { tree: { path: linkedDirectory, context: 'source', directory: true } },
+    isDeclaredFile: (file) => file === linkedDirectory || file.startsWith(linkedDirectory + path.sep),
+    onRebuild: (changed) => batches.push([...changed]),
+  });
+  const nativeReadDirectory = fs.readdirSync;
+  const scanned = [];
+  fs.readdirSync = (directory, ...args) => {
+    scanned.push(directory);
+    return nativeReadDirectory(directory, ...args);
+  };
+  try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    const nested = path.join(linkedDirectory, 'messages/greeting.js');
+    fs.writeFileSync(path.join(targetDirectory, 'messages/greeting.js'), 'export const greeting = 2;');
+    await waitUntil('the existing nested declared tree member edit', () =>
+      batches.some((batch) => batch.includes(nested)),
+    );
+    batches.length = 0;
+    fs.writeFileSync(target, '3');
+    await waitUntil('the unchanged link target update', () =>
+      batches.some((batch) => batch.includes(linkedFile)),
+    );
+    batches.length = 0;
+    fs.unlinkSync(linkedFile);
+    fs.symlinkSync('late-cycle', linkedFile);
+    fs.symlinkSync('linked.js', lateCycle);
+    assert.throws(() => fs.statSync(linkedFile), { code: 'ELOOP' });
+    await waitUntil('the link becoming cyclic', () =>
+      batches.some((batch) => batch.includes(linkedFile)),
+    );
+    batches.length = 0;
+    fs.writeFileSync(healthy, '2');
+    await waitUntil('a valid file update beside the cyclic link', () =>
+      batches.some((batch) => batch.includes(healthy)),
+    );
+    batches.length = 0;
+    fs.unlinkSync(linkedFile);
+    fs.symlinkSync(nextTarget, linkedFile);
+    await waitUntil('the replaced link update', () =>
+      batches.some((batch) => batch.includes(linkedFile)),
+    );
+    batches.length = 0;
+    fs.unlinkSync(cycleA);
+    fs.symlinkSync(target, cycleA);
+    await waitUntil('the startup cycle replacement', () =>
+      batches.some((batch) => batch.includes(cycleA)),
+    );
+    batches.length = 0;
+    fs.writeFileSync(target, '5');
+    await waitUntil('the startup cycle replacement target update', () =>
+      batches.some((batch) => batch.includes(cycleA)),
+    );
+    batches.length = 0;
+    fs.writeFileSync(nextTarget, '4');
+    await waitUntil('the replacement link target update', () =>
+      batches.some((batch) => batch.includes(linkedFile)),
+    );
+    batches.length = 0;
+    fs.writeFileSync(path.join(targetDirectory, 'new.json'), '{}');
+    await waitUntil('the declared linked directory member update', () =>
+      batches.some((batch) => batch.includes(path.join(linkedDirectory, 'new.json'))),
+    );
+    batches.length = 0;
+    const replacementLink = linkedDirectory + '.next';
+    fs.symlinkSync(replacementDirectory, replacementLink, 'dir');
+    fs.renameSync(replacementLink, linkedDirectory);
+    await waitUntil('the declared tree symlink replacement', () =>
+      batches.some((batch) => batch.includes(linkedDirectory)),
+    );
+    batches.length = 0;
+    fs.writeFileSync(path.join(replacementDirectory, 'messages/greeting.js'), 'export const greeting = 3;');
+    await waitUntil('the replacement nested declared tree member edit', () =>
+      batches.some((batch) => batch.includes(nested)),
+    );
+    for (const name of ['cycle', 'private']) {
+      const excluded = path.join(linkedDirectory, name);
+      assert(!scanned.some((directory) => directory === excluded || directory.startsWith(excluded + path.sep)),
+        `watch traversal escaped through ${name}`);
+    }
+  } finally {
+    await watcher.stop();
+    fs.readdirSync = nativeReadDirectory;
+  }
 });
 
 let failed = 0;

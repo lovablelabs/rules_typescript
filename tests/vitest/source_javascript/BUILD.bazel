@@ -1,0 +1,22 @@
+"""A test types a source-mode dependency's JavaScript from the source itself."""
+
+load("//ts:defs.bzl", "ts_compile", "ts_test")
+
+ts_compile(
+    name = "bridge",
+    srcs = [
+        "bridge.js",
+        "value.ts",
+    ],
+)
+
+# Failed TsgoCheck in gazelle_roundtrip_roots_test: TS7016 for the dependency's bridge.js.
+ts_test(
+    name = "bridge_test",
+    srcs = ["bridge.test.ts"],
+    node_modules = "//tests/npm:node_modules",
+    deps = [
+        ":bridge",
+        "@npm//:vitest",
+    ],
+)

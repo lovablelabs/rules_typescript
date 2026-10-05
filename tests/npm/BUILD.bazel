@@ -4,6 +4,7 @@ load("@npm//:defs.bzl", "npm_virtual_store")
 load("//npm:defs.bzl", "node_modules", "node_modules_member")
 load("//tests/strict_deps:strict_deps_tests.bzl", "tsgo_check_test")
 load("//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile", "ts_test")
+load(":direct_version_tests.bzl", "npm_identity_runtime_test")
 load(":forest_tests.bzl", "chain_test")
 load(":hub_provenance_tests.bzl", "store_provenance_test")
 load(
@@ -164,8 +165,6 @@ parser_test_suite(name = "parser_tests")
 
 workspace_link_test_suite(name = "workspace_link_tests")
 
-# A package.json src is staged as written; the manifest as built beside it names
-# the emitted files, the .jsx under the tsconfig that declares jsx: preserve.
 go_test(
     name = "member_manifest_test",
     size = "small",
@@ -370,6 +369,17 @@ ts_test(
     ],
 )
 
+npm_identity_runtime_test(
+    name = "workspace_identity_runtime_test",
+    expected = "Hello, World!",
+    node_modules = ":node_modules",
+    src_visibility = ["//tests/npm:__subpackages__"],
+    deps = [
+        ":node_modules/shared",
+        "@npm//:types_node",
+    ],
+)
+
 # A generator resolves the member as a file in the importer's package would:
 # the link target in deps stages node_modules/shared and the member's tree.
 ts_binary(
@@ -497,9 +507,7 @@ build_test(
 tsgo_check_test(
     name = "alias_consumer_manifest_test",
     size = "small",
-    lines = [
-        "npm-direct\tstyles-alias\tansi-styles@6.2.3_ansi-regex_6_2_2_602a0566",
-    ],
+    npm_direct = ["@npm_features//:styles-alias"],
     target_under_test = ":alias_consumer",
 )
 
@@ -561,6 +569,16 @@ go_test(
         "@npm_features//:nanoid",
         "@npm_features//:types_ms",
     ],
+    deps = ["//tests/verify"],
+)
+
+# A `file:` tarball committed beside the lockfile has no registry to come from,
+# so the package exists only if the lockfile's path is read from the workspace.
+go_test(
+    name = "npm_file_tarball_test",
+    size = "small",
+    srcs = ["npm_file_tarball_test.go"],
+    data = ["@npm_features//:vendored_local-pkg"],
     deps = ["//tests/verify"],
 )
 

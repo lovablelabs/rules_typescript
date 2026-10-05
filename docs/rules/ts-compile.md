@@ -23,11 +23,15 @@ flags in `.bazelrc`. Every compiler option is the tsconfig's.
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `srcs` | `label_list` | required | The package's files: TypeScript is checked (and compiled with `emit = True`), JavaScript and declarations join the program, every other file is staged as data. See [Sources](#sources) |
+| `srcs` | `label_list` | `[]` | The package's files: TypeScript is checked (and compiled with `emit = True`), JavaScript and declarations join the program, every other file is staged as data. May be omitted for a metadata-only publisher. See [Sources](#sources) |
+| `type_inputs` | `label_list` | `[]` | Additional compiler inputs at their original paths, such as package scopes for borrowed declarations. These are not source roots, runtime files or outputs. |
+| `package_scopes` | `label_list` | `[]` | Package.json metadata kept at its original compiler identity and placed relative to runtime modules within this compiler output namespace. A local package-root scope also supplies the npm publication manifest. These are not source roots or JSON module endpoints. |
+| `data` | `label_list` | `[]` | Standalone asset files staged at package-relative paths in both emit modes. See [Package assets](#package-assets) |
 | `emit` | `bool` | `False` | Publish TypeScript sources with validation. Set `True` only when a consumer needs emitted JavaScript or declarations. |
 | `deps` | `label_list` | `[]` | `ts_compile`, `ts_codegen` or `ts_npm_package` targets, and a workspace member's link target `//<importer>:node_modules/<name>` |
 | `tsconfig` | `label` | `None` | The project's own `tsconfig.json`, or a [`ts_config`](#ts_config) target: where every compiler option comes from. See [Where compiler options come from](#where-compiler-options-come-from) |
 | `node_modules` | `label` | `None` | The `node_modules` target of the nearest lockfile importer at or above the package: the chain a direct npm dep resolves along. Required when the closure holds an npm package; Gazelle writes it. See [The node_modules Chain](#the-node_modules-chain) |
+| `source_node_modules` | `label_list` | `[]` | Importer chains for retained sources, searched alongside `node_modules` for declared store Files. Nearest links and their types companions keep their original importer paths. |
 
 Emission settings otherwise use build flags, one value for the whole build:
 
@@ -45,7 +49,7 @@ through a Starlark transition; `tests/flags.bzl` is the ruleset's own.
 
 ### Source-only programs
 
-Source mode is the default for `ts_compile` and `ts_test`: TypeScript files and the original package manifest reach source-native consumers, while tsgo checks remain in `_validation`. Vitest and OJ transform sources themselves, so their dependency graph needs no application JavaScript or declaration emit.
+Source mode is the default for `ts_compile` and `ts_test`: TypeScript files reach source-native consumers, while tsgo checks remain in `_validation`. Vitest and OJ transform sources themselves, so an all-source closure needs no application JavaScript or declaration emit. Such a closure retains original paths. A source-mode consumer of a relocated dependency stages its unchanged TypeScript and data in the [shared source layout](#shared-source-layout); compiler and editor source identities remain original.
 
 Set `emit = True` on programs consumed as built JavaScript or declarations. JavaScript-only `ts_binary` and Node-test consumers reject a source-only closure at analysis, naming the consumer, source-owning targets and the attribute to set, including workspace members. Gazelle derives opt-ins from Node binaries/tests and JavaScript/declaration package entries, following the resolved dependency graph. It does not infer requirements from whether build outputs happen to exist in the checkout. For a custom output consumer Gazelle cannot inspect, preserve an explicit `emit = True` with `# keep`.
 
@@ -63,8 +67,7 @@ Installed npm packages and optional server plugins retain their own formats. Sou
   it, with its JSX left for the bundler ([below](#a-tsx-under-jsx-preserve)).
   A `.mts` or `.cts` is refused: the rule emits `.js` and `.d.ts` from `.ts`
   alone, and has no output shape for one.
-- **JavaScript**, `.js`, `.mjs` and `.cjs`: staged into the output tree
-  unchanged and in the type program. The rule sets `allowJs` for it, so its
+- **JavaScript**, `.js`, `.mjs` and `.cjs`: copied when staged into the output tree so their relative imports resolve beside emitted modules after Node resolves symlinks. Unrelocated source mode retains the original JavaScript and imported JSON Files; dependency publications keep their selected Files. Explicit JavaScript assets remain staged in both modes. Source-capable test runners place JavaScript beside the original TypeScript inputs at their repository paths. JavaScript also joins the type program. The rule sets `allowJs` for it, so its
   JSDoc types reach consumers; `checkJs` in the tsconfig has its own body
   checked. A `.jsx` is rejected at analysis time: JavaScript is staged
   unchanged, and tsc would transform the JSX in one under every `jsx` mode but
@@ -94,29 +97,65 @@ Installed npm packages and optional server plugins retain their own formats. Sou
   `resolveJsonModule`, which bundler resolution implies. JSON imported from a
   package without a TypeScript owner is a source-file label in `srcs`; it
   names the original package, which controls its visibility.
-  Gazelle derives these labels from the compiler listing. The compiler reads the
-  nearest `package.json` of every source for the module's format and for the
-  package's own name, so a package that imports itself by name
-  (`import "@scope/pkg/wire"` from inside `pkg`) resolves through the manifest
-  in `srcs`. The src is staged as written, and the `package.json` at the
-  package's root is also written as built -- every source-file target
-  rewritten to the emitted file, by `tsaction manifest` -- as
-  `<name>.package.json`, for the two readers that hold the emit: a dependent's
-  program root lays it at the package's path, so a `ts_test` inside the
-  package resolves the package's own name to the compile's files beside the
-  test's -- its sources under the package's tsconfig, its `.d.ts` under
-  another ([The Test's Program](ts-test.md#the-tests-program)) -- and the
-  member's store tree copies it as its `package.json`. A test's runfiles hold
-  the src as written ([Files at Run Time](ts-test.md#files-at-run-time)). See
-  [What a Workspace Member Is Imported
-  As](../guides/npm.md#what-a-workspace-member-is-imported-as).
+  A foreign JSON input follows its importing module's runtime layout. Source
+  mode retains original paths unless a relocated dependency requires the
+  [shared source layout](#shared-source-layout). Use `data` for a foreign
+  JSON file packaged as a standalone asset.
+  Gazelle derives imported JSON labels from the compiler listing. A
+  `package.json` read only for package format or self-reference resolution
+  belongs in `package_scopes`; a JSON import of that same file keeps it in
+  `srcs`, with its authored contents and module layout.
 
 Gazelle writes the first three classes from tsgo's listing of the package's
 `tsconfig.json` -- a file whose extension tsgo could have listed is a src only
 when the program lists it, the JavaScript twin of an owned declaration apart --
 and the fourth from the package's tree: every other regular file under it that
-no deeper package, `out_dir` or BUILD file claims
+no deeper package, `out_dir` or BUILD file claims, with package metadata
+declared through `package_scopes`
 ([the package model](../gazelle/overview.md#the-package-model)).
+
+### Compiler inputs and emitted layout
+
+`type_inputs` supplies files the compiler reads without making them roots or runtime assets. Gazelle uses it for the package scope of a borrowed declaration; the declaration stays in `srcs`. Dependency consumers retain these inputs, including a `ts_test` that checks a dependency from sources under the same tsconfig. A File also listed in `srcs` keeps its source and runtime role. An explicitly imported JSON module belongs in `srcs`, even if the compiler also reads it as metadata.
+
+`package_scopes` supplies package.json metadata needed by runtime sources. The compiler receives the original File; the runtime scope follows the module's published path. Unchanged source-mode placement retains the original scope File, including for generated modules whose physical files live in the build output tree. Local package targets that name declared modules follow their published filenames, so an emitted `value.ts` becomes `value.js`. Source-mode filenames retain their source extensions; native JavaScript, declaration conditions and the authored package format are preserved. Local scopes and coherent foreign trees can be staged within the compiler's output namespace. A dependency can supply the same scope, including through a scope-only forwarder. A local scope with no module placement is published at its package-relative output path so an emitted descendant can use it; it keeps its authored targets unless the publisher holds their module mappings. An explicit JSON import puts the File in `srcs`, which takes precedence and retains its authored contents and the runtime consumer's module layout checks. A scope needed only by borrowed declarations remains in `type_inputs`.
+
+The local package-root `package.json`, declared in either `package_scopes` or `srcs`, also supplies the existing npm publication manifest, `<name>.package.json`. With emission enabled, `tsaction manifest` rewrites source entry points to JavaScript and type entry points to declarations, and supplies `type: "module"` when absent. A dependent's compiler overlay and a workspace member's npm store use that publication manifest. Runtime scope projection preserves authored format and declaration conditions because it serves the files beside the runtime modules. Source mode uses the original manifest unless dependency relocation requires a projected manifest naming the staged sources. Borrowed and nested scopes do not become package-root publication manifests. See [What a Workspace Member Is Imported As](../guides/npm.md#what-a-workspace-member-is-imported-as).
+
+Each shared runtime scope has exactly one publisher, including across disjoint programs. A scope also listed in `data` uses that same projection. A dependency's recorded scope output is reused when its targets and package format agree with the declared runtime modules. Equal runfiles paths coalesce once; different destinations retain both entries. A different source at the required destination fails analysis. Older custom providers without scope provenance still pass through ordinary data, but cannot supply an occupied destination whose source identity is unproven.
+
+For disjoint emitted leaves `:a` and `:b` in one Bazel package, give each leaf the authored metadata through `type_inputs = ["package.json"]`. One `ts_compile` aggregate in that package declares `srcs = []`, `package_scopes = ["package.json"]` and `deps = [":a", ":b"]`. It projects the shared scope from both leaves' module mappings. A consumer depends on this aggregate and each leaf it directly imports, preserving strict deps; a binary uses the importing program as its entry point. The aggregate supplies the runtime scope through `deps` without making either leaf a second publisher.
+
+Projection covers declared module targets, including matching wildcards; unrelated targets stay authored. Explicit entries can mix emitted and source-native modules. A wildcard that would need different filenames for its declared matches, or an incompatible reused scope, fails with the conflicting targets. Reused scopes are checked before TypeScript emission; JavaScript-only and source-mode programs use their existing Bazel validation action, which does not order independent runtime actions.
+
+A scope above the compiler's output namespace stays at its original location. For `app/main.ts` under a root manifest, the emitted counterpart would be `bin/package.json`, outside `//app`'s outputs. The rule does not create `bin/app/package.json`: that closer manifest would change relative package-import targets. A binary's staged runfiles can retain the original root manifest at the correct ancestor location. Its targets still need to agree with the published runtime modules.
+
+An emitted program places its modules, imported JSON and runtime scopes under one logical source root in the target's output namespace. Generated files use their source-relative coordinates without the `bazel-out` prefix; external repositories retain distinct coordinates. The producer records exact source/runtime and source/declaration File pairs. A consumer whose dependencies have moved extends that layout and links their canonical outputs at the paths its relative imports require. Unbundled binaries and tests use the published runtime Files. Source-mode consumers also follow relocated dependencies while retaining TypeScript bytes; an all-source closure keeps original paths. See [Shared Source Layout](#shared-source-layout) for output paths and declaration emission.
+
+### Package assets
+
+`data` packages standalone files at the target's package-relative paths. For
+example, `data = ["//:metadata.json"]` on `//packages/shared:shared` stages
+`packages/shared/metadata.json`; a workspace package exposes it as
+`node_modules/shared/metadata.json`. Files from a foreign subdirectory retain
+that subdirectory below the target's package. Generated files already at the
+destination keep their existing producer. List individual files; a generated
+tree belongs in `deps`.
+
+Keep imported JSON modules in `srcs` and metadata-only package manifests in
+`package_scopes`. Moving a foreign standalone JSON asset from `srcs` to `data`
+is required to retain its
+package-local placement in source mode. Existing non-JSON assets in `srcs`
+remain supported. Gazelle preserves hand-written `data`; it does not infer
+asset intent from an import or a filename. Files also listed in `srcs` keep
+their source behavior; `data` stages no extra copy.
+
+Assets travel through `TsInfo.data` and `TsInfo.transitive_data`, so tests,
+binaries, dev servers and workspace packages receive the same files. This
+attribute packages files; [`ts_test.data`](ts-test.md#attributes) supplies
+extra test runfiles at their existing paths.
+
+When module or declaration placement already requires a common layout, declared asset coordinates extend that same namespace. A moved consumer reads ordinary assets from Files in that layout, which copy the original bytes so relative references keep their published context. Executable module aliases retain links to their canonical runtime Files. Assets alone do not move a program or establish module ownership. The optional [`asset_files` record](providers.md#tsinfo) preserves the original File, package-local coordinate and published File without guessing origins from output names.
 
 ### Source and Declaration Maps
 
@@ -298,6 +337,8 @@ to exec-root paths on the way
 emits from the parsed program with tsc's import elision and reports no type
 error; the type check stays the tsgo action's, in either mode.
 
+The default source-built tools share the ruleset revision. Custom action helpers and prebuilt archives must implement the matching action arguments. Optional provider fields let new consumers read older records; they do not make older tools accept new command arguments or launcher configuration.
+
 oxc lowers what the chain's `target` lacks and keeps a top-level `await`
 wherever tsc keeps one: `module` `es2022`, `esnext`, `system`, `preserve` or a
 `node*` kind, under a `target` of `es2017` or later (TS1378 otherwise). tsc
@@ -319,9 +360,9 @@ A CommonJS program's compiled code has `require`, `exports`, `__dirname` and
 dependency's export -- `import { app } from "electron"` -- where ES-module
 linking sees only what `cjs-module-lexer` finds. Under
 `--//ts:declarations=oxc` such a program's declarations are tsgo's
-isolated-declarations emit, under oxc's rule: every export annotated. One tsgo
-emit has one `rootDir`, so a CommonJS program's srcs hang off one root, as
-under the declaration emit ([below](#one-root-per-declaration-emit)).
+isolated-declarations emit, under oxc's rule: every export annotated. CommonJS
+and declaration emission use the same [source layout](#shared-source-layout),
+including programs with authored and generated inputs.
 `//tests/node_test/cjs` pins the format at run time.
 
 The format is the tsconfig's, not the manifest's alone: a package whose
@@ -385,7 +426,7 @@ the compiled sibling. tsgo's emit drops such a comment.
 Analysis rejects a `.jsx` src, a directory in `srcs` (a `ts_codegen` `out_dir`
 tree belongs in `deps`), a `.mts` or `.cts` src,
 `--//ts:declaration_map` under `--//ts:declarations=oxc`, and a target with
-sources and no tsgo toolchain. One more is the root check below. `tsaction`
+sources and no tsgo toolchain. `tsaction`
 fails the `TsConfig` action on a path-shaped `types` entry no input sits at
 ([a `types` entry that names a declaration file](#a-types-entry-that-names-a-declaration-file)),
 naming the entry, the tsconfig and the path it looked for, and on a `jsx` or
@@ -393,30 +434,19 @@ naming the entry, the tsconfig and the path it looked for, and on a `jsx` or
 ([above](#a-tsx-under-jsx-preserve); [The Module Format](#the-module-format)),
 naming the edit.
 
-### One Root per Declaration Emit
+### Shared Source Layout
 
-One tsgo declaration emit has one `rootDir`. A checked-in source hangs off the
-package directory, a generated one off the package's directory in `bazel-bin`,
-and a src from another package off that package's directory. A `ts_compile`
-whose srcs hang off more than one root fails at analysis under the tsgo
-declaration emit, and a CommonJS-shaped program's `TsEmit` fails it the same
-way when it runs ([The Module Format](#the-module-format)):
+An emitted target keeps paths relative to the common logical root of its package and source files. For `//app:app` with `app/index.ts` importing `../foreign/value.js` from `foreign/value.ts`, the outputs are `bazel-bin/app/app/index.js` and `bazel-bin/app/foreign/value.js`, with declarations beside them. Generated sources participate at the same logical paths as authored sources; their physical `bazel-out` prefix does not change that relationship. A package with only local sources and dependencies at their original logical locations keeps its existing package-relative outputs.
 
-```
-ts_compile: srcs on @@//src/app:app hang off 2 different roots, and one
-declaration emit has one rootDir:
-  bazel-out/k8-fastbuild/bin/src/app
-  src/app
-```
+A dependent that imports a relocated producer uses the same source coordinates for its own outputs and dependency links. Each link targets the dependency's canonical File; the consumer does not recompile it. Runtime JSON and package scopes follow the modules. Declarations retain exact source origins through `owner.declaration_files`, so a consumer's compiler overlay resolves the original import to the published declaration even when its output path moved.
 
-Put the generated sources in their own target and depend on it, or, for an
-ES-module program, build with `--//ts:declarations=oxc`, under which oxc runs
-once per root. A target holding only generated sources has one root and builds
-under either emitter. A descendant package's file is inside this package's
-directory and shares its root; a `.d.ts` from anywhere is passed through, not
-compiled, and is not judged. A `ts_test`'s program emits no declarations and
-is not judged either: its srcs hang off as many roots as they need, oxc
-running once per root ([The Test's Program](ts-test.md#the-tests-program)).
+A declaration overlay cannot replace an existing declaration with a different canonical target. Program-root staging rejects that overlap before running the compiler; repeated links to the same target coalesce. Two targets that independently emit a borrowed source can therefore be valid separately but unsupported in one consumer. Publish the shared module once and depend on that producer, or keep the emitted closures in separate consumer programs when their configurations must differ. This boundary also applies to source-mode consumers of emitted declarations.
+
+The same layout applies when a source-mode consumer reaches a relocated dependency. Its own TypeScript and data are staged without emission, and dependency links target canonical Files. Compiler and editor inputs keep their original identities; runtime entry selection and snapshot paths use the producer's exact source/runtime pairs. An all-source closure without relocated dependencies retains its original paths.
+
+A workspace member's npm store copies files into its package tree. It rejects selected canonical module and declaration links because copying them would lose the dependency's package scope and npm importer. Publish that dependency separately through npm or include its sources in the member. A member that owns its borrowed sources can publish its self-contained projected outputs; files still published outside the member directory remain unsupported.
+
+`TsgoDeclare` uses the shared emitter with `-declarations_only`. It checks the full tsgo program, emits into a scratch directory under one logical compiler `rootDir`, and projects each declaration to the output declared for its source. Authored and generated inputs can therefore share a checked declaration action. CommonJS emission uses the same placement step for JavaScript. A `ts_test` uses the shared layout but publishes no declarations ([The Test's Program](ts-test.md#the-tests-program)).
 
 ## Deps Have to Be Direct
 
@@ -484,13 +514,14 @@ file to own and is `TS2307`. A target with no program -- declarations alone in
 
 npm packages reach tsgo the way they reach node: through the `node_modules`
 directories above the importing file. `node_modules` names the nearest
-lockfile importer's target at or above the package, and a direct npm dep
-resolves along it and its `parent`s nearest first, pnpm's walk-up: the link
-whose store is the dep's resolution is the one the program reads
-([The Chain](node-modules.md#the-chain)). A name no importer on the chain
-links fails analysis naming the nearest importer's `package.json`; a name an
-importer links at another resolution fails naming the label to write,
-`@npm//web:marked`. The action stages the chain's links for the direct names,
+lockfile importer's target at or above the package. Each chain searches its
+`parent`s nearest first, pnpm's walk-up
+([The Chain](node-modules.md#the-chain)). A direct npm dependency's store File
+must match the nearest link on at least one chain: `node_modules` or a retained
+source's `source_node_modules`. An absent name or a store File that no context
+supplies fails analysis with the importer or dependency to correct.
+
+Different importer locations can supply different versions of the same name in one program. Different store Files at the same actual link path are an error. Registry packages and workspace member links use the same File identity check; matching package/version keys alone do not establish identity. At each importer, a concrete package link takes precedence over a workspace-member fallback. Multiple labels for the same store File are accepted when a declared chain supplies it. First-party dependencies retain their npm stores and importer contexts for declaration checking. Runtime package selection follows the runner's rules, including the [node:test consumer-chain limit](ts-test.md#the-nodetest-runner). The action stages each context's nearest links for the direct names,
 the `@types/<name>` twin an importer links beside one, the member links `deps`
 name, the store trees and edge links their closures hold, the lockfile's hoist
 links whose names the closure holds with the trees they enter
@@ -499,10 +530,12 @@ first-party dep's (`TsInfo.npm_files`): a dep's emitted `.d.ts` imports the
 packages the dep declared, and they resolve from the dep's own importer's
 links, an ancestor of its declarations under `bazel-out`.
 
-tsgo walks up from the importing file for a bare specifier, and nothing above a
-source in the exec root is an action output, so `tsaction tsgo` lays out a
-program root under the target's output directory -- every source input of the
-action linked at its exec path under real directories, the output tree
+Retained inputs in another importer use `source_node_modules` to keep that importer's lookup directory. Each context's nearest links and their own `@types` companions stay in place, including links that do not match a declared dependency, so another context's ancestor cannot replace a nearer binding. Only matching package bindings and their companions count as direct dependencies for the ownership check. Distinct companion Files retain their own importer paths. A matching binding on a retained source's chain is accepted even when the consumer's chain selects a different store File. The source owner's provider carries these importer directories downstream. An importer a dep or retained source brings from outside the chain resolves its own links first, then the chain's importers below the lockfile root in chain order, then the root.
+
+tsgo walks up from the importing file for a bare specifier, so `tsaction tsgo`
+lays out a program root under the target's output directory -- declared
+compiler inputs linked at logical source paths to their exact Files under
+real directories, the output tree
 `bazel-out` linked whole, each importer's `node_modules` at the importer's
 directory, the lockfile's root importer's at the root's `node_modules`, and
 the declarations, the data and the `package.json` as built of every
@@ -512,6 +545,8 @@ the package's path -- and runs tsgo from there. A dep's JavaScript is never
 laid: a program reads a dep through its declarations, and under `allowJs` a
 `.js` under the tsconfig's pattern would be a root beside its `.d.ts`, one
 the declaration emit writes a `.d.ts` for onto the dep's own.
+Generated roots use source-relative coordinates to resolve original package
+scopes and helpers; this compiler view does not change runtime publication.
 The root holds the srcs, the tsconfig chain, the deps' checked-in declarations
 and, on a `ts_test`, the sources of the deps under its tsconfig ([The Test's
 Program](ts-test.md#the-tests-program)), so the tsconfig's `include` names the
@@ -901,7 +936,7 @@ The fields, and the load path, are in
 
 Three actions per target, each a function in `ts/private/actions/` --
 `tsconfig.bzl`'s `TsConfig`, `emit.bzl`'s `TsEmit`, `tsgo.bzl`'s `TsgoCheck`
--- a fourth from `tsgo.bzl` under `--//ts:declarations=tsgo`, `TsgoDeclare`,
+-- a fourth from `emit.bzl` under `--//ts:declarations=tsgo`, `TsgoDeclare`,
 and a fifth, `lint.bzl`'s `TsLint`, when the root module's `ts.lint()` names a
 linter ([Lint](../guides/lint.md)); the rule in
 `ts/private/rules/ts_compile.bzl` declares the outputs, calls them in this
@@ -929,14 +964,21 @@ against the ownership manifest
 ([Deps Have to Be Direct](#deps-have-to-be-direct)) and writes a stamp for
 `_validation`. `rootDir` in that tsconfig is the exec root, which every input
 is under, since tsgo checks the program against it even when nothing is
-emitted (`TS6059`). Under `--//ts:declarations=tsgo` `TsgoDeclare` runs the
-same program with `--declaration --emitDeclarationOnly --noEmit false
---noEmitOnError --outDir --rootDir` on its command line, its outputs the
-`.d.ts` beside the `.js`, and it runs when those are requested.
+emitted (`TS6059`). Under `--//ts:declarations=tsgo`, `TsgoDeclare` invokes
+`tsaction emit -declarations_only` with the program inputs and source roots.
+The emitter runs checked tsgo with `--declaration --emitDeclarationOnly
+--noEmit false --noEmitOnError`, then projects its scratch outputs into the
+[shared source layout](#shared-source-layout). It runs when declarations are
+requested.
 
 ## Output Paths
 
-Output paths are derived from source file names, not target names, so
-`import "./foo"` resolves to `bazel-bin/.../foo.js`. Two `ts_compile` targets in
+Output paths derive from source file names within the
+[shared source layout](#shared-source-layout), preserving relative imports such
+as `import "./foo"` beside the emitted `foo.js`. Two `ts_compile` targets in
 the same package therefore cannot list the same source file: Bazel reports
-conflicting actions. Split by directory, or give each target its own sources.
+conflicting actions. Disjoint source lists also need a single publisher for any
+shared runtime scope: independent `package_scopes = ["package.json"]`
+declarations still write the same package.json output. Use the
+[aggregate construction](#compiler-inputs-and-emitted-layout) above to publish
+the complete projection once.

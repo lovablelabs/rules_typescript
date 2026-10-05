@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 declare const __UNDECLARED__: string;
 
 import { moduleUrl } from "../src/index";
+import { entryUrl } from "../src/environment";
 import wranglerRaw from "../wrangler.jsonc?raw";
 
 describe("nested worker", () => {
@@ -31,17 +32,21 @@ describe("nested worker", () => {
   });
 
   it("reads the staged copy through a ?raw import of the wrangler config", () => {
-    const extension = moduleUrl.endsWith(".ts") ? "ts" : "js";
-    expect(wranglerRaw.match(/"main"\s*:\s*"[^"]*"/g)).toEqual([
-      `"main": "src/index.${extension}"`,
-      `"main": "src/environment.${extension}"`,
-      '"main": "src/not-declared.ts"',
-    ]);
     const parsed = JSON.parse(
       wranglerRaw.replace(/^\s*\/\/.*$/gm, "").replace(/,(\s*[}\]])/g, "$1"),
     ) as {
-      env: { test: { vars: { GREETING: string } } };
+      main: string;
+      env: {
+        test: { main: string; vars: { GREETING: string } };
+        unavailable: { main: string };
+      };
     };
+    const config = "file:///tests/workers_nested/wrangler.jsonc";
+    expect(moduleUrl.endsWith(new URL(parsed.main, config).pathname)).toBe(true);
+    expect(entryUrl.endsWith(new URL(parsed.env.test.main, config).pathname)).toBe(
+      true,
+    );
+    expect(parsed.env.unavailable.main).toBe("src/not-declared.ts");
     expect(parsed.env.test.vars.GREETING).toBe("from-env-test");
   });
 

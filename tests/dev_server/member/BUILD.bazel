@@ -1,0 +1,111 @@
+"""A workspace member whose own importer links an npm package the app's does not."""
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_typescript//npm:defs.bzl", "node_modules")
+load("@rules_typescript//npm/private:store.bzl", "npm_store")
+load("@rules_typescript//ts:defs.bzl", "ts_compile")
+load("@rules_typescript//ts/private:ts_npm_package.bzl", "ts_npm_package")
+
+package(default_visibility = ["//tests/dev_server:__pkg__"])
+
+[
+    write_file(
+        name = package + "_" + kind,
+        out = package + "/" + filename,
+        content = [
+            content,
+            "",
+        ],
+    )
+    for package, runtime, types in [
+        (
+            "member_only",
+            'export { transitive } from "member-dep";\nexport const marker = "MEMBER_IMPORTER_STORE";',
+            'export { transitive } from "member-dep";\nexport declare const marker: string;',
+        ),
+        (
+            "member_dep",
+            'export const transitive = "MEMBER_TRANSITIVE_STORE";',
+            "export declare const transitive: string;",
+        ),
+    ]
+    for kind, filename, content in [
+        (
+            "manifest",
+            "package.json",
+            '{"name":"' + package.replace("_", "-") + '","version":"1.0.0","type":"module","exports":{".":{"types":"./index.d.ts","default":"./index.js"}}}',
+        ),
+        (
+            "runtime",
+            "index.js",
+            runtime,
+        ),
+        (
+            "types",
+            "index.d.ts",
+            types,
+        ),
+    ]
+]
+
+[
+    filegroup(
+        name = package + "_files",
+        srcs = [":" + package + "_" + kind for kind in [
+            "manifest",
+            "runtime",
+            "types",
+        ]],
+    )
+    for package in [
+        "member_only",
+        "member_dep",
+    ]
+]
+
+npm_store(
+    name = "node_modules/.pnpm/member-dep@1.0.0/node_modules/member-dep",
+    files = ":member_dep_files",
+    package_dir = ":member_dep_manifest",
+)
+
+# member-only requires member-dep at runtime through the link pnpm puts beside its tree.
+npm_store(
+    name = "node_modules/.pnpm/member-only@1.0.0/node_modules/member-only",
+    files = ":member_only_files",
+    package_dir = ":member_only_manifest",
+    deps = {":node_modules/.pnpm/member-dep@1.0.0/node_modules/member-dep": "member-dep"},
+)
+
+ts_npm_package(
+    name = "member_dep",
+    package_name = "member-dep",
+    package_dir = ":member_dep_manifest",
+    package_version = "1.0.0",
+    store = ":node_modules/.pnpm/member-dep@1.0.0/node_modules/member-dep",
+)
+
+ts_npm_package(
+    name = "member_only",
+    package_name = "member-only",
+    package_dir = ":member_only_manifest",
+    package_version = "1.0.0",
+    store = ":node_modules/.pnpm/member-only@1.0.0/node_modules/member-only",
+    deps = [":member_dep"],
+)
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = [":member_only"],
+)
+
+# keep
+ts_compile(
+    name = "member",
+    srcs = ["value.ts"],
+    emit = False,
+    node_modules = ":node_modules",
+    deps = [":member_only"],
+)

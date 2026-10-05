@@ -8,8 +8,8 @@ time and a directory has no file list to declare from.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load("//ts:defs.bzl", "ts_codegen", "ts_compile")
-load(":tree_tests.bzl", "tree_reaches_compile_test")
+load("//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_dev_server")
+load(":tree_tests.bzl", "dev_server_declared_tree_test", "tree_reaches_compile_test")
 
 package(default_visibility = ["//:__pkg__"])
 
@@ -41,6 +41,7 @@ ts_codegen(
     out_dir = "compiled",
     visibility = [
         "//:__pkg__",
+        "//tests/dev_server:__pkg__",
         "//tests/workers_nested/test:__pkg__",
     ],
 )
@@ -138,4 +139,19 @@ ts_compile(
     emit = False,
     tsconfig = "tsconfig.tree.json",
     deps = [":tree"],
+)
+
+ts_dev_server(
+    name = "dev",
+    entry_point = ":source_consumer",
+    node_modules = "//tests/npm:node_modules",
+    plugin = "//vite:vite_plugin_bazel",
+    server = "//vite:dev_server",
+)
+
+dev_server_declared_tree_test(
+    name = "dev_server_retains_declared_tree_test",
+    entry = ":source_consumer",
+    target_under_test = ":dev",
+    tree = ":tree",
 )

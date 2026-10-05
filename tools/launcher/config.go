@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/mikn/rules_typescript/ts/tools/runtimeview"
 )
 
 // ConfigEnvVar overrides where the config is read from.
@@ -29,14 +31,15 @@ const (
 )
 
 // Config is the whole contract between the Starlark rules and this binary.
-// Every path field is a runfiles path; nothing here is ever shell-quoted.
 type Config struct {
-	Label     string            `json:"label"`
-	Mode      string            `json:"mode"`
-	Workspace string            `json:"workspace"`
-	Runtime   string            `json:"runtime,omitempty"`
-	RunArgs   []string          `json:"runtime_args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Label            string            `json:"label"`
+	Mode             string            `json:"mode"`
+	Workspace        string            `json:"workspace"`
+	Runtime          string            `json:"runtime,omitempty"`
+	RunArgs          []string          `json:"runtime_args,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	RuntimeModules   []string          `json:"runtime_modules,omitempty"`
+	NativeViewAnchor string            `json:"native_view_anchor,omitempty"`
 
 	Node      *NodeConfig      `json:"node,omitempty"`
 	Vitest    *VitestConfig    `json:"vitest,omitempty"`
@@ -52,20 +55,22 @@ type NodeConfig struct {
 	OptionalDeps []PackageLink `json:"optional_deps,omitempty"`
 }
 
-// PackageLink is one npm package to expose under a private node_modules dir.
-type PackageLink struct {
-	Name        string `json:"name"`
-	PackageJSON string `json:"package_json"`
-}
+type NpmContext = runtimeview.NpmContext
+
+type NpmPackageScope = runtimeview.NpmPackageScope
+
+type PackageLink = runtimeview.PackageLink
 
 // VitestConfig runs the vitest CLI over a sharded set of compiled test files.
 // NodeModules is the importer chain, nearest first.
 type VitestConfig struct {
-	VitestInTree  string   `json:"vitest_in_tree,omitempty"`
-	ConfigFile    string   `json:"config_file"`
-	TestFilesList string   `json:"test_files_list"`
-	NodeModules   []string `json:"node_modules,omitempty"`
-	ReadsHook     string   `json:"reads_hook,omitempty"`
+	NpmContexts   []NpmContext        `json:"npm_contexts,omitempty"`
+	NpmBindings   []map[string]string `json:"npm_binding_sets,omitempty"`
+	VitestInTree  string              `json:"vitest_in_tree,omitempty"`
+	ConfigFile    string              `json:"config_file"`
+	TestFilesList string              `json:"test_files_list"`
+	NodeModules   []string            `json:"node_modules,omitempty"`
+	ReadsHook     string              `json:"reads_hook,omitempty"`
 	// RootRel is vite's root relative to the config's directory: the package
 	// of a `config` from an ancestor package, "." otherwise.
 	RootRel string `json:"root_rel,omitempty"`

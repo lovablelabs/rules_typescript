@@ -23,21 +23,23 @@ import (
 const execrootToken = "{{EXECROOT}}"
 
 const usage = `usage:
-  tsaction stamp -stamp=FILE -- TOOL [ARG...]
+  tsaction stamp -stamp=FILE [-runtime_scope=JSON]... [-- TOOL [ARG...]]
   tsaction stage -out=DIR SRC DEST [SRC DEST...]
+  tsaction native-view -spec=FILE
   tsaction tar -out=FILE -dir=DIR [-prefix=P]
   tsaction tsconfig -tsgo=BIN [-tsconfig=FILE] -baseline=FILE -out=FILE -options=FILE
       -bin_dir=DIR [-jsx=preserve] [-module=KIND] [-types_dep=NAME]...
       [-isolated_declarations] [-lib_check] SRC...
   tsaction paths -tsconfig=FILE -package=PKG [-bin_dir=DIR] -out=FILE
   tsaction manifest [-tsx=.js|.jsx] SRC OUT
-  tsaction tsgo -root=DIR [-source=FILE]... -node_modules=DIR [-overlay=DIR]...
-      [-manifest=FILE]... [-check=FILE [-tsconfig=FILE]] [-stamp=FILE]
+  tsaction tsgo -root=DIR [-source=FILE]... -node_modules=DIR [-inherit_node_modules=DIR]...
+      [-overlay=PAIR]... [-manifest=FILE]... [-check=FILE [-tsconfig=FILE]] [-stamp=FILE]
       -- TSGO [ARG...]
   tsaction emit -options=FILE -tsconfig=FILE [-source=FILE]... -node_modules=DIR
-      [-overlay=DIR]... [-manifest=FILE]... -scratch=DIR -out_dir=DIR -oxc=BIN
+      [-inherit_node_modules=DIR]... [-overlay=PAIR]... [-manifest=FILE]...
+      -scratch=DIR -out_dir=DIR
       -tsgo=BIN -root=DIR... [-source_map] [-declarations] SRC...
-  tsaction emit -options=FILE -out_dir=DIR -oxc=BIN -root=DIR... -es_modules
+  tsaction emit -options=FILE -out_dir=DIR -oxc=BIN -root=DIR... [-es_modules]
       [-source_map] [-declarations] SRC...`
 
 func main() {
@@ -51,6 +53,8 @@ func main() {
 	switch os.Args[1] {
 	case "stamp":
 		err = stamp(args)
+	case "native-view":
+		err = nativeView(args)
 	case "stage":
 		err = stage(args)
 	case "tar":
@@ -108,25 +112,31 @@ func expandParamFiles(args []string) ([]string, error) {
 
 func stamp(args []string) error {
 	flags := flag.NewFlagSet("stamp", flag.ExitOnError)
-	out := flags.String("stamp", "", "file to create when the command exits 0")
+	out := flags.String("stamp", "", "file to create when validation and any command succeed")
+	var runtimeScopes stringList
+	flags.Var(&runtimeScopes, "runtime_scope", "a package scope and its declared runtime targets as JSON (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	cmdline := flags.Args()
-	if *out == "" || len(cmdline) == 0 {
-		return errors.New("stamp needs -stamp=FILE and a command after --")
+	if *out == "" || len(cmdline) == 0 && len(runtimeScopes) == 0 {
+		return errors.New("stamp needs -stamp=FILE and a command after -- or runtime scope checks")
 	}
 
-	execroot, err := os.Getwd()
-	if err != nil {
+	if err := validateRuntimeScopes(runtimeScopes); err != nil {
 		return err
 	}
-	for i, arg := range cmdline {
-		cmdline[i] = strings.ReplaceAll(arg, execrootToken, execroot)
-	}
-
-	if err := runTool(cmdline); err != nil {
-		return err
+	if len(cmdline) > 0 {
+		execroot, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		for i, arg := range cmdline {
+			cmdline[i] = strings.ReplaceAll(arg, execrootToken, execroot)
+		}
+		if err := runTool(cmdline); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(*out, nil, 0o644)
 }
@@ -168,15 +178,71 @@ func stage(args []string) error {
 		return err
 	}
 	for i := 0; i < len(pairs); i += 2 {
-		dest := filepath.Join(*out, pairs[i+1])
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return err
-		}
-		if err := copyFile(pairs[i], dest); err != nil {
+		if err := copyPath(pairs[i], filepath.Join(*out, pairs[i+1])); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// copyPath follows src itself, which a sandbox may stage as a link, but no link inside it.
+func copyPath(src, dest string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		return copyFile(src, dest)
+	}
+	root, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return err
+	}
+	return copyTree(root, root, dest)
+}
+
+func copyTree(root, src, dest string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		return copyLink(root, src, dest)
+	case !info.IsDir():
+		return copyFile(src, dest)
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := copyTree(root, filepath.Join(src, entry.Name()), filepath.Join(dest, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyLink(root, src, dest string) error {
+	target, err := os.Readlink(src)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, filepath.Join(filepath.Dir(src), target))
+	if filepath.IsAbs(target) || err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("stage: %s links to %q, outside the package at %s", src, target, root)
+	}
+	if _, err := os.Stat(src); err != nil {
+		return fmt.Errorf("stage: %s links to %q, which does not resolve: %w", src, target, err)
+	}
+	return os.Symlink(target, dest)
 }
 
 func copyFile(src, dest string) error {

@@ -5,9 +5,12 @@ package typescript
 import (
 	"flag"
 	"fmt"
+	"log"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
@@ -43,11 +47,14 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 			"what it listed or why it is not a package, how many are, and the "+
 			".ts files no program lists")
 	fs.StringVar(&tc.protos.graphPath, "ts_proto_graph", "", "declared native external protobuf graph artifact")
+	fs.StringVar(&listingCacheDir, "ts_listing_cache", "",
+		"a directory that keeps tsgo listings across runs, each reused while everything it read is unchanged")
 	l.programs = tc.programs
 	c.Exts[languageName] = tc
 }
 
 func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+	listingVerbose = getConfig(c).programs.verbose
 	store := getConfig(c).protos
 	if store.graphPath != "" {
 		graphFile, err := runfiles.Rlocation(store.graphPath)
@@ -81,6 +88,12 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if recursive := fs.Lookup("r"); recursive != nil {
 		store.recursive = recursive.Value.String() == "true"
 	}
+	getConfig(c).programs.fullWalk = store.recursive && slices.Equal(store.roots, []string{""})
+	if !getConfig(c).programs.fullWalk && listingCacheDir != "" && os.Getenv("GOGC") == "" {
+		// A partial run's heap is small, and GC at the default ratio was a third of its CPU;
+		// on a full run the same ratio raised peak RSS from 2.4 to 4.0 GB.
+		debug.SetGCPercent(200)
+	}
 
 	if tsgo := getConfig(c).programs.tsgoFlag; tsgo != "" {
 		if _, err := os.Stat(tsgo); err != nil {
@@ -95,29 +108,79 @@ func (l *tsLang) KnownDirectives() []string {
 }
 
 func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
-	configureTsConfig(c, rel, f)
+	getConfig(c).programs.ruleListsMayChange()
+	getConfig(c).programs.touchPackage(rel)
+	configureTsConfig(c, rel, f, walk.GetDirInfo)
 	l.programs = getConfig(c).programs
+	l.programs.observeBuild(rel, walk.GetDirInfo)
+	if len(c.Langs) > 0 && !slices.Contains(c.Langs, languageName) {
+		l.programs.walked[rel] = false
+	}
+	info, err := walk.GetDirInfo(rel)
+	if err != nil {
+		log.Fatalf("typescript: %s: %v", rel, err)
+	}
+	l.programs.visit(rel, info.RegularFiles)
+	for _, base := range l.programs.bases[rel] {
+		l.observeSources([]string{tsconfigIn(base)})
+	}
+	if p := l.programs.programs[rel]; p != nil {
+		p = l.programs.withKeptSources(c, p, rel, walk.GetDirInfo)
+		l.programs.record(p)
+		l.observeProgram(p)
+	}
 }
 
-// Kinds is every rule Gazelle writes or withdraws, with the attributes it
-// recomputes; a rule matches by name, which the merger checks unasked.
+func (l *tsLang) observeProgram(p *program) {
+	files := slices.Clone(p.Files)
+	for _, candidate := range p.candidates {
+		files = append(files, candidate.path)
+	}
+	l.observeSources(files)
+}
+
+// Resolve runs after the native walk releases GetDirInfo's BUILD and exclusion facts.
+func (l *tsLang) observeSources(files []string) {
+	observed := map[string]bool{}
+	var dirs []string
+	for _, file := range files {
+		dir := parentDir(file)
+		if !firstParty(file) || observed[dir] {
+			continue
+		}
+		observed[dir] = true
+		dirs = append(dirs, dir)
+	}
+	l.programs.observeBuilds(dirs, walk.GetDirInfo)
+}
+
 func (l *tsLang) Kinds() map[string]rule.KindInfo {
 	return map[string]rule.KindInfo{
+		"exports_files": {
+			MatchAttrs: []string{"srcs"},
+		},
 		"ts_compile": {
 			NonEmptyAttrs: map[string]bool{
-				"srcs": true,
+				"srcs":           true,
+				"package_scopes": true,
 			},
 			MergeableAttrs: map[string]bool{
-				"srcs":         true,
-				"deps":         true,
-				"visibility":   true,
-				"tsconfig":     true,
-				"node_modules": true,
-				"emit":         true,
+				"srcs":                true,
+				"type_inputs":         true,
+				"package_scopes":      true,
+				"deps":                true,
+				"visibility":          true,
+				"tsconfig":            true,
+				"node_modules":        true,
+				"source_node_modules": true,
+				"emit":                true,
 			},
 			ResolveAttrs: map[string]bool{
-				"srcs": true,
-				"deps": true,
+				"source_node_modules": true,
+				"srcs":                true,
+				"type_inputs":         true,
+				"package_scopes":      true,
+				"deps":                true,
 			},
 		},
 		"ts_test": {
@@ -125,19 +188,28 @@ func (l *tsLang) Kinds() map[string]rule.KindInfo {
 				"srcs": true,
 			},
 			MergeableAttrs: map[string]bool{
-				"srcs":         true,
-				"deps":         true,
-				"tsconfig":     true,
-				"config":       true,
-				"node_modules": true,
-				"emit":         true,
+				"srcs":                true,
+				"type_inputs":         true,
+				"package_scopes":      true,
+				"deps":                true,
+				"tsconfig":            true,
+				"config":              true,
+				"node_modules":        true,
+				"source_node_modules": true,
+				"emit":                true,
 			},
 			ResolveAttrs: map[string]bool{
-				"srcs":              true,
-				"deps":              true,
-				"config_srcs":       true,
-				"wrangler_config":   true,
-				"coverage_provider": true,
+				"source_node_modules": true,
+				"srcs":                true,
+				"type_inputs":         true,
+				"package_scopes":      true,
+				"test_srcs":           true,
+				"deps":                true,
+				"config_srcs":         true,
+				"config_node_modules": true,
+				"workers_pool":        true,
+				"wrangler_config":     true,
+				"coverage_provider":   true,
 			},
 		},
 		// ts_config makes a package's tsconfig.json a label. deps, jsx and module
@@ -155,13 +227,13 @@ func (l *tsLang) Kinds() map[string]rule.KindInfo {
 			},
 		},
 		// ts_codegen is hand-written and never generated; a Kind so that its
-		// out_dir is indexed (codegenTreeSpecs) and its outs are deps (D9).
+		// out_dir and scalar outputs participate in dependency resolution.
 		"ts_codegen":      {},
 		"ts_proto_config": {},
 		"ts_proto_library": {
 			NonEmptyAttrs:  map[string]bool{"proto": true},
-			MergeableAttrs: map[string]bool{"proto": true, "out_dir": true, "tsconfig": true, "node_modules": true, "options": true, "deps": true, "visibility": true},
-			ResolveAttrs:   map[string]bool{"deps": true},
+			MergeableAttrs: map[string]bool{"proto": true, "out_dir": true, "tsconfig": true, "node_modules": true, "source_node_modules": true, "options": true, "deps": true, "type_inputs": true, "visibility": true},
+			ResolveAttrs:   map[string]bool{"deps": true, "type_inputs": true, "source_node_modules": true},
 		},
 		"ts_dev_server": {
 			NonEmptyAttrs: map[string]bool{"entry_point": true},
@@ -261,11 +333,57 @@ func (l *tsLang) ApparentLoads(
 func (l *tsLang) Fix(_ *config.Config, _ *rule.File) {}
 
 func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
-	return generateRules(args)
+	getConfig(args.Config).programs.ruleListsMayChange()
+	getConfig(args.Config).programs.touchPackage(args.Rel)
+	defer getConfig(args.Config).programs.touchPackage(args.Rel)
+	res := generateRules(args)
+	tc := getConfig(args.Config)
+	s := tc.programs
+	producer, _, _ := s.declaredOutputProducer(args.Rel, true)
+	if input := s.inputs[args.Rel]; producer == nil && input.program != nil && s.generatedPackages[args.Rel] {
+		res = registerProgramRules(args, res)
+		input.refresh = func() { refreshProgramRules(args, tc, res) }
+		s.inputs[args.Rel] = input
+		if file := s.emission.files[args.Rel]; file != nil && file.File == nil {
+			file.Rules = append(slices.Clone(args.OtherGen), res.Gen...)
+			l.programs.ruleListsMayChange()
+		}
+	}
+	for i, imports := range res.Imports {
+		r := res.Gen[i]
+		if existing := existingRule(args, r.Kind(), r.Name()); existing != nil &&
+			(existing.ShouldKeep() || attrKept(existing, "tsconfig")) {
+			r = existing
+		}
+		selected, owner := r.AttrString("tsconfig"), args.Rel
+		switch imps := imports.(type) {
+		case *ruleImports:
+			if imps.config != "" {
+				if p := l.programs.configProgram(args.Config.RepoRoot, imps.config); p != nil {
+					l.observeProgram(p)
+					consumer := existingRule(args, canonicalRule(args.Config, r).Kind(), r.Name())
+					if consumer == nil {
+						consumer = r
+					}
+					if !consumer.ShouldKeep() && !attrKept(consumer, "wrangler_config") && importsWorkersPool(p.Edges) {
+						l.programs.observeWranglerConfig(args.Config, imps.config)
+					}
+				}
+			}
+		case *protoRuleImports:
+			owner = imps.identity.owner
+		}
+		if p := l.programs.compilerProgram(args.Config, selected, owner, walk.GetDirInfo); p != nil {
+			l.observeProgram(p)
+		}
+	}
+	return res
 }
 
 func (l *tsLang) DoneGeneratingRules() {
+	l.programs.ruleListsMayChange()
 	if l.programs != nil {
+		l.programs.stopPrefetch()
 		l.programs.reportCensus()
 		l.programs.reportUnlisted()
 		l.programs.reportUnowned()
@@ -273,6 +391,17 @@ func (l *tsLang) DoneGeneratingRules() {
 }
 
 func (l *tsLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
+	getConfig(c).programs.ruleListsMayChange()
+	// Owner selection runs before every indexed rule has reached Resolve.
+	if g := getConfig(c).programs.emission; g != nil {
+		if getConfig(c).programs.generatedPackages[f.Pkg] {
+			g.setFile(f.Pkg, f)
+		}
+		g.setRule(emissionLabel(c.RepoName, f.Pkg, ":"+r.Name()), r)
+	}
+	if l.programs != nil {
+		return importsForRule(c, r, f, walk.GetDirInfo)
+	}
 	return importsForRule(c, r, f)
 }
 
@@ -286,14 +415,116 @@ func (l *tsLang) Resolve(
 	imports any,
 	from label.Label,
 ) {
+	getConfig(c).programs.ruleListsMayChange()
+	liveRule := r
+	r = canonicalRule(c, r)
+	tc := getConfig(c)
+	tc.programs.selectInputs(ix)
+	effective := r
+	if g := tc.programs.emission; g != nil {
+		if f := g.files[from.Pkg]; f != nil {
+			for _, merged := range f.Rules {
+				if canonicalRule(c, merged).Kind() == r.Kind() && merged.Name() == r.Name() {
+					effective = canonicalRule(c, merged)
+					break
+				}
+			}
+		}
+	}
+	if info := l.Kinds()[r.Kind()]; len(info.NonEmptyAttrs) > 0 && effective.IsEmpty(info) {
+		return
+	}
+	if effective.PrivateAttr("_ts_scope_candidate") == true {
+		return
+	}
+	check := func(file string) {
+		if tc.programs.requireInput(c, ix, file, from.String()) == generatedInput {
+			if producer, _ := tc.programs.outputProducer(file); producer == nil {
+				log.Fatalf("typescript: %s requires generated file %s, but only a generated tree or compiler owner declares it. Did you mean to declare the file as a scalar output for this attribute?", from, file)
+			}
+		}
+	}
+	if !effective.ShouldKeep() {
+		switch effective.Kind() {
+		case "ts_config":
+			if effective.Name() != tsConfigTargetName {
+				break
+			}
+			if !attrKept(effective, "src") {
+				check(path.Join(from.Pkg, effective.AttrString("src")))
+			}
+			if !attrKept(effective, "deps") {
+				for _, base := range tc.programs.bases[from.Pkg] {
+					check(tsconfigIn(base))
+				}
+			}
+		case "filegroup":
+			if (effective.Name() == vitestConfigTargetName || effective.Name() == wranglerConfigTargetName) && !attrKept(effective, "srcs") {
+				for _, src := range effective.AttrStrings("srcs") {
+					lbl, err := parseLabel(src)
+					if err != nil {
+						continue
+					}
+					lbl = sourceLabelIdentity(lbl, language.GenerateArgs{Config: c, Rel: from.Pkg})
+					if lbl.Repo == c.RepoName {
+						check(path.Join(lbl.Pkg, lbl.Name))
+					}
+				}
+			}
+		}
+	}
 	if imps, ok := imports.(*protoRuleImports); ok && imps != nil {
-		resolveProtoLibrary(c, ix, r, imps, from)
+		resolveProtoLibrary(c, ix, r, effective, imps, from)
 		return
 	}
 	if imps, ok := imports.(*ruleImports); ok && imps != nil {
-		resolveEdges(c, ix, r, imps, from)
+		sourceRoots := slices.Clone(effective.AttrStrings("srcs"))
+		deps := resolveEdges(c, ix, r, imps, from)
+		retainTestRoots(c, r, from, sourceRoots)
+		if !effective.ShouldKeep() && tc.programs.inputs[from.Pkg].program != nil && managedProgramRule(r, from.Pkg) {
+			tc.programs.completePrograms[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)] = func(promote func(string)) {
+				g := tc.programs.emission
+				live := g.rules[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)]
+				called := map[string]bool{}
+				sourceOwner := func(dep string) emissionMode {
+					key := emissionLabel(c.RepoName, from.Pkg, dep)
+					called[key] = true
+					if promote != nil {
+						promote(key)
+					}
+					key, owner := tc.programs.ruleTarget(c.RepoName, key)
+					if owner == nil || owner.Kind() != "ts_compile" && owner.Kind() != "ts_test" {
+						return opaqueEmission
+					}
+					if complete := tc.programs.completePrograms[key]; complete != nil {
+						delete(tc.programs.completePrograms, key)
+						complete(promote)
+					}
+					return ruleEmission(owner)
+				}
+				deps := resolveEdges(c, ix, r, imps, from, sourceOwner)
+				removeSuppliedProgramInputs(c, r, from, sourceRoots, sourceOwner, called, deps)
+				retainSourceImporters(c, r, from, imps.program, deps)
+				retainTestRoots(c, r, from, sourceRoots)
+				filename := filepath.Join(c.RepoRoot, filepath.FromSlash(from.Pkg), c.DefaultBuildFileName())
+				rule.MergeRules(r, live, l.Kinds()[r.Kind()].ResolveAttrs, filename)
+				if promote != nil {
+					for _, dep := range live.AttrStrings("deps") {
+						promote(emissionLabel(c.RepoName, from.Pkg, dep))
+					}
+				}
+				if imps.reportSrcDrops != nil {
+					imps.reportSrcDrops(live)
+				}
+			}
+		} else {
+			retainSourceImporters(c, r, from, imps.program, deps)
+			if imps.reportSrcDrops != nil {
+				imps.reportSrcDrops(r)
+			}
+		}
 	}
 	if g := getConfig(c).programs.emission; g != nil {
-		g.rules[emissionLabel(from.Pkg, ":"+from.Name)] = r
+		g.setResolvedRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), liveRule)
 	}
 }

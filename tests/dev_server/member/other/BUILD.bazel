@@ -1,0 +1,76 @@
+"""A second member importer linking another store under the name member-only."""
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_typescript//npm:defs.bzl", "node_modules")
+load("@rules_typescript//npm/private:store.bzl", "npm_store")
+load("@rules_typescript//ts:defs.bzl", "ts_compile")
+load("@rules_typescript//ts/private:ts_npm_package.bzl", "ts_npm_package")
+
+package(default_visibility = ["//tests/dev_server:__pkg__"])
+
+[
+    write_file(
+        name = "member_only_" + kind,
+        out = "member_only/" + filename,
+        content = [
+            content,
+            "",
+        ],
+    )
+    for kind, filename, content in [
+        (
+            "manifest",
+            "package.json",
+            '{"name":"member-only","version":"2.0.0","type":"module","exports":{".":{"types":"./index.d.ts","default":"./index.js"}}}',
+        ),
+        (
+            "runtime",
+            "index.js",
+            'export const marker = "OTHER_MEMBER_STORE";',
+        ),
+        (
+            "types",
+            "index.d.ts",
+            "export declare const marker: string;",
+        ),
+    ]
+]
+
+filegroup(
+    name = "member_only_files",
+    srcs = [":member_only_" + kind for kind in [
+        "manifest",
+        "runtime",
+        "types",
+    ]],
+)
+
+npm_store(
+    name = "node_modules/.pnpm/member-only@2.0.0/node_modules/member-only",
+    files = ":member_only_files",
+    package_dir = ":member_only_manifest",
+)
+
+ts_npm_package(
+    name = "member_only",
+    package_name = "member-only",
+    package_dir = ":member_only_manifest",
+    package_version = "2.0.0",
+    store = ":node_modules/.pnpm/member-only@2.0.0/node_modules/member-only",
+)
+
+# keep
+node_modules(
+    name = "node_modules",
+    parent = "//tests/npm:node_modules",
+    deps = [":member_only"],
+)
+
+# keep
+ts_compile(
+    name = "other",
+    srcs = ["value.ts"],
+    emit = False,
+    node_modules = ":node_modules",
+    deps = [":member_only"],
+)

@@ -1,0 +1,1 @@
+{"type":"module","imports":{"#internal":"./internal.ts","#contract":"./contract.d.ts"}}

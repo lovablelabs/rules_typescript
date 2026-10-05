@@ -86,13 +86,10 @@ jobs:
       # drops the nested-Bazel targets: those run once per push, spread over the
       # legs of the integration-tests job. Unfiltered they would run three times
       # per push — twice here across the OS matrix, once there.
+      # Also the type check: .bazelrc builds +_validation for every command.
       - name: Run all tests
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bazel test --config=ci //...
-
-      - name: Type checking (validation)
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: bazel build --config=ci //... --output_groups=+_validation
 
       # The suite never runs `bazel coverage`, and a coverage run whose report
       # is empty passes; the fixture runs under it here and its report is read.
@@ -369,6 +366,16 @@ jobs:
           BAZELISK_HOME=/mnt/rules_ts_it/bazelisk \
             USE_BAZEL_VERSION="${declared:-$(cat .bazelversion)}" \
             bazelisk --version
+
+      # A PR's runtime actions miss main's cache; built here, no group pays them inside its timeout.
+      - name: Warm the nested runtime actions
+        if: matrix.shard == 'core'
+        run: |
+          set -o pipefail
+          bazelisk test --config=ci-integration-core \
+            //tests/integration:gazelle_roundtrip_warmup_test \
+            --test_env=RULES_TS_IT_SCRATCH=/mnt/rules_ts_it 2>&1 \
+            | tee "${RUNNER_TEMP}/warmup.log"
 
       # The tests carry "cpu:2", not "exclusive", so Bazel already runs as many
       # as this runner has cores for; the config picks which of them this leg

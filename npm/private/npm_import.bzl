@@ -183,16 +183,8 @@ def _package_relative_label(package_root, path):
     """The label of a file inside the package, relative to the generated BUILD file."""
     return ":" + package_root + "/" + path
 
-def _files_glob(package_root):
-    return (
-        'glob(["{}/**/*"], exclude_directories = 1, ' +
-        "allow_empty = True)"
-    ).format(package_root)
-
 def _files_stanza(package_root):
-    return 'filegroup(\n    name = "files",\n    srcs = {},\n)\n'.format(
-        _files_glob(package_root),
-    )
+    return 'filegroup(\n    name = "files",\n    srcs = ["{}"],\n)\n'.format(package_root)
 
 def _package_stanza(attrs, target_name, package_name, deps_expr):
     """The ts_npm_package call for one name this package is imported under."""
@@ -207,7 +199,6 @@ def _package_stanza(attrs, target_name, package_name, deps_expr):
         stanza.append('    peer_id = "{}",'.format(attrs.peer_id))
     stanza += [
         '    package_dir = "{}",'.format(_package_relative_label(package_root, "package.json")),
-        "    package_files = {},".format(_files_glob(package_root)),
         '    store = "{}",'.format(attrs.store),
     ]
     if deps_expr:
@@ -216,6 +207,23 @@ def _package_stanza(attrs, target_name, package_name, deps_expr):
         stanza.append('    types_dep = "{}",'.format(attrs.types_dep))
     stanza.append(")\n")
     return "\n".join(stanza)
+
+def _missing_bin_entry(rctx, package_root, bin_name, entry):
+    """The analysis error for a bin whose script is absent from the patched package, else ""."""
+    if rctx.path(package_root).get_child(*entry.split("/")).exists:
+        return ""
+    return (
+        "npm_bin: entry script '{}' not found in package files for target ':{}' of {}.\n".format(
+            entry,
+            bin_name,
+            rctx.attr.package,
+        ) +
+        "This usually means the npm package's 'bin' field references a file that " +
+        "the published tarball does not contain; the launcher runs exactly {}/{}.".format(
+            package_root,
+            entry,
+        )
+    )
 
 def _apply_patch(rctx):
     """Applies the package's pnpm patch, failing the fetch if it does not land.
@@ -260,8 +268,8 @@ def _apply_patch(rctx):
     rctx.patch(local, strip = 1)
     rctx.delete(local)
 
-# Bazel reads each as a package or repository boundary, which would take the
-# package out of its own glob; at the repository root the generated file won.
+# Bazel reads each as a package or repository boundary, which would make the
+# package directory's label cross into it; at the repository root the generated file won.
 _BOUNDARY_FILES = ("BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "REPO.bazel")
 
 def _move_package(rctx, package_root):
@@ -281,8 +289,16 @@ def _move_package(rctx, package_root):
 
 def _npm_import_impl(rctx):
     tarball = "_pkg.tgz"
-    auth = _auth_for_fetch(rctx, rctx.attr.url)
-    rctx.download(url = rctx.attr.url, output = tarball, integrity = rctx.attr.integrity, auth = auth)
+    if rctx.attr.local_tarball:
+        local = rctx.path(rctx.attr.local_tarball)
+        rctx.watch(local)
+
+        # Unchecksummed on purpose: the repository cache would answer a checksum
+        # with the locked bytes and never read an edited file (see lazy.bzl).
+        rctx.download(url = "file://" + str(local), output = tarball)
+    else:
+        auth = _auth_for_fetch(rctx, rctx.attr.url)
+        rctx.download(url = rctx.attr.url, output = tarball, integrity = rctx.attr.integrity, auth = auth)
 
     # Extracted twice deliberately: the strip prefix is only knowable by looking
     # inside, and Starlark cannot catch the failure a wrong one would raise.
@@ -311,7 +327,7 @@ def _npm_import_impl(rctx):
     lines = [_NPM_BUILD_HEADER]
     bins = _bin_entries(pkg_json)
     if bins:
-        lines.append('load("@rules_typescript//npm/private:npm_bin.bzl", "npm_bin")\n')
+        lines.append('load("@rules_typescript//npm/private:npm_bin.bzl", npm_bin = "npm_bin_macro")\n')
     lines.append('package(default_visibility = ["//visibility:public"])\n')
     lines.append('exports_files(["{}/package.json"])\n'.format(package_root))
     lines.append(_files_stanza(package_root))
@@ -342,13 +358,16 @@ def _npm_import_impl(rctx):
         rctx.attr.platform_optional_dep_packages,
     )
     for bin_name, bin_path in bins.items():
+        entry = bin_path.removeprefix("./")
         bin_stanza = [
             "npm_bin(",
             '    name = "{}",'.format(bin_name),
-            '    entry_script = "{}",'.format(bin_path.removeprefix("./")),
-            "    package_files = {},".format(_files_glob(package_root)),
+            '    entry_script = "{}",'.format(entry),
             "    store = {},".format(repr(rctx.attr.store)),
         ]
+        missing = _missing_bin_entry(rctx, package_root, bin_name, entry)
+        if missing:
+            bin_stanza.append("    entry_missing = {},".format(repr(missing)))
         if optional_expr:
             bin_stanza.append("    optional_dep_packages = {},".format(optional_expr))
         bin_stanza.append(")\n")
@@ -375,7 +394,11 @@ npm_import = repository_rule(
                   "it; this passes it on to the providers, which is where a node_modules " +
                   "tree can act on it.",
         ),
-        "url": attr.string(mandatory = True, doc = "Tarball URL."),
+        "url": attr.string(doc = "Tarball URL, for a package not supplied by local_tarball."),
+        "local_tarball": attr.label(
+            allow_single_file = True,
+            doc = "The workspace file a pnpm `file:` tarball dependency names.",
+        ),
         "integrity": attr.string(
             mandatory = True,
             doc = "SRI hash from the lockfile's resolution.integrity. Mandatory: an " +

@@ -8,6 +8,7 @@ naming that label -- the drift this check exists to catch.
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("//ts:defs.bzl", "TsInfo")
+load("//ts/private:providers.bzl", "NpmPackageInfo")
 
 def _tsgo_action(env):
     tsgo = [
@@ -106,7 +107,14 @@ def _tsgo_check_impl(ctx):
     lines = _manifest_lines(env, tsgo)
     if lines == None:
         return analysistest.end(env)
-    for line in ctx.attr.lines:
+    expected = list(ctx.attr.lines)
+    for dep in ctx.attr.npm_direct:
+        info = dep[NpmPackageInfo]
+        expected.append("npm-direct\t{}\t{}".format(info.package_name, info.store.tree.path))
+    for dep, label in ctx.attr.npm_reachable.items():
+        info = dep[NpmPackageInfo]
+        expected.append("npm\t{}\t{}\t{}".format(info.package_name, label, info.store.tree.path))
+    for line in expected:
         asserts.true(
             env,
             line in lines,
@@ -117,6 +125,8 @@ def _tsgo_check_impl(ctx):
 tsgo_check_test = analysistest.make(
     _tsgo_check_impl,
     attrs = {
+        "npm_direct": attr.label_list(providers = [NpmPackageInfo]),
+        "npm_reachable": attr.label_keyed_string_dict(providers = [NpmPackageInfo]),
         "lines": attr.string_list(
             doc = "Lines the ownership manifest holds, tab-separated fields.",
         ),

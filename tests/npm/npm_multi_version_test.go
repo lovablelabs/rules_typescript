@@ -15,11 +15,11 @@ import (
 func TestVersionedLabelsStayApart(t *testing.T) {
 	tree := verify.New(t)
 
-	for _, c := range []struct{ dirSuffix, want string }{
-		{"rolldown_pluginutils__1_0_0_rc_3", "1.0.0-rc.3"},
-		{"rolldown_pluginutils__1_0_1", "1.0.1"},
+	for _, c := range []struct{ storeKey, want string }{
+		{"@rolldown+pluginutils@1.0.0-rc.3", "1.0.0-rc.3"},
+		{"@rolldown+pluginutils@1.0.1", "1.0.1"},
 	} {
-		dir := tree.FoundDir("*" + c.dirSuffix + "/node_modules/@rolldown/pluginutils")
+		dir := tree.FoundDir("*/.pnpm/" + c.storeKey + "/node_modules/@rolldown/pluginutils")
 		var pkg struct {
 			Version string `json:"version"`
 		}

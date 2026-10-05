@@ -3,10 +3,14 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -103,7 +107,7 @@ func TestEmitStep_ESModulesGoToOxcPerRoot(t *testing.T) {
 // the emit shape on the command line, each src's outputs moved from scratch.
 func TestEmitStep_CommonJSGoesToTsgo(t *testing.T) {
 	e := newEmitRoot(t, "commonjs")
-	err := runEmit(e.args("-root=pkg", "-source_map", "-declarations",
+	err := runEmit(e.args("-root=pkg", "-source_map", "-declarations", "-oxc=",
 		"pkg/src/a.ts", "pkg/src/view.tsx"))
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +141,7 @@ func TestEmitStep_CommonJSGoesToTsgo(t *testing.T) {
 	for m, want := range map[string]string{
 		"src/a.js.map": "pkg/src/a.ts", "src/view.jsx.map": "pkg/src/view.tsx",
 	} {
-		got := mapSources(t, filepath.Join(binDir, "pkg", m))
+		got := readSourceMap(t, filepath.Join(binDir, "pkg", m)).Sources
 		if !reflect.DeepEqual(got, []string{want}) {
 			t.Errorf("%s names sources %q, want %q", m, got, want)
 		}
@@ -176,37 +180,176 @@ func TestEmitStep_ESModulesFlagIsOxcWhateverTheModule(t *testing.T) {
 	}
 }
 
-// One tsgo emit has one rootDir, the rule the declaration emit already states.
-func TestEmitStep_CommonJSNeedsOneRoot(t *testing.T) {
-	e := newEmitRoot(t, "commonjs")
-	err := runEmit(e.args("-root=pkg", "-root="+binDir+"/pkg",
-		"pkg/src/a.ts", binDir+"/pkg/gen.ts"))
-	if err == nil {
-		t.Fatal("want an error for a commonjs program with two roots")
+func TestEmitStep_MixedRootsPreserveRuntimeAndDeclarationGeometry(t *testing.T) {
+	type emissionCase struct {
+		declarationsOnly bool
+		sourceRoot       string
 	}
-	for _, want := range []string{
-		`"commonjs"`, "2 roots", "pkg\n", binDir + "/pkg", "own target",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not say %q", err, want)
+	for _, root := range []string{"pkg", ""} {
+		cases := []emissionCase{{}, {declarationsOnly: true}}
+		if root == "" {
+			for _, policy := range []string{"relative", "absolute", "url"} {
+				cases = append(cases, emissionCase{declarationsOnly: true, sourceRoot: policy})
+			}
+		}
+		for _, scenario := range cases {
+			declarationsOnly := scenario.declarationsOnly
+			name := fmt.Sprintf("root=%s/declarations=%v", root, declarationsOnly)
+			if scenario.sourceRoot != "" {
+				name += "/sourceRoot=" + scenario.sourceRoot
+			}
+			t.Run(name, func(t *testing.T) {
+				e := newEmitRoot(t, "commonjs")
+				directory, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				authored := strings.TrimPrefix("pkg/src/a", root+"/")
+				generated := strings.TrimPrefix("pkg/gen", root+"/")
+				script := `out=""; previous=""
+for argument in "$@"; do
+ if [ "$previous" = "--outDir" ]; then out="$argument"; fi
+ previous="$argument"
+done
+mkdir -p "$out/` + path.Dir(authored) + `" "$out/foreign"
+for suffix in js d.ts; do
+ echo authored > "$out/` + authored + `.$suffix"
+ echo foreign > "$out/foreign/value.$suffix"
+ echo generated > "$out/` + generated + `.$suffix"
+done
+`
+				for _, source := range []string{"pkg/src/a.ts", "foreign/value.ts", binDir + "/pkg/gen.ts"} {
+					logical := strings.TrimPrefix(source, binDir+"/")
+					stem := strings.TrimPrefix(strings.TrimSuffix(logical, ".ts"), root+"/")
+					for _, suffix := range []string{".js.map", ".d.ts.map"} {
+						from := filepath.Join(binDir, "pkg/pkg.emit/out", stem+suffix)
+						relative, err := filepath.Rel(filepath.Dir(from), logical)
+						if err != nil {
+							t.Fatal(err)
+						}
+						mapped := sourceMap{Version: 3, Sources: []string{filepath.ToSlash(relative)}}
+						if scenario.sourceRoot != "" {
+							mapped.Sources = []string{filepath.Base(source)}
+							switch scenario.sourceRoot {
+							case "relative":
+								base, err := filepath.Rel(filepath.Dir(from), filepath.Dir(logical))
+								if err != nil {
+									t.Fatal(err)
+								}
+								mapped.SourceRoot = filepath.ToSlash(base) + "/"
+							case "absolute":
+								mapped.SourceRoot = filepath.ToSlash(filepath.Join(directory, filepath.Dir(logical))) + "/"
+							case "url":
+								mapped.SourceRoot = (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(directory, filepath.Dir(logical))) + "/"}).String()
+							}
+						}
+						data, err := json.Marshal(mapped)
+						if err != nil {
+							t.Fatal(err)
+						}
+						script += "cat > \"$out/" + stem + suffix + "\" <<'MAP'\n" + string(data) + "\nMAP\n"
+					}
+				}
+				e.tsgo, e.tsgoArgv = fakeTool(t, directory, "mixed-tsgo", script)
+				args := []string{"-root=" + root, "-root=" + binDir}
+				if root != "" {
+					args[1] += "/" + root
+				}
+				if declarationsOnly {
+					args = append(args, "-declarations_only", "-declaration_map", "-oxc=")
+				} else {
+					args = append(args, "-source_map")
+				}
+				args = append(args, "pkg/src/a.ts", binDir+"/pkg/gen.ts")
+				outputs := map[string]string{"src/a": "authored", "gen": "generated"}
+				origins := map[string]string{"src/a": "pkg/src/a.ts", "gen": binDir + "/pkg/gen.ts"}
+				if root == "" {
+					writeFile(t, "foreign/value.ts", "export const value = 42;")
+					args = append([]string{"-source=foreign/value.ts"}, args...)
+					args = append(args, "foreign/value.ts")
+					outputs = map[string]string{"pkg/src/a": "authored", "pkg/gen": "generated", "foreign/value": "foreign"}
+					origins = map[string]string{"pkg/src/a": "pkg/src/a.ts", "pkg/gen": binDir + "/pkg/gen.ts", "foreign/value": "foreign/value.ts"}
+				}
+				if err := runEmit(e.args(args...)); err != nil {
+					t.Fatal(err)
+				}
+				suffix := ".js"
+				if declarationsOnly {
+					suffix = ".d.ts"
+				}
+				if _, err := os.Stat(filepath.Join(binDir, "pkg", "pkg.emit")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("scratch directory survived emission: %v", err)
+				}
+				for output, want := range outputs {
+					contents, err := os.ReadFile(filepath.Join(binDir, "pkg", output+suffix))
+					if err != nil || strings.TrimSpace(string(contents)) != want {
+						t.Fatalf("%s lost its source identity: %q, %v", output, contents, err)
+					}
+					mapPath := filepath.Join(binDir, "pkg", output+suffix+".map")
+					mapped := readSourceMap(t, mapPath)
+					if declarationsOnly {
+						if len(mapped.Sources) != 1 {
+							t.Fatalf("%s map has %q, want one original source", output, mapped.Sources)
+						}
+						mapURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(directory, mapPath))}
+						baseURL, err := url.Parse(mapped.SourceRoot)
+						if err != nil {
+							t.Fatal(err)
+						}
+						sourceURL, err := url.Parse(mapped.Sources[0])
+						if err != nil {
+							t.Fatal(err)
+						}
+						resolved := mapURL.ResolveReference(baseURL).ResolveReference(sourceURL)
+						if resolved.Scheme != "file" || resolved.Host != "" {
+							t.Fatalf("unexpected source URL: %s", resolved)
+						}
+						actual, err := os.Stat(filepath.FromSlash(resolved.Path))
+						if err != nil {
+							t.Fatalf("%s declaration map cannot reach original source %q: %v", output, origins[output], err)
+						}
+						expected, err := os.Stat(origins[output])
+						if err != nil || !os.SameFile(actual, expected) {
+							t.Fatalf("%s declaration map resolves to %q, want exact original File %q: %v", output, resolved, origins[output], err)
+						}
+					} else if !reflect.DeepEqual(mapped.Sources, []string{origins[output]}) {
+						t.Fatalf("%s map points to %q, want original source %q", output, mapped.Sources, origins[output])
+					}
+				}
+				arguments := recordedArgs(t, e.tsgoArgv)
+				if slices.Contains(arguments, "--noCheck") == declarationsOnly || slices.Contains(arguments, "--noEmitOnError") != declarationsOnly {
+					t.Fatalf("declaration checking changed: %q", arguments)
+				}
+			})
 		}
 	}
 }
 
-// mapSources reads a moved map's sources, the exec-root paths of its srcs.
-func mapSources(t *testing.T, name string) []string {
+func readSourceMap(t *testing.T, name string) sourceMap {
 	t.Helper()
 	data, err := os.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m struct {
-		Sources []string `json:"sources"`
-	}
+	var m sourceMap
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatalf("%s: %v\n%s", name, err, data)
 	}
-	return m.Sources
+	return m
+}
+
+func TestEmitMap_GeneratedProjectionPreservesExplicitRemoteSourceRoot(t *testing.T) {
+	t.Chdir(t.TempDir())
+	const from = binDir + "/pkg/scratch/generated.d.ts.map"
+	const to = binDir + "/pkg/generated.d.ts.map"
+	writeFile(t, from, `{"version":3,"sourceRoot":"https://sources.example/pkg/","sources":["generated.ts"],"mappings":"AAAA"}`)
+	if err := moveMap(from, to, binDir+"/pkg/generated.ts", true); err != nil {
+		t.Fatal(err)
+	}
+	mapped := readSourceMap(t, to)
+	if mapped.SourceRoot != "https://sources.example/pkg/" || !reflect.DeepEqual(mapped.Sources, []string{"generated.ts"}) {
+		t.Fatalf("explicit source location was replaced by a compiler path: %+v", mapped)
+	}
 }
 
 func TestEmitStep_ExitCodeIsTheTools(t *testing.T) {
@@ -240,5 +383,28 @@ func TestEffectiveESModuleEmitDoesNotRequireTypeProgram(t *testing.T) {
 	writeFile(t, binDir+"/pkg/pkg.options.json", `{"module":"commonjs"}`)
 	if err := runEmit(append(args, "-root=pkg", "pkg/src/a.ts")); err == nil || !strings.Contains(err.Error(), "-tsconfig") {
 		t.Fatalf("CommonJS missing program diagnostic: %v", err)
+	}
+}
+
+func TestIncompatibleRuntimeScopeStopsBothEmittersBeforePublication(t *testing.T) {
+	for _, module := range []string{"esnext", "commonjs"} {
+		t.Run(module, func(t *testing.T) {
+			e := newEmitRoot(t, module)
+			writeFile(t, "pkg/package.json", `{"imports":{"#value":"./value.ts"}}`)
+			writeFile(t, binDir+"/pkg/package.json", `{"imports":{"#value":"./value.ts"}}`)
+			check, err := json.Marshal(runtimeScopeCheck{Source: "pkg/package.json", Runtime: binDir + "/pkg/package.json", Targets: []runtimeTarget{{"./value.ts", "./value.js"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = runEmit(e.args("-root=pkg", "-runtime_scope="+string(check), "pkg/src/a.ts"))
+			if err == nil || !strings.Contains(err.Error(), "needs \"./value.js\"") {
+				t.Fatalf("error = %v", err)
+			}
+			for _, argv := range []string{e.oxcArgv, e.tsgoArgv} {
+				if _, err := os.Stat(argv); !os.IsNotExist(err) {
+					t.Fatalf("compiler invoked before scope validation: %s: %v", argv, err)
+				}
+			}
+		})
 	}
 }

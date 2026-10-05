@@ -20,6 +20,28 @@ bazel_dep(name = "toolchain_utils", version = "1.3.0")
 
 bazel_dep(name = "rules_bazel_integration_test", version = "0.37.1", dev_dependency = True)
 
+external_test_sources = use_repo_rule("//tests/node_test/analysis:external_test_sources.bzl", "external_test_sources")
+
+external_test_sources(
+    name = "node_test_sources",
+    dev_dependency = True,
+)
+
+external_cjs = use_repo_rule("//tests/vitest/commonjs:external_cjs.bzl", "external_cjs")
+
+external_cjs(
+    name = "vitest_commonjs",
+    dev_dependency = True,
+)
+
+gazelle_roundtrip_tarballs = use_repo_rule("//tests/integration:gazelle_roundtrip.bzl", "gazelle_roundtrip_tarballs")
+
+gazelle_roundtrip_tarballs(
+    name = "gazelle_roundtrip_tarballs",
+    dev_dependency = True,
+    pnpm_lock = "//tests/integration:gazelle_roundtrip/pnpm-lock.yaml",
+)
+
 # Non-dev, so a consumer's build loads //gazelle:BUILD.bazel and gets rules_go,
 # the Go SDK and the Go deps without declaring them.
 bazel_dep(name = "gazelle", version = "0.47.0")
@@ -91,6 +113,13 @@ crate.annotation(
     patches = ["//oj:aws-lc-macos-headers.patch"],
     repositories = ["oj_crates"],
     version = "0.40.0",
+)
+crate.annotation(
+    crate = "oj_js",
+    patch_args = ["-p1"],
+    patches = ["//oj:oj-js-code-cache-bounded.patch"],
+    repositories = ["oj_crates"],
+    version = "0.2.5",
 )
 crate.annotation(
     crate = "libsqlite3-sys",
