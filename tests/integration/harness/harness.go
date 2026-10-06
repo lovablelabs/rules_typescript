@@ -194,8 +194,10 @@ func (it *IT) shareRepositoryCache() error {
 			return err
 		}
 	}
+	// A disk cache is a remote cache to Bazel, so without this a cache hit leaves outputs the tests read back unmaterialized.
 	lines := "common --repository_cache=" + repo + "\n" +
-		"common --disk_cache=" + disk + "\n"
+		"common --disk_cache=" + disk + "\n" +
+		"common --remote_download_outputs=all\n"
 	if it.staged == "" {
 		// The checkout keeps its .bazelrc and the outer build's bazel-* links.
 		it.bazelrc = filepath.Join(it.scratchDir, "bazelrc")

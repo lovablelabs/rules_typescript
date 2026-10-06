@@ -8,7 +8,7 @@ time and a directory has no file list to declare from.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load("//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_dev_server")
+load("//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_dev_server", "ts_test")
 load(":tree_tests.bzl", "dev_server_declared_tree_test", "tree_reaches_compile_test")
 
 package(default_visibility = ["//:__pkg__"])
@@ -154,4 +154,27 @@ dev_server_declared_tree_test(
     entry = ":source_consumer",
     target_under_test = ":dev",
     tree = ":tree",
+)
+
+# keep
+ts_test(
+    name = "tree_import_test",
+    srcs = [
+        "assets.d.ts",
+        "tree_import.test.ts",
+    ],
+    node_modules = "//tests/npm:node_modules",
+    tsconfig = "tsconfig.tree.json",
+    deps = [
+        ":tree",
+        "@npm//:vitest",
+    ],
+)
+
+go_test(
+    name = "materialized_runfiles_test",
+    size = "medium",
+    srcs = ["materialized_runfiles_test.go"],
+    data = [":tree_import_test"],
+    deps = ["//tests/verify"],
 )

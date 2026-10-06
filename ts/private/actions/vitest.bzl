@@ -266,9 +266,14 @@ const BIN_DIR = (() => {
   } catch {}
   return null;
 })();
-const FS_ALLOW = BIN_DIR ? [WORKSPACE_DIR, BIN_DIR] : [WORKSPACE_DIR];
+// The runfiles the private tree links into; where they are files, as under remote execution, a realpath lands here.
+const RUNFILES_ORIGIN = process.env.TS_TEST_RUNFILES_ORIGIN || null;
+const FS_ALLOW = [WORKSPACE_DIR, BIN_DIR, RUNFILES_ORIGIN].filter(Boolean);
 const runfilesPath = (file) => {
   if (isAbsolute(file) && existsSync(file)) file = realpathSync(file);
+  if (RUNFILES_ORIGIN && file.startsWith(RUNFILES_ORIGIN + '/')) {
+    return resolve(RUNFILES_ROOT, file.slice(RUNFILES_ORIGIN.length + 1));
+  }
   const out = /^.*?\\/bazel-out\\/[^/]+\\/bin\\/(.*)$/.exec(file);
   if (out) {
     const ext = /^external\\/([^/]+)\\/(.*)$/.exec(out[1]);
