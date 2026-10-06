@@ -143,6 +143,7 @@ bzl_library(
     name = "tsconfig_aspect",
     srcs = ["tsconfig_aspect.bzl"],
     deps = [
+        ":editor_path",
         ":providers",
         ":toolchain",
         "@bazel_skylib//rules:diff_test",
@@ -152,4 +153,9 @@ bzl_library(
 bzl_library(
     name = "tools_lock",
     srcs = ["tools_lock.bzl"],
+)
+
+bzl_library(
+    name = "editor_path",
+    srcs = ["editor_path.bzl"],
 )

@@ -97,10 +97,12 @@ func decodeShowConfig(out []byte) (*effectiveOptions, []string, error) {
 // tsconfig cannot: where the sandbox puts things and which tool declares it.
 type actionConfig struct {
 	tsgo, project, baseline, out, options string
+	editorPath                            string
 	binDir                                string
 	jsx, module                           string
 	typesDeps                             stringList
 	typeInputs                            stringList
+	generatedDirectories, generatedFiles  stringList
 	srcs                                  []string
 	isolatedDeclarations                  bool
 	libCheck                              bool
@@ -322,9 +324,23 @@ func (a *actionConfig) build(effective *effectiveOptions, roots []string,
 			specs[i] = projectSpec(spec)
 		}
 	}
-	project(files)
-	project(include)
-	project(exclude)
+	// An authored config naming the output tree selects that output, never a source at its compiler path.
+	projectFrom := func(specs []string, from string) {
+		for i, spec := range specs {
+			if underOutputTree(from) || !underOutputTree(path.Join(dir, spec)) {
+				specs[i] = projectSpec(spec)
+			}
+		}
+	}
+	if chain != nil {
+		projectFrom(files, chain.FilesDir)
+		projectFrom(include, chain.IncludeDir)
+		projectFrom(exclude, chain.ExcludeDir)
+	} else {
+		project(files)
+		project(include)
+		project(exclude)
+	}
 	project(typesRoots)
 	named := make(map[string]bool, len(roots))
 	for _, p := range roots {
@@ -437,24 +453,30 @@ func isJavaScript(file string) bool {
 
 // paths is the user's map read from the directory of the chain file that set
 // it -- which showConfig does not print -- with a bin-dir twin per value.
-func (a *actionConfig) paths(chain *tsconfig.Resolved, dir string) map[string][]string {
+func (a *actionConfig) paths(chain *tsconfig.Resolved, dir string) *tsconfig.Paths {
 	if chain.Paths == nil {
 		return nil
 	}
-	out := make(map[string][]string, len(chain.Paths))
-	for key, values := range chain.Paths {
+	out := &tsconfig.Paths{}
+	for key, values := range chain.Paths.Entries() {
 		rewritten := make([]string, 0, 2*len(values))
 		for _, value := range values {
 			if path.IsAbs(value) {
 				rewritten = append(rewritten, value)
 				continue
 			}
-			target := compilerPath(path.Join(chain.PathsDir, value))
-			rewritten = append(rewritten,
-				explicitlyRelative(relativePath(dir, target)),
-				explicitlyRelative(relativePath(dir, path.Join(a.binDir, target))))
+			joined := path.Join(chain.PathsDir, value)
+			if !underOutputTree(chain.PathsDir) && underOutputTree(joined) {
+				rewritten = append(rewritten, explicitlyRelative(relativePath(dir, joined)))
+				continue
+			}
+			target := compilerPath(joined)
+			rewritten = append(rewritten, explicitlyRelative(relativePath(dir, target)))
+			if a.binDir != "" {
+				rewritten = append(rewritten, explicitlyRelative(relativePath(dir, path.Join(a.binDir, target))))
+			}
 		}
-		out[key] = rewritten
+		out.Set(key, rewritten)
 	}
 	return out
 }
@@ -577,4 +599,9 @@ func writeJSON(name string, v any) error {
 		return err
 	}
 	return os.WriteFile(name, append(data, '\n'), 0o644)
+}
+
+func underOutputTree(p string) bool {
+	p = path.Clean(p)
+	return p == outputTree || strings.HasPrefix(p, outputTree+"/")
 }

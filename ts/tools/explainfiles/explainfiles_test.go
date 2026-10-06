@@ -1,11 +1,9 @@
 package explainfiles
 
-// testdata/workers_download_test.listing.txt is the Lovable monorepo's
-// workers/download/test program, listed from its root with --explainFiles.
-
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -318,5 +316,345 @@ func TestParse_NoInputsIsZeroRoots(t *testing.T) {
 		!strings.HasSuffix(l.Diagnostics[0], "indented two more.") {
 		t.Errorf("diagnostics = %q, want TS5102 with its two continuation lines",
 			l.Diagnostics)
+	}
+}
+
+func TestParse_UnresolvedCompilerResolutions(t *testing.T) {
+	const text = `======== Resolving module './generated/removed.js' from '/work/o'brien/input.ts'. ========
+Explicitly specified module resolution kind: 'Bundler'.
+======== Module name './generated/removed.js' was not resolved. ========
+======== Resolving module './generated/removed.js' from '/work/other.ts'. ========
+======== Module name './generated/removed.js' was successfully resolved to '/work/generated/removed.ts'. ========
+======== Resolving module '#mapped' from '/work/input.ts'. ========
+Using 'imports' subpath '#mapped' with target 'package'.
+======== Resolving module 'package' from '/work/'. ========
+======== Module name '#mapped' was not resolved. ========
+======== Resolving type reference directive './generated/types', containing file '/work/input.ts', root directory '/work/node_modules/@types'. ========
+======== Type reference directive './generated/types' was not resolved. ========
+======== Resolving type reference directive '', containing file '/work/__inferred type names__.ts', root directory '/work/node_modules/@types'. ========
+======== Type reference directive '' was not resolved. ========
+error TS2688: Cannot find type definition file for ''.
+input.ts(1,22): error TS6053: File './generated/globals.d.ts' not found.
+input.ts(2,22): error TS6231: Could not resolve the path 'generated/absent' with the extensions: '.ts', '.tsx', '.d.ts', '.cts', '.d.cts', '.mts', '.d.mts'.
+input.ts(2,1): error TS2322: Type 'string' is not assignable to type 'number'.
+input.ts
+   Part of 'files' list in tsconfig.json
+`
+	l, err := Parse(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Unresolved{
+		{From: "/work/o'brien/input.ts", Specifier: "./generated/removed.js"},
+		{From: "/work/input.ts", Specifier: "#mapped"},
+		{Kind: TypeReference, From: "/work/input.ts", Specifier: "./generated/types"},
+		{Kind: TypeReference, From: "/work/__inferred type names__.ts", Specifier: ""},
+		{Kind: Reference, From: "input.ts", Specifier: "./generated/globals.d.ts", Candidates: []FailedLookup{{File: "./generated/globals.d.ts"}}},
+		{Kind: Reference, From: "input.ts", Specifier: "generated/absent", Candidates: []FailedLookup{{File: "generated/absent.ts"}, {File: "generated/absent.tsx"}, {File: "generated/absent.d.ts"}}},
+	}
+	if !reflect.DeepEqual(l.Unresolved, want) || !slices.Equal(l.Files, []string{"input.ts"}) || !slices.Equal(l.Roots, l.Files) || len(l.Diagnostics) != 4 || !slices.Contains(l.Diagnostics, "error TS2688: Cannot find type definition file for ''.") {
+		t.Fatalf("compiler outcomes or listing lost: %+v", l)
+	}
+	if _, err := Parse("======== Resolving module './missing' from '/work/input.ts'. ========\n"); err == nil {
+		t.Fatal("accepted an incomplete compiler resolution trace")
+	}
+}
+
+func TestParse_UnresolvedTypeReferenceKeepsObservedFilenames(t *testing.T) {
+	for _, root := range []string{"'/work/node_modules/@types'", "not set"} {
+		t.Run(root, func(t *testing.T) {
+			text := "======== Resolving type reference directive '../gen/globals', containing file '/work/app/a.ts', root directory " + root + ". ========\n" +
+				"Loading module as file / folder, candidate module location '/work/gen/globals', target file types: Declaration.\n" +
+				"File '/work/gen/globals.d.ts' does not exist.\n" +
+				"File '/work/gen/globals/package.json' does not exist.\n" +
+				"File '/work/gen/globals/index.d.ts' does not exist.\n" +
+				"======== Type reference directive '../gen/globals' was not resolved. ========\n" +
+				"app/a.ts\n   Part of 'files' list in tsconfig.json\n"
+			listing, err := Parse(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []Unresolved{{Kind: TypeReference, From: "/work/app/a.ts", Specifier: "../gen/globals", Candidates: []FailedLookup{{File: "/work/gen/globals.d.ts", Candidate: "/work/gen/globals"}, {File: "/work/gen/globals/package.json", Candidate: "/work/gen/globals"}, {File: "/work/gen/globals/index.d.ts", Candidate: "/work/gen/globals"}}}}
+			if !reflect.DeepEqual(listing.Unresolved, want) || !slices.Equal(listing.Files, []string{"app/a.ts"}) {
+				t.Fatalf("type-reference probes or framing lost: %+v", listing)
+			}
+			candidates := []ResolutionCandidate{{Kind: TypeReference, From: "/work/app/a.ts", Specifier: "../gen/globals", Path: "/work/gen/globals"}}
+			if !reflect.DeepEqual(listing.Candidates, candidates) {
+				t.Fatalf("type-reference candidate was lost or reclassified as a module: %+v", listing.Candidates)
+			}
+		})
+	}
+}
+
+func TestParse_FailedLookupsDoNotBorrowAnotherFallbackCandidate(t *testing.T) {
+	const trace = `======== Resolving module '#value' from '/work/app/consumer.ts'. ========
+Trying substitution '../generated/*', candidate module location: '../generated/value'.
+File '/work/generated/value.ts' does not exist.
+Loading module as file / folder, candidate module location '/work/generated/value', target file types: TypeScript, Declaration.
+File '/work/generated/value.d.ts' does not exist.
+Trying substitution './authored/*', candidate module location: './authored/value'.
+File '/work/app/authored/value.ts' does not exist.
+Loading module '#value' from 'node_modules' folder, target file types: TypeScript, Declaration.
+File '/work/node_modules/value.d.ts' does not exist.
+Trying substitution './retry/*', candidate module location: './retry/value'.
+Using 'imports' subpath '#value' with target './package-target.d.ts'.
+File '/work/app/package-target.d.ts' does not exist.
+======== Module name '#value' was not resolved. ========
+======== Resolving module '#next' from '/work/app/consumer.ts'. ========
+File '/work/next.ts' does not exist.
+======== Module name '#next' was not resolved. ========
+`
+	listing, err := Parse(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Unresolved{
+		{From: "/work/app/consumer.ts", Specifier: "#value", Candidates: []FailedLookup{
+			{File: "/work/generated/value.ts", Candidate: "../generated/value"},
+			{File: "/work/generated/value.d.ts", Candidate: "/work/generated/value"},
+			{File: "/work/app/authored/value.ts", Candidate: "./authored/value"},
+			{File: "/work/node_modules/value.d.ts"},
+			{File: "/work/app/package-target.d.ts"},
+		}},
+		{From: "/work/app/consumer.ts", Specifier: "#next", Candidates: []FailedLookup{{File: "/work/next.ts"}}},
+	}
+	if !reflect.DeepEqual(listing.Unresolved, want) {
+		t.Fatalf("failed lookup borrowed another candidate: %+v", listing.Unresolved)
+	}
+}
+
+func TestParse_UnresolvedPackageTargetsKeepObservedFilenames(t *testing.T) {
+	const text = `======== Resolving module '#generated' from '/work/app/consumer.ts'. ========
+Using 'imports' subpath '#generated' with target './generated/value.d.ts'.
+File '/work/app/generated/value.d.ts' does not exist.
+======== Module name '#generated' was not resolved. ========
+======== Resolving module 'fixture/generated' from '/work/app/consumer.ts'. ========
+Using 'exports' subpath './generated' with target './generated/value.d.ts'.
+File '/work/app/generated/value.d.ts' does not exist.
+======== Module name 'fixture/generated' was not resolved. ========
+======== Resolving module '#redirect' from '/work/consumer.ts'. ========
+Using 'imports' subpath '#redirect' with target 'dependency'.
+======== Resolving module 'dependency' from '/work/'. ========
+File '/work/node_modules/dependency/index.d.ts' does not exist.
+======== Module name '#redirect' was not resolved. ========
+======== Resolving module '#present' from '/work/app/consumer.ts'. ========
+File '/work/app/generated/absent.d.ts' does not exist.
+======== Module name '#present' was successfully resolved to '/work/app/generated/value.d.ts'. ========
+app/consumer.ts
+   Part of 'files' list in tsconfig.json
+`
+	listing, err := Parse(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Unresolved{
+		{From: "/work/app/consumer.ts", Specifier: "#generated", Candidates: []FailedLookup{{File: "/work/app/generated/value.d.ts"}}},
+		{From: "/work/app/consumer.ts", Specifier: "fixture/generated", Candidates: []FailedLookup{{File: "/work/app/generated/value.d.ts"}}},
+		{From: "/work/consumer.ts", Specifier: "#redirect", Candidates: []FailedLookup{{File: "/work/node_modules/dependency/index.d.ts"}}},
+	}
+	if !reflect.DeepEqual(listing.Unresolved, want) || !slices.Equal(listing.Files, []string{"app/consumer.ts"}) || len(listing.Edges) != 0 {
+		t.Fatalf("package probes, enclosing importer or successful outcome lost: %+v", listing)
+	}
+	wantTargets := []Edge{
+		{From: "/work/app/consumer.ts", Specifier: "#generated", To: "/work/app/generated/value.d.ts"},
+		{From: "/work/app/consumer.ts", Specifier: "fixture/generated", To: "/work/app/generated/value.d.ts"},
+		{From: "/work/consumer.ts", Specifier: "#redirect", To: "/work/node_modules/dependency/index.d.ts"},
+	}
+	if !reflect.DeepEqual(listing.PackageTargets, wantTargets) {
+		t.Fatalf("package targets lost the enclosing importer or retained an unrelated resolution: %+v", listing.PackageTargets)
+	}
+}
+
+func TestParse_PackageFallbackTargets(t *testing.T) {
+	for _, field := range []string{"imports", "exports"} {
+		for _, resolved := range []bool{false, true} {
+			outcome := "not resolved"
+			probe := "File '/work/o'brien/generated/value.d.ts' does not exist.\n"
+			if resolved {
+				outcome = "successfully resolved to '/work/o'brien/generated/value.d.ts' with Package ID 'fixture/generated/value.d.ts@1.0.0'"
+				probe = "File '/work/o'brien/generated/value.d.ts' exists - use it as a name resolution result.\n"
+			}
+			text := "======== Resolving module '#generated' from '/work/o'brien/consumer.ts'. ========\n" +
+				"Module name '#generated', matched pattern '#generated'.\n" +
+				"Trying substitution './nonexistent.d.ts', candidate module location: './nonexistent.d.ts'.\n" +
+				"File '/work/o'brien/nonexistent.d.ts' does not exist.\n" +
+				"Using '" + field + "' subpath '#generated' with target './generated/absent.d.ts'.\n" +
+				"File '/work/o'brien/generated/absent.d.ts' does not exist.\n" +
+				"Using '" + field + "' subpath '#generated' with target './generated/value.d.ts'.\n" + probe +
+				"======== Module name '#generated' was " + outcome + ". ========\n" +
+				"======== Resolving module '#paths' from '/work/consumer.ts'. ========\n" +
+				"File '/work/generated/absent.d.ts' does not exist.\n" +
+				"======== Module name '#paths' was not resolved. ========\n" +
+				"======== Resolving module '#present' from '/work/consumer.ts'. ========\n" +
+				"======== Module name '#present' was successfully resolved to '/work/generated/present.d.ts'. ========\n" +
+				"consumer.ts\n   Part of 'files' list in tsconfig.json\n"
+			listing, err := Parse(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []Edge{
+				{Kind: Import, From: "/work/o'brien/consumer.ts", Specifier: "#generated", To: "/work/o'brien/generated/absent.d.ts"},
+				{Kind: Import, From: "/work/o'brien/consumer.ts", Specifier: "#generated", To: "/work/o'brien/generated/value.d.ts"},
+			}
+			if !reflect.DeepEqual(listing.PackageTargets, want) || !slices.Equal(listing.Files, []string{"consumer.ts"}) {
+				t.Fatalf("%s resolved=%t: package fallback targets include paths probes or lose the compiler target: %+v", field, resolved, listing)
+			}
+			if resolved {
+				wantResolution := Resolution{
+					Edge:          want[1],
+					Candidates:    []FailedLookup{{File: "/work/o'brien/nonexistent.d.ts", Candidate: "./nonexistent.d.ts"}, {File: "/work/o'brien/generated/absent.d.ts"}},
+					Substitutions: []string{"./nonexistent.d.ts"},
+					FromPackage:   true,
+				}
+				if len(listing.Resolutions) != 2 || !reflect.DeepEqual(listing.Resolutions[0], wantResolution) {
+					t.Fatalf("package fallback was attributed to the failed paths substitution: %+v", listing.Resolutions)
+				}
+			}
+		}
+	}
+}
+
+func TestParse_SubstitutionsKeepEnclosingResolutionAndDoNotLeak(t *testing.T) {
+	const text = `======== Resolving module 'choice' from '/work/o'brien/consumer.ts'. ========
+Trying substitution '../o'brien/*', candidate module location: '../o'brien/choice'.
+File '/work/o'brien/choice.ts' does not exist.
+Trying substitution './generated/*', candidate module location: './generated/choice'.
+File '/work/generated/choice.ts' does not exist.
+Trying substitution './types/v2/*', candidate module location: './types/v2/index'.
+======== Module name 'choice' was successfully resolved to '/work/generated/types/v2/index.d.ts'. ========
+======== Resolving module '#redirect' from '/work/consumer.ts'. ========
+Trying substitution './missing', candidate module location: './missing'.
+Using 'imports' subpath '#redirect' with target 'dependency'.
+======== Resolving module 'dependency' from '/work/'. ========
+Trying substitution './nested', candidate module location: './nested'.
+======== Module name '#redirect' was successfully resolved to '/work/dependency/index.d.ts'. ========
+======== Resolving module 'absent' from '/work/consumer.ts'. ========
+Trying substitution './absent', candidate module location: './absent'.
+======== Module name 'absent' was not resolved. ========
+======== Resolving module 'next' from '/work/consumer.ts'. ========
+======== Module name 'next' was successfully resolved to '/work/next.ts'. ========
+`
+	listing, err := Parse(strings.ReplaceAll(text, "\n", "\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Resolution{
+		{
+			Edge:          Edge{Kind: Import, From: "/work/o'brien/consumer.ts", Specifier: "choice", To: "/work/generated/types/v2/index.d.ts"},
+			Candidates:    []FailedLookup{{File: "/work/o'brien/choice.ts", Candidate: "../o'brien/choice"}, {File: "/work/generated/choice.ts", Candidate: "./generated/choice"}},
+			Substitutions: []string{"../o'brien/*", "./generated/*", "./types/v2/*"},
+		},
+		{
+			Edge:          Edge{Kind: Import, From: "/work/consumer.ts", Specifier: "#redirect", To: "/work/dependency/index.d.ts"},
+			Substitutions: []string{"./missing", "./nested"},
+			FromPackage:   true,
+		},
+		{Edge: Edge{Kind: Import, From: "/work/consumer.ts", Specifier: "next", To: "/work/next.ts"}},
+	}
+	if !reflect.DeepEqual(listing.Resolutions, want) {
+		t.Fatalf("substitutions lost their enclosing outcome or leaked into the next frame: %+v", listing.Resolutions)
+	}
+}
+
+func TestParse_SelectedResolutionFilename(t *testing.T) {
+	for _, test := range []struct {
+		kind   EdgeKind
+		name   string
+		suffix string
+	}{
+		{Import, "Module name", ""},
+		{Import, "Module name", " with Package ID 'fixture/value.d.ts@1.0.0'"},
+		{TypeReference, "Type reference directive", ", primary: true"},
+		{TypeReference, "Type reference directive", " with Package ID '@types/fixture/index.d.ts@1.0.0', primary: false"},
+	} {
+		start := "======== Resolving module 'fixture' from '/work/consumer.ts'. ========\n"
+		if test.kind == TypeReference {
+			start = "======== Resolving type reference directive 'fixture', containing file '/work/consumer.ts', root directory not set. ========\n"
+		}
+		line := "======== " + test.name + " 'fixture' was successfully resolved to '/work/o'brien/value.d.ts'" + test.suffix + ". ========"
+		listing, err := Parse(start + "File '/work/absent/value.d.ts' does not exist.\n" + line)
+		want := []Resolution{{Edge: Edge{Kind: test.kind, From: "/work/consumer.ts", Specifier: "fixture", To: "/work/o'brien/value.d.ts"}, Candidates: []FailedLookup{{File: "/work/absent/value.d.ts"}}}}
+		if err != nil || !reflect.DeepEqual(listing.Resolutions, want) {
+			t.Fatalf("lost compiler resolution outcome: %s: %+v, %v", line, listing, err)
+		}
+	}
+}
+
+func TestParse_ResolutionCandidatesRetainOrderWithoutBecomingFilesOrEdges(t *testing.T) {
+	const trace = `======== Resolving module '#generated/runtime' from '/work/app/consumer.ts'. ========
+Loading module as file / folder, candidate module location '/work/first/runtime', target file types: TypeScript, Declaration.
+File '/work/first/runtime.ts' does not exist.
+Loading module as file / folder, candidate module location '/work/generated/runtime', target file types: TypeScript, Declaration.
+======== Module name '#generated/runtime' was successfully resolved to '/work/generated/runtime/index.d.ts'. ========
+======== Resolving module '#missing' from '/work/app/consumer.ts'. ========
+Loading module as file / folder, candidate module location '/work/absent', target file types: TypeScript.
+======== Module name '#missing' was not resolved. ========
+app/consumer.ts
+   Part of 'files' list in tsconfig.json
+error TS2307: missing import
+`
+	listing, err := Parse(strings.ReplaceAll(trace, "\n", "\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ResolutionCandidate{
+		{Kind: Import, From: "/work/app/consumer.ts", Specifier: "#generated/runtime", Path: "/work/first/runtime"},
+		{Kind: Import, From: "/work/app/consumer.ts", Specifier: "#generated/runtime", Path: "/work/generated/runtime"},
+		{Kind: Import, From: "/work/app/consumer.ts", Specifier: "#missing", Path: "/work/absent"},
+	}
+	if !reflect.DeepEqual(listing.Candidates, want) || !slices.Equal(listing.Files, []string{"app/consumer.ts"}) || !slices.Equal(listing.Roots, listing.Files) || len(listing.Edges) != 0 || len(listing.Diagnostics) != 1 {
+		t.Fatalf("candidate locations lost order, attribution or separation from listing facts: %+v", listing)
+	}
+	if len(listing.Resolutions) != 1 || listing.Resolutions[0].To != "/work/generated/runtime/index.d.ts" || len(listing.Unresolved) != 1 || listing.Unresolved[0].Specifier != "#missing" {
+		t.Fatalf("candidate observations lost their enclosing outcome: %+v", listing)
+	}
+}
+
+func TestParse_ResolutionCandidatesRetainImporterAcrossPackageRedirect(t *testing.T) {
+	const text = `======== Resolving module '#alias' from '/work/app/source.ts'. ========
+Using 'imports' subpath '#alias' with target 'dependency'.
+======== Resolving module 'dependency' from '/work/'. ========
+Loading module as file / folder, candidate module location '/work/generated/runtime', target file types: TypeScript.
+======== Module name '#alias' was not resolved. ========
+`
+	listing, err := Parse(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ResolutionCandidate{{Kind: Import, From: "/work/app/source.ts", Specifier: "#alias", Path: "/work/generated/runtime"}}
+	if !reflect.DeepEqual(listing.Candidates, want) {
+		t.Fatalf("nested redirect replaced the importing source or specifier: %+v", listing.Candidates)
+	}
+}
+
+func TestParse_ResolutionFramingRejectsLostCandidateAttribution(t *testing.T) {
+	const start = "======== Resolving module '#module' from '/work/app/index.ts'. ========\n"
+	const end = "======== Module name '#module' was not resolved. ========\n"
+	const candidate = "Loading module as file / folder, candidate module location '/work/generated', target file types: TypeScript.\n"
+	const redirect = "Using 'imports' subpath '#module' with target 'dependency'.\n"
+	const nested = "======== Resolving module 'dependency' from '/work/'. ========\n"
+	for name, text := range map[string]string{
+		"nested without redirect":     start + start + end + end,
+		"unfinished":                  start,
+		"mismatched end":              start + strings.ReplaceAll(end, "#module", "#other"),
+		"mismatched kind":             start + strings.ReplaceAll(end, "Module name", "Type reference directive"),
+		"unframed end":                end,
+		"unframed candidate":          candidate,
+		"malformed candidate":         start + "Loading module as file / folder, unknown format\n" + end,
+		"relative candidate":          start + strings.ReplaceAll(candidate, "/work/generated", "generated") + end,
+		"relative importer":           strings.ReplaceAll(start, "/work/app/index.ts", "app/index.ts") + end,
+		"unknown boundary":            "======== Unrecognised resolver boundary ========\n",
+		"unknown active boundary":     start + "======== Unrecognised resolver boundary ========\n" + end,
+		"different redirect target":   start + redirect + strings.ReplaceAll(nested, "dependency", "other") + end,
+		"nonadjacent redirect":        start + redirect + "another trace line\n" + nested + end,
+		"exports redirect":            start + strings.ReplaceAll(redirect, "imports", "exports") + nested + end,
+		"relative redirect directory": start + redirect + strings.ReplaceAll(nested, "/work/", "relative/") + end,
+		"nested outcome":              start + redirect + nested + strings.ReplaceAll(end, "#module", "dependency"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(text); err == nil {
+				t.Fatal("malformed trace accepted")
+			}
+		})
 	}
 }

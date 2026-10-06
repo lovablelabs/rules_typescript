@@ -42,6 +42,12 @@ def write_baseline_tsconfig(ctx):
 def _generated_declaration(file):
     return file.path if not file.is_source and not file.is_directory and file.basename.endswith((".d.ts", ".d.mts", ".d.cts")) else None
 
+def generated_compiler_inputs(check_srcs, dep_dts):
+    return depset(
+        [file for file in dep_dts.to_list() if not file.is_source] + [file for file in check_srcs if not file.is_source],
+        order = "postorder",
+    )
+
 def tsconfig_action(
         ctx,
         tsgo,
@@ -104,6 +110,7 @@ def tsconfig_action(
         inputs = depset(
             check_srcs + tsconfig_chain + retained_types,
             transitive = [tsgo.files],
+            order = "postorder",
         ),
         outputs = [tsconfig, options_file],
         executable = get_tools_toolchain(ctx).tsaction,

@@ -682,14 +682,23 @@ func (it *IT) Runfile(rel string) string {
 func (it *IT) Exec(
 	logName string, env []string, name string, args ...string,
 ) (*Log, error) {
-	fmt.Printf("INFO: %s %s %s\n", strings.Join(env, " "), name,
-		strings.Join(args, " "))
+	return it.ExecWithOutput(logName, nil, env, name, args...)
+}
+
+func (it *IT) ExecWithOutput(
+	logName string, output io.Writer, env []string, name string, args ...string,
+) (*Log, error) {
+	fmt.Printf("INFO: executing %s\n", logName)
 	cmd := exec.Command(name, args...)
 	cmd.Dir = it.WorkspaceDir
 	cmd.Env = append(nestedEnv(), env...)
 	out := &strings.Builder{}
-	cmd.Stdout = out
-	cmd.Stderr = out
+	var writer io.Writer = out
+	if output != nil {
+		writer = io.MultiWriter(out, output)
+	}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
 	err := cmd.Run()
 	log := &Log{Path: it.Scratch(logName), Text: out.String()}
 	if writeErr := os.WriteFile(log.Path, []byte(log.Text), 0o644); writeErr != nil {

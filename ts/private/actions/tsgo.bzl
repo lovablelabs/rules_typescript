@@ -16,6 +16,7 @@ a file a label outside deps owns fails the action naming that label
 listing lacks that the chain's exclude names.
 """
 
+load("//ts/private:editor_path.bzl", "editor_project_path")
 load("//ts/private:providers.bzl", "label_text")
 load("//ts/private:toolchain.bzl", "get_tools_toolchain")
 load(":manifest.bzl", "runtime_scope_inputs")
@@ -121,6 +122,47 @@ def _run_tsgo(ctx, run_args, inputs, outputs, mnemonic, checkers):
         progress_message = mnemonic + " %{label}",
         execution_requirements = requirements,
     )
+
+def tsgo_editor(ctx, tsgo, tsconfig, baseline, generated_inputs, importers, overlays, manifests, srcs, chain, dep_dts, npm_files, checkers, generated_srcs = [], inherited_importers = []):
+    # A test or binary's program target edits under the name its user wrote.
+    name = getattr(ctx.attr, "public_name", "") or ctx.label.name
+    editor = ctx.actions.declare_file("{}.ide.tsconfig.json".format(name))
+    bin_dir = ctx.bin_dir.path
+    editor_path = editor_project_path(ctx.label.package, name)
+
+    def validate_output_root(file):
+        if not file.is_source and not file.short_path.startswith("../") and file.root.path != bin_dir:
+            fail("generated editor project {} does not support generated input {} from output root {} (project output root {}): Did you mean to use an authored editor project without generated_sources? Ordinary builds and type checking remain supported.".format(
+                editor_path,
+                file.path,
+                file.root.path,
+                bin_dir,
+            ))
+
+    def generated_input_arg(file):
+        validate_output_root(file)
+        return ("-editor-generated-directory=" if file.is_directory else "-editor-generated-file=") + file.short_path
+
+    args = program_args(ctx, "{}/{}.ide-program".format(tsconfig.dirname, ctx.label.name), srcs, chain, dep_dts, importers, overlays, manifests, generated_srcs, inherited_importers)
+    args.add(tsconfig, format = "-editor-config=%s")
+    args.add(baseline, format = "-editor-baseline=%s")
+    args.add(bin_dir, format = "-editor-bin-dir=%s")
+    args.add_all(generated_inputs, map_each = generated_input_arg, expand_directories = False, allow_closure = True)
+
+    # Defer config validation to the editor action; ordinary builds accept other roots.
+    args.add_all(chain, map_each = validate_output_root, expand_directories = False, allow_closure = True)
+    args.add(editor, format = "-editor-out=%s")
+    args.add("-editor-path=" + editor_path)
+    if ctx.file.tsconfig:
+        args.add(ctx.file.tsconfig, format = "-tsconfig=%s")
+    args.add("--")
+    args.add(tsgo.tsgo_binary)
+    args.add("--project", tsconfig)
+
+    # Traces retain suppressed imports; diagnostics retain missing reference paths.
+    args.add_all(["--noEmit", "--traceResolution", "--explainFiles", "--pretty", "false"])
+    _run_tsgo(ctx, args, program_inputs(tsconfig, srcs, chain, dep_dts, npm_files, tool_files = tsgo.files), [editor], "TsIdeProject", checkers)
+    return editor
 
 def tsgo_check(
         ctx,

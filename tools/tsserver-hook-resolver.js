@@ -60,6 +60,7 @@ function createResolutionSource({ workspaceRoot, workerPath, onUpdate }) {
   // of its .d.ts / .ts.
   const cache = new Map();
   let ready = false;
+  let worker;
 
   // TSSERVER_HOOK_PRELOAD_MAP populates the cache synchronously, so a test can
   // assert against a fixed map without racing the worker.
@@ -81,37 +82,35 @@ function createResolutionSource({ workspaceRoot, workerPath, onUpdate }) {
     process.env.TSSERVER_HOOK_NO_WORKER === '1' ||
     process.env.TSSERVER_HOOK_NO_WORKER === 'true';
 
+  function receiveMap(msg) {
+    if (msg.type !== 'resolution-map') return;
+    cache.clear();
+    for (const [key, value] of Object.entries(msg.data)) {
+      cache.set(key, value);
+    }
+    ready = true;
+    debug(`resolution map ready: ${cache.size} entries`);
+    if (onUpdate) {
+      try {
+        onUpdate();
+      } catch (e) {
+        debug(`onUpdate failed: ${e.message}`);
+      }
+    }
+  }
+
   if (!skipWorker && fs.existsSync(workerPath)) {
     try {
-      const worker = new Worker(workerPath, { workerData: { workspaceRoot } });
-
-      // unref() so a short-lived process (a test, a one-shot tool) is not held
-      // open by the worker. tsserver runs indefinitely, so it changes nothing
-      // there.
-      worker.unref();
-
-      worker.on('message', (msg) => {
-        if (msg.type !== 'resolution-map') return;
-        cache.clear();
-        for (const [key, value] of Object.entries(msg.data)) {
-          cache.set(key, value);
-        }
-        ready = true;
-        debug(`resolution map ready: ${cache.size} entries`);
-        if (onUpdate) {
-          try {
-            onUpdate();
-          } catch (e) {
-            debug(`onUpdate failed: ${e.message}`);
-          }
-        }
-      });
+      worker = new Worker(workerPath, { workerData: { workspaceRoot } });
+      worker.on('message', receiveMap);
 
       // Non-fatal: without a map every lookup misses and standard resolution stands.
       worker.on('error', (err) => debug(`worker error: ${err.message}`));
       worker.on('exit', (code) => {
         if (code !== 0) debug(`worker exited with code ${code}`);
       });
+      // Message listeners re-reference the worker; unref last so one-shot callers can exit.
+      worker.unref();
     } catch (e) {
       debug(`failed to spawn worker: ${e.message}`);
     }
@@ -127,6 +126,13 @@ function createResolutionSource({ workspaceRoot, workerPath, onUpdate }) {
   }
 
   return {
+    dispose() {
+      const active = worker;
+      worker = undefined;
+      active?.off('message', receiveMap);
+      cache.clear();
+      return active?.terminate();
+    },
     resolve(moduleName) {
       const hit = lookup(moduleName);
       return hit ? buildResolvedModule(hit) : undefined;

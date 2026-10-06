@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
@@ -718,6 +719,51 @@ func TestTypesEntryIsADepOnTheTargetStagingIt(t *testing.T) {
 		t.Errorf("%d src(s) sit under another package:\n      %s",
 			len(crossing), strings.Join(crossing, "\n      "))
 	}
+
+	for _, selected := range []struct{ src, config string }{
+		{"tsconfig.build.json", fixture.files["worker/test/tsconfig.json"]},
+		{"config/tsconfig.build.json", `{"extends":"../../tsconfig.json","compilerOptions":{"types":["../../worker-configuration.d.ts"]},"include":["../*.ts"]}`},
+	} {
+		t.Run("selected_config_keeps_missing_ancestor_codegen/"+selected.src, func(t *testing.T) {
+			root := t.TempDir()
+			writeWorkspace(t, root, fixture.files)
+			applyMutation(t, root, mutation)
+			writeWorkspace(t, root, map[string]string{
+				"worker/test/" + selected.src: selected.config,
+				"worker/test/BUILD.bazel": fmt.Sprintf(`load("@rules_typescript//ts:defs.bzl", "ts_config")
+ts_config(
+    name = "tsconfig",
+    src = %q, # keep
+)
+`, selected.src),
+			})
+			var before map[string]string
+			for _, wrapper := range []string{
+				`{"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`,
+				fmt.Sprintf(`{"extends":%q,"compilerOptions":{"types":[]},"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`, "./"+selected.src),
+			} {
+				writeWorkspace(t, root, map[string]string{"worker/test/tsconfig.json": wrapper})
+				captureLog(t, func() { convergeGazelle(t, root) })
+				r := onlyRuleOfKind(t, root, "worker/test", "ts_test")
+				if deps := r.AttrStrings("deps"); !contains(deps, "//worker:worker_types") {
+					t.Fatalf("selected config %s lost its missing ancestor codegen dependency: deps = %v, wrapper = %s",
+						selected.src, deps, wrapper)
+				}
+				if config := onlyRuleOfKind(t, root, "worker/test", "ts_config"); config.AttrString("src") != selected.src {
+					t.Fatalf("selected config src = %q, want %q", config.AttrString("src"), selected.src)
+				}
+				if before == nil {
+					before = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("solution wrapper changed the generated targets:\n%s", diff)
+				}
+				captureLog(t, func() { convergeGazelle(t, root) })
+				if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("selected config targets changed on the second run:\n%s", diff)
+				}
+			}
+		})
+	}
 }
 
 // Failed analysis in gazelle_roundtrip: the authored scope staged over //pooled's rewritten package.json.
@@ -770,6 +816,356 @@ func requireNoTsConfigTypesFilegroup(t *testing.T, root string) {
 		if ruleNamed(loadRules(t, root, pkg), "filegroup", "tsconfig_types") != nil {
 			t.Errorf("//%s writes filegroup(tsconfig_types); a program reaches a checked-in declaration through the target that owns it and a generated one through the codegen:\n%s",
 				pkg, indent(buildFileText(t, root, pkg)))
+		}
+	}
+}
+
+func TestEditorRefreshDoesNotChangeDiscoveredInputs(t *testing.T) {
+	requireTsgo(t)
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":                       `{"files":["index.ts"]}`,
+		"index.ts":                            "export const root = 1;\n",
+		"pkg/tsconfig.json":                   `{"files":["index.ts"]}`,
+		"pkg/index.ts":                        "export const nested = 1;\n",
+		"pkg/.bazel/other.json":               `{}`,
+		"pkg/.bazel/tsconfig-other/data.json": `{}`,
+		"pkg/.hidden/data.json":               `{}`,
+	})
+	convergeGazelle(t, root)
+	before := convergeSnapshot(t, root)
+	for _, name := range []string{".bazel/other.json", ".bazel/tsconfig-other/data.json", ".hidden/data.json"} {
+		if !strings.Contains(before["pkg/BUILD.bazel"], name) {
+			t.Fatalf("unrelated authored data missing before refresh: %s", name)
+		}
+	}
+	writeWorkspace(t, root, map[string]string{
+		".bazel/tsconfig/root_test.json":       `{"files":["../../index.ts"]}`,
+		"pkg/.bazel/tsconfig/pkg_test.json":    `{"files":["../../index.ts"]}`,
+		"pkg/.bazel/tsconfig/nested/data.json": `{}`,
+	})
+	convergeGazelle(t, root)
+	if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+		t.Fatalf("editor refresh changed discovered inputs:\n%s", diff)
+	}
+	writeWorkspace(t, root, map[string]string{
+		"pkg/.bazel/tsconfig/tsconfig.json": `{"extends":"./missing-authored-config.json"}`,
+	})
+	convergeGazelle(t, root)
+	if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+		t.Fatalf("editor cache config changed discovered inputs:\n%s", diff)
+	}
+	for _, dir := range []string{".bazel/tsconfig", "pkg/.bazel/tsconfig"} {
+		if err := os.RemoveAll(filepath.Join(root, dir)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	convergeGazelle(t, root)
+	if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+		t.Fatalf("editor cache deletion changed discovered inputs:\n%s", diff)
+	}
+}
+
+func TestEquivalentKeptConfigLabelsPreserveCompileInputs(t *testing.T) {
+	requireTsgo(t)
+	for _, filename := range []string{"tsconfig.json", "tsconfig.build.json"} {
+		for _, prefix := range []string{"", ":", "//app:", "@//app:"} {
+			for _, keep := range []string{"attribute", "rule"} {
+				src := prefix + filename
+				t.Run(filename+"/"+src+"/"+keep, func(t *testing.T) {
+					attrKeep, ruleKeep := "", ""
+					if keep == "attribute" {
+						attrKeep = " # keep"
+					} else {
+						ruleKeep = " # keep"
+					}
+					files := map[string]string{
+						"app/tsconfig.json": `{"files":[],"references":[]}`,
+						"app/input.ts":      "import { value } from '../lib/value';\nexport const result = value;\n",
+						"app/ignored.ts":    "export const ignored = 1;\n",
+						"lib/tsconfig.json": `{"files":["value.ts"]}`,
+						"lib/value.ts":      "export const value = 1;\n",
+						"app/BUILD.bazel": fmt.Sprintf(`load("@rules_typescript//ts:defs.bzl", "ts_config")
+ts_config(
+    name = "tsconfig",
+    src = %q,%s
+)%s
+`, src, attrKeep, ruleKeep),
+					}
+					files["app/"+filename] = `{"files":["input.ts"]}`
+					root := writeTree(t, files)
+					convergeGazelle(t, root)
+					config := onlyRuleOfKind(t, root, "app", "ts_config")
+					if got := config.AttrString("src"); got != src {
+						t.Fatalf("kept config src = %q, want %q", got, src)
+					}
+					compiled := onlyRuleOfKind(t, root, "app", "ts_compile")
+					wantStrings(t, "selected program inputs", compiled.AttrStrings("srcs"), []string{"input.ts"})
+					wantStrings(t, "selected program dependencies", compiled.AttrStrings("deps"), []string{"//lib"})
+					if got := compiled.AttrString("tsconfig"); got != ":tsconfig" {
+						t.Fatalf("compile tsconfig = %q, want :tsconfig", got)
+					}
+					before := convergeSnapshot(t, root)
+					convergeGazelle(t, root)
+					if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+						t.Fatalf("equivalent kept label changed on the second run:\n%s", diff)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestKeptConfigReferencesPreserveCompileTargets(t *testing.T) {
+	requireTsgo(t)
+	for _, src := range []string{"//config:baseline.json", "//config:baseline", "@settings//:baseline.json", ":baseline"} {
+		t.Run(src, func(t *testing.T) {
+			root := writeTree(t, map[string]string{
+				"app/tsconfig.json":    `{"files":["input.ts"]}`,
+				"app/input.ts":         "export const value = 1;\n",
+				"config/baseline.json": `{"compilerOptions":{"strict":true}}`,
+				"config/BUILD.bazel": `exports_files(["baseline.json"], visibility = ["//visibility:public"])
+filegroup(name = "baseline", srcs = ["baseline.json"], visibility = ["//visibility:public"])
+`,
+				"app/BUILD.bazel": fmt.Sprintf(`load("@rules_typescript//ts:defs.bzl", "ts_config")
+ts_config(
+    name = "tsconfig",
+    src = %q,
+) # keep
+filegroup(name = "baseline", srcs = ["tsconfig.json"])
+`, src),
+			})
+			convergeGazelle(t, root)
+			config := onlyRuleOfKind(t, root, "app", "ts_config")
+			if got := config.AttrString("src"); got != src {
+				t.Fatalf("kept config src = %q, want %q", got, src)
+			}
+			compiled := onlyRuleOfKind(t, root, "app", "ts_compile")
+			wantStrings(t, "authored program inputs", compiled.AttrStrings("srcs"), []string{"input.ts"})
+			if got := compiled.AttrString("tsconfig"); got != ":tsconfig" {
+				t.Fatalf("compile tsconfig = %q, want :tsconfig", got)
+			}
+			if dangling := danglingLabels(t, root); len(dangling) != 0 {
+				t.Fatalf("kept config has dangling labels: %v", dangling)
+			}
+			before := convergeSnapshot(t, root)
+			convergeGazelle(t, root)
+			if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+				t.Fatalf("kept config reference changed on the second run:\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestNestedSelectedBaseKeepsConfigChainAcrossEditorRefresh(t *testing.T) {
+	requireTsgo(t)
+	for _, selected := range []struct{ base, filename string }{
+		{"abase", "tsconfig.build.json"},
+		{"abase", "tsconfig.json"},
+		{"zbase", "tsconfig.build.json"},
+		{"zbase", "tsconfig.json"},
+	} {
+		base, filename := selected.base, selected.filename
+		t.Run(base+"/"+filename, func(t *testing.T) {
+			root := writeTree(t, map[string]string{
+				"tsconfig.json": `{"compilerOptions":{"strict":true},"files":["root.ts"]}`,
+				"root.ts":       "export const root = 1;\n",
+				"app/BUILD.bazel": loadDefs + `"ts_config")
+ts_config(
+    name = "tsconfig",
+    src = "tsconfig.build.json", # keep
+)
+`,
+				"app/tsconfig.build.json": fmt.Sprintf(`{"extends":"../%s/config/%s","files":["input.ts"]}`, base, filename),
+				"app/tsconfig.json":       `{"files":[],"include":[],"references":[]}`,
+				"app/input.ts":            fmt.Sprintf("import { value } from '../%s/value';\nexport const result = value;\n", base),
+				base + "/BUILD.bazel": fmt.Sprintf(loadDefs+`"ts_config")
+ts_config(
+    name = "tsconfig",
+    src = "config/%s", # keep
+)
+`, filename),
+				base + "/config/" + filename:   `{"extends":"../../tsconfig.json","files":["../value.ts"]}`,
+				base + "/tsconfig.json":        `{"files":[],"include":[],"references":[]}`,
+				base + "/value.ts":             "export const value = 1;\n",
+				base + "/nested/tsconfig.json": fmt.Sprintf(`{"extends":"../config/%s","files":["input.ts"]}`, filename),
+				base + "/nested/input.ts":      "export const nested = 1;\n",
+			})
+			var before map[string]string
+			for _, step := range []struct {
+				name  string
+				files map[string]string
+			}{
+				{name: "authored"},
+				{
+					name: "app_editor_refresh",
+					files: map[string]string{
+						"app/tsconfig.json":            `{"_comment":"bazel run //:refresh_tsconfig","extends":"./tsconfig.build.json","compilerOptions":{"types":[]},"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/app.json"}]}`,
+						"app/.bazel/tsconfig/app.json": `{"files":["../../input.ts"]}`,
+					},
+				},
+				{
+					name: "base_editor_refresh",
+					files: map[string]string{
+						base + "/tsconfig.json":             fmt.Sprintf(`{"_comment":"bazel run //:refresh_tsconfig","extends":"./config/%s","compilerOptions":{"strict":false},"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/base.json"}]}`, filename),
+						base + "/.bazel/tsconfig/base.json": `{"files":["../../value.ts"]}`,
+					},
+				},
+			} {
+				t.Run(step.name, func(t *testing.T) {
+					writeWorkspace(t, root, step.files)
+					convergeGazelle(t, root)
+					for _, config := range []struct {
+						pkg, src string
+						deps     []string
+					}{
+						{"app", "tsconfig.build.json", []string{"//" + base + ":tsconfig"}},
+						{base, "config/" + filename, []string{"//:tsconfig"}},
+						{base + "/nested", "tsconfig.json", []string{"//" + base + ":tsconfig"}},
+						{"", "tsconfig.json", nil},
+					} {
+						r := onlyRuleOfKind(t, root, config.pkg, "ts_config")
+						if got := r.AttrString("src"); got != config.src {
+							t.Fatalf("//%s:tsconfig source = %q, want %q", config.pkg, got, config.src)
+						}
+						wantStrings(t, config.pkg+" config chain", r.AttrStrings("deps"), config.deps)
+					}
+					compiled := onlyRuleOfKind(t, root, "app", "ts_compile")
+					wantStrings(t, "selected program inputs", compiled.AttrStrings("srcs"), []string{"input.ts"})
+					wantStrings(t, "selected program dependencies", compiled.AttrStrings("deps"), []string{"//" + base})
+					if got := compiled.AttrString("tsconfig"); got != ":tsconfig" {
+						t.Fatalf("compile tsconfig = %q, want :tsconfig", got)
+					}
+					nested := onlyRuleOfKind(t, root, base+"/nested", "ts_compile")
+					wantStrings(t, "independent nested program inputs", nested.AttrStrings("srcs"), []string{"input.ts"})
+					if dangling := danglingLabels(t, root); len(dangling) != 0 {
+						t.Fatalf("config chain has dangling labels: %v", dangling)
+					}
+					if before == nil {
+						before = convergeSnapshot(t, root)
+					} else if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+						t.Fatalf("editor refresh changed the generated graph:\n%s", diff)
+					}
+					convergeGazelle(t, root)
+					if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+						t.Fatalf("config chain changed on the second run:\n%s", diff)
+					}
+					for _, name := range []string{"BUILD.bazel", "BUILD"} {
+						if _, err := os.Stat(filepath.Join(root, base, "config", name)); !os.IsNotExist(err) {
+							t.Fatalf("selected config gained a child BUILD boundary %s: %v", name, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNestedSelectedConfigSiblingBasePreservesPackageBoundary(t *testing.T) {
+	requireTsgo(t)
+	for _, explicitBase := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit_base_%t", explicitBase), func(t *testing.T) {
+			deps, base := "", ""
+			if explicitBase {
+				deps = `    deps = [":base"], # keep
+`
+				base = `ts_config(name = "base", src = "config/tsconfig.json") # keep
+`
+			}
+			root := writeTree(t, map[string]string{
+				"app/BUILD.bazel": loadDefs + `"ts_config")
+ts_config(
+    name = "tsconfig",
+    src = "config/build.json", # keep
+` + deps + `)
+` + base,
+				"app/config/build.json":    `{"extends":"./tsconfig.json","files":["../input.ts"]}`,
+				"app/config/tsconfig.json": `{"compilerOptions":{"strict":true},"files":[],"include":[]}`,
+				"app/input.ts":             "export const value: string = 'value';\n",
+			})
+			var before map[string]string
+			for run := range 2 {
+				logged := captureLog(t, func() { convergeGazelle(t, root) })
+				for _, name := range []string{"BUILD.bazel", "BUILD"} {
+					if _, err := os.Stat(filepath.Join(root, "app/config", name)); !os.IsNotExist(err) {
+						t.Fatalf("run %d split the kept source label with app/config/%s: %v", run+1, name, err)
+					}
+				}
+				selected := ruleNamed(loadRules(t, root, "app"), "ts_config", "tsconfig")
+				if selected == nil || selected.AttrString("src") != "config/build.json" {
+					t.Fatalf("run %d lost the ancestor-owned selected config", run+1)
+				}
+				var wantDeps []string
+				if explicitBase {
+					wantDeps = []string{":base"}
+					base := ruleNamed(loadRules(t, root, "app"), "ts_config", "base")
+					if base == nil || base.AttrString("src") != "config/tsconfig.json" {
+						t.Fatalf("run %d lost the explicit base contract", run+1)
+					}
+				} else {
+					for _, required := range []string{"app/config/build.json", "explicit ts_config", "existing BUILD package", "//app:tsconfig", "# keep"} {
+						if !strings.Contains(logged, required) {
+							t.Errorf("missing explicit base guidance %q:\n%s", required, logged)
+						}
+					}
+				}
+				wantStrings(t, "selected config dependencies", selected.AttrStrings("deps"), wantDeps)
+				compiled := onlyRuleOfKind(t, root, "app", "ts_compile")
+				if !contains(compiled.AttrStrings("srcs"), "input.ts") || compiled.AttrString("tsconfig") != ":tsconfig" {
+					t.Fatalf("run %d withdrew or changed the selected program: %s", run+1, buildFileText(t, root, "app"))
+				}
+				if dangling := danglingLabels(t, root); len(dangling) != 0 {
+					t.Fatalf("run %d produced dangling labels: %v", run+1, dangling)
+				}
+				if before == nil {
+					before = convergeSnapshot(t, root)
+				} else if diff := snapshotDiff(before, convergeSnapshot(t, root)); diff != "" {
+					t.Fatalf("selected config changed on the second run:\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectedConfigBaseDoesNotCrossNestedBuildPackage(t *testing.T) {
+	for _, selected := range []struct{ base, filename string }{
+		{"abase", "tsconfig.build.json"},
+		{"abase", "tsconfig.json"},
+		{"zbase", "tsconfig.build.json"},
+		{"zbase", "tsconfig.json"},
+	} {
+		base, filename := selected.base, selected.filename
+		for _, nestedOwner := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%s/nested_owner_%t", base, filename, nestedOwner), func(t *testing.T) {
+				files := map[string]string{
+					"app/tsconfig.json":          fmt.Sprintf(`{"extends":"../%s/config/%s","files":["input.ts"]}`, base, filename),
+					"app/input.ts":               "export const value = 1;\n",
+					base + "/config/" + filename: `{"compilerOptions":{"strict":true},"files":["input.ts"]}`,
+					base + "/config/input.ts":    "export const nested = 1;\n",
+					base + "/config/BUILD.bazel": fmt.Sprintf(`exports_files([%q])`, filename),
+					base + "/BUILD.bazel": fmt.Sprintf(loadDefs+`"ts_config")
+ts_config(name = "tsconfig", src = "config/%s") # keep
+`, filename),
+				}
+				var want []string
+				if nestedOwner {
+					files[base+"/config/BUILD.bazel"] = fmt.Sprintf(loadDefs+`"ts_config")
+ts_config(name = "tsconfig", src = %q) # keep
+`, filename)
+				}
+				if nestedOwner || filename == "tsconfig.json" {
+					want = []string{"//" + base + "/config:tsconfig"}
+				}
+				g := generateAll(t, writeTree(t, files), func(c *config.Config) {
+					c.ValidBuildFileNames = []string{"BUILD.bazel", "BUILD"}
+				})
+				selected := mustRule(t, g.results["app"], "ts_config", tsConfigTargetName)
+				wantStrings(t, "base owner within the nearest BUILD package", selected.AttrStrings("deps"), want)
+				if len(want) != 0 {
+					nested := mustRule(t, g.results[base+"/config"], "ts_compile", "config")
+					wantStrings(t, "existing child package inputs", nested.AttrStrings("srcs"), []string{"input.ts"})
+				}
+			})
 		}
 	}
 }

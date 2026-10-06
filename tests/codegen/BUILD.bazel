@@ -10,11 +10,13 @@ Tests:
 """
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("//tests/compiler_options/analysis:analysis_tests.bzl", "declaration_content_edges_test")
-load("//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_test")
-load(":codegen_tests.bzl", "outs_codegen_providers_test")
+load("//ts:defs.bzl", "ts_codegen", "ts_compile", "ts_config", "ts_test")
+load("//ts/private:tsconfig_aspect.bzl", "refresh_workspace_files")
+load(":codegen_tests.bzl", "editor_dependency_inputs_test", "editor_owner_provenance_test", "editor_refresh_runfiles_test", "legacy_owner_consumer_test", "legacy_owner_refresh_test", "legacy_ts_info", "outs_codegen_providers_test")
 
 package(default_visibility = ["//:__pkg__"])
 
@@ -168,4 +170,174 @@ declaration_content_edges_test(
 build_test(
     name = "tree_globals_build_test",
     targets = [":uses_tree_globals"],
+)
+
+# keep
+ts_compile(
+    name = "authored_editor_inputs",
+    srcs = [
+        "input.ts",
+        "tsconfig.tree.json",
+    ],
+    emit = True,
+)
+
+editor_owner_provenance_test(
+    name = "authored_editor_inputs_test",
+    authored = [
+        "input.ts",
+        "tsconfig.tree.json",
+    ],
+    generated = ["input.d.ts"],
+    target_under_test = ":authored_editor_inputs",
+)
+
+editor_owner_provenance_test(
+    name = "scalar_editor_inputs_test",
+    generated = ["generated-globals.d.ts"],
+    target_under_test = ":generated_globals",
+)
+
+editor_owner_provenance_test(
+    name = "tree_editor_inputs_test",
+    generated = ["ambient_tree"],
+    target_under_test = ":globals_tree",
+)
+
+editor_owner_provenance_test(
+    name = "emitted_editor_inputs_test",
+    generated = [
+        "generated.d.ts",
+        "generated.ts",
+    ],
+    target_under_test = ":generated_compile",
+)
+
+write_file(
+    name = "editor_config_base",
+    out = "editor-config-base.json",
+    content = ["{}"],
+)
+
+write_file(
+    name = "editor_config_leaf",
+    out = "editor-config-leaf.json",
+    content = ['{"extends":"./editor-config-base.json","files":["./generated-globals.d.ts"]}'],
+)
+
+# keep
+ts_config(
+    name = "editor_config",
+    src = ":editor_config_leaf",
+    deps = [":editor_config_base"],
+)
+
+# keep
+ts_compile(
+    name = "editor_dependency_consumer",
+    testonly = True,
+    srcs = ["uses_globals.ts"],
+    emit = False,
+    node_modules = "//tests/npm:node_modules",
+    tsconfig = ":editor_config",
+    deps = [
+        ":authored_editor_inputs",
+        ":generated_compile",
+        ":generated_globals",
+        "@npm//:zod",
+    ],
+)
+
+editor_dependency_inputs_test(
+    name = "editor_dependency_inputs_test",
+    authored = [
+        "input.ts",
+        "tsconfig.tree.json",
+    ],
+    configs = [
+        ":editor_config_base",
+        ":editor_config_leaf",
+    ],
+    emitted = ":generated_compile",
+    generated_source = ":generated_ts",
+    target_under_test = ":editor_dependency_consumer",
+)
+
+refresh_workspace_files(
+    name = "editor_inputs_refresh",
+    testonly = True,
+    editor_projects = [":editor_dependency_consumer"],
+)
+
+editor_refresh_runfiles_test(
+    name = "editor_refresh_runfiles_test",
+    configs = [
+        ":editor_config_base",
+        ":editor_config_leaf",
+    ],
+    program = ":editor_dependency_consumer",
+    target_under_test = ":editor_inputs_refresh",
+)
+
+legacy_ts_info(
+    name = "legacy_owner",
+    dep = ":authored_editor_inputs",
+)
+
+# keep
+ts_compile(
+    name = "legacy_owner_compile",
+    srcs = ["input.ts"],
+    emit = False,
+    deps = [":legacy_owner"],
+)
+
+# keep
+ts_test(
+    name = "legacy_owner_runtime_test",
+    srcs = ["generated_source.test.ts"],
+    emit = False,
+    node_modules = "//tests/npm:node_modules",
+    deps = [
+        ":generated_source",
+        ":legacy_owner",
+        "@npm//:vitest",
+    ],
+)
+
+legacy_owner_consumer_test(
+    name = "legacy_owner_compile_analysis_test",
+    dep = ":legacy_owner",
+    target_under_test = ":legacy_owner_compile",
+)
+
+legacy_owner_consumer_test(
+    name = "legacy_owner_test_analysis_test",
+    dep = ":legacy_owner",
+    target_under_test = ":legacy_owner_runtime_test__native_program",
+)
+
+# These refresh fixtures intentionally fail analysis; their asserting tests run normally.
+refresh_workspace_files(
+    name = "legacy_owner_compile_refresh",
+    testonly = True,
+    editor_projects = [":legacy_owner_compile"],
+    tags = ["manual"],
+)
+
+refresh_workspace_files(
+    name = "legacy_owner_test_refresh",
+    testonly = True,
+    editor_projects = [":legacy_owner_runtime_test"],
+    tags = ["manual"],
+)
+
+legacy_owner_refresh_test(
+    name = "legacy_owner_compile_refresh_test",
+    target_under_test = ":legacy_owner_compile_refresh",
+)
+
+legacy_owner_refresh_test(
+    name = "legacy_owner_test_refresh_test",
+    target_under_test = ":legacy_owner_test_refresh",
 )

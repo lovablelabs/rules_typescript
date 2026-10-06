@@ -210,7 +210,14 @@ def _ts_codegen_impl(ctx):
     data = depset([f for f in ctx.outputs.outs if f.extension == "json"], order = "postorder")
     return [
         DefaultInfo(files = files),
-        ts_info(js = js, declarations = declarations, data = data, label = ctx.label),
+        ts_info(
+            js = js,
+            declarations = declarations,
+            data = data,
+            label = ctx.label,
+            source_files = depset(),
+            generated_inputs = declarations,
+        ),
     ]
 
 # ─── Rule declaration ──────────────────────────────────────────────────────────

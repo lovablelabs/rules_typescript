@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/mikn/rules_typescript/ts/tools/tsconfig"
 )
 
 func readPaths(t *testing.T, path string) pathsFile {
@@ -36,7 +38,7 @@ func TestWritePaths_TheChainsMapFromItsWritersDirectory(t *testing.T) {
 	got := readPaths(t, "out.json")
 	want := pathsFile{
 		Dir:   "../../base",
-		Paths: map[string][]string{"@app/*": {"src/*"}, "#lib": {"lib/index.ts"}},
+		Paths: &tsconfig.Paths{{Key: "@app/*", Values: []string{"src/*"}}, {Key: "#lib", Values: []string{"lib/index.ts"}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("paths file = %+v, want %+v", got, want)
@@ -59,7 +61,7 @@ func TestWritePaths_ALeafReplacesTheMapWhole(t *testing.T) {
 	got := readPaths(t, "out.json")
 	want := pathsFile{
 		Dir:   ".",
-		Paths: map[string][]string{"@pkg": {"./lib/pkg.ts"}},
+		Paths: &tsconfig.Paths{{Key: "@pkg", Values: []string{"./lib/pkg.ts"}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("paths file = %+v, want %+v", got, want)
@@ -76,7 +78,7 @@ func TestWritePaths_NoPathsIsAnEmptyMap(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readPaths(t, "out.json")
-	want := pathsFile{Paths: map[string][]string{}}
+	want := pathsFile{Paths: &tsconfig.Paths{}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("paths file = %+v, want %+v", got, want)
 	}

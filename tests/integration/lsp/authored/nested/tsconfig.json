@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "paths": {
+      "#types/*": ["../../generated/generated/types/*"]
+    }
+  },
+  "files": ["consumer.ts"]
+}

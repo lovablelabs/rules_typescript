@@ -10,6 +10,213 @@ read:
    outputs with no tsconfig reload. It is a layer on top of the generated file,
    and it needs editor configuration; the generated file needs none.
 
+## Generated sources in native editors
+
+For generated sources or declaration trees, set
+`ts_refresh_tsconfig(tsconfig = None, generated_sources = True, deps = [...])`.
+The macro rejects `generated_sources = True` with any other `tsconfig` value,
+including its default: native editors need the authored solution wrapper below
+to discover these projects.
+Name the owning program, including its tests when they share the compiler program.
+Refresh materializes the generated inputs in Bazel's output tree and installs
+`<package>/.bazel/tsconfig/<target>.json`; it preserves authored configurations
+and source-side generator outputs. Ignore `.bazel/` in version control.
+Each installed project includes the roots observed for its target. Add new
+sources to the Bazel graph and refresh before the editor checks them; authored
+include patterns cannot pull sibling targets into the installed project.
+Explicit generated `files` entries must name the exact selected filename and
+extension. Refresh rejects an entry absent from the compiler's loaded roots,
+including a missing child of a declared generated tree, and preserves the previous
+editor project; ordinary compilation is unchanged.
+
+Keep the authored program in `tsconfig.build.json`, selected by
+`ts_config(name = "tsconfig", src = "tsconfig.build.json")` with `# keep` on
+`src`. Gazelle reads that selected file and ignores derived editor projects.
+The tracked `tsconfig.json` extends the build config, sets `files` and `include`
+to empty arrays, and references `./.bazel/tsconfig/<target>.json`.
+The [generated-input fixture](../../tests/integration/lsp/generated) shows this
+setup. Package-local placement preserves ancestor lookup for ambient type packages.
+
+Run `bazel run --run_validations=false --output_groups=-_validation //:refresh_tsconfig`
+before opening the editor and after changes to BUILD files or inputs Bazel tracks.
+The output-group flag cancels an explicit `+_validation` in a workspace rc. Use
+`ibazel run` with the same arguments to rerun refresh for those changes;
+`--watchfs` alone does not rebuild. Bazel owns generation and the editor's
+established client owns file-change notifications. No tsserver plugin is required
+for this mode.
+
+Refresh also installs the current plugin package so an already enabled global
+plugin respects the projected aliases. After upgrading the ruleset, run refresh
+and restart the TS server once to load the updated plugin. Later BUILD or
+generator-input refreshes use the same running editor session.
+
+Derived projects retain the native compiler’s effective resolution mode, including
+defaults omitted from its printed configuration. The editor compiler must support
+that mode and the authored options. For example, TypeScript 5.9 rejects Bundler
+resolution with CommonJS modules; use a compatible editor compiler for that
+program rather than changing resolution to hide the diagnostic.
+
+Projection runs `--noEmit --traceResolution --explainFiles` when refresh requests
+it. It performs semantic checking to collect missing reference-path diagnostics
+and uses `--//ts:checkers` for checker threads and Bazel's CPU reservation.
+Consumer semantic errors do not block projection, but generators and declaration
+producers must succeed. In particular, a dependency's type error can prevent
+declaration emission with `--//ts:declarations=tsgo`. Tracing retains failed
+ordinary import resolutions even when their diagnostics are suppressed. It adds
+output and bypasses the compiler's resolution-result cache. Refresh cost is not
+measured.
+
+Refresh rewrites aliases only where generated output resolution requires it,
+preserving authored specificity and fallback order. An alias selecting an
+authored file inside a generated tree uses that compiler-selected file when
+relocating its candidates would hide it, including extensionless and `.js`
+spellings. Changed selections need another refresh. Other authored aliases and
+npm resolution stay native. Tree aliases and scalar aliases directly naming their
+generated file relocate the original ordered candidates, so adding or deleting
+a preferred candidate changes native fallback without project regeneration.
+Other scalar aliases use the compiler's exact file selection; new source or
+import choices that need exact selection require another refresh. Generated
+JSON inputs use the same projection when `resolveJsonModule` enables their imports.
+Refresh rejects a synthesized tree wildcard when it would outrank an overlapping
+authored suffix alias. Authored aliases keep their key order, including the first
+match among equal-prefix patterns such as `#x/*z` and `#x/*`. Synthesized wildcard
+aliases follow authored aliases, so an equal-prefix synthetic pattern cannot replace the
+authored winner. Unrelated suffix aliases retain native resolution. Refresh projects
+a broad alias such as `#src/*` → `./src/*` over a generated subtree
+`src/generated` for imports such as `#src/generated/value`. At the directory
+boundary, refresh rejects a projection that hides an observed authored sibling
+resolution: moving `generated/model` hides that import's `generated/model.ts`,
+while keeping the checkout directory can revive a deleted generated index. Name
+the authored file explicitly in a distinct alias, or name a file inside the tree.
+Refresh checks the current compiler program; a new source or import choice
+introducing a boundary sibling needs another refresh.
+Generated tree aliases use canonical output paths; relative
+imports and re-exports within those outputs stay in that namespace when a child
+is replaced or deleted. The editor project has no workspace/output `rootDirs`
+overlay through which a deleted child could resolve to a stale checkout twin.
+Generated `typeRoots` also point into canonical output; authored type roots
+retain native type-package lookup. Refresh rejects a relocated root when explicit
+or implicit type-package lookup, or a source `/// <reference types="..." />`
+directive, selects an authored package inside it, including with `types: []`.
+Separate authored and generated type roots so both retain their identity.
+A type root containing a generated child package or scalar declaration cannot
+exclude stale checkout packages. Refresh rejects that shape before replacing
+the installed project: generate the whole
+type root or use an authored editor project without `generated_sources`.
+A generated declaration named by a path-shaped `compilerOptions.types` entry is
+compiled at its source path, so an `exclude` pattern matching that source path
+drops it as well, in builds and in the editor project alike.
+
+Refresh rejects compiler-reported relative edges between authored sources and
+generated output in either direction, including explicit paths through
+`bazel-out`. Installation binds output paths outside the checkout, where those
+relative imports cannot retain their selected files. Use a
+`compilerOptions.paths` alias for the crossing. Relative edges within authored
+sources or within generated output remain native, including authored imports of
+an emitted library whose build resolves through declarations beside its sources.
+Refresh also rejects relative edges that need the build's `rootDirs` overlay and
+compiler-reported unresolved relative references into a declared generated tree,
+including when the canonical child is absent. For scalar reference paths, this
+includes extensionless references whose compiler-reported candidates name a
+generated file. A tsconfig cannot redirect those edges while excluding a checkout
+twin; use an alias or an authored editor project without `generated_sources`.
+
+Preventing stale checkout sources from resolving is best effort, even after
+refresh. With current supported compilers, missing
+`/// <reference path="..." />` targets may appear only as suppressible diagnostics;
+suppression can leave refresh without the reference facts needed to reject the
+edge. This guarantee can be tightened when a supported compiler release exposes
+those facts independently of diagnostic suppression.
+
+Refresh also rejects first-party package `imports` or `exports` that reach
+generated output through checkout paths, including missing targets with stale
+checkout twins and package fallback after all matching `paths` targets fail.
+Use a `compilerOptions.paths` alias into generated output or an
+authored editor project without `generated_sources`. Package imports already
+resolving within canonical output retain native resolution.
+
+Generated refresh also rejects a workspace member reached through an npm link
+when its dependency closure contains original generated compiler inputs, including
+scalar sources, JSON inputs, and generator declaration trees. The build uses the member's store
+copy, while the editor follows pnpm's checkout link; refresh has no mapping between
+those identities. This is a whole-member restriction, even when the current
+compiler listing does not select the generated input. The refusal names the
+member link and a generated producer witness before installation. Authored members
+remain supported when only their emitted declarations or manifests are generated.
+Direct generated inputs outside workspace-member links retain the projection
+support described above; ordinary builds remain supported in either case.
+
+Refresh materializes the producer-owned `package.json` beside generated inputs so
+NodeNext retains their module format on a clean refresh. An effective authored
+package scope with `imports` or `exports` enclosing relocated generated inputs is unsupported:
+its relative namespace changes, including queries the compiler has not observed.
+Refresh rejects it before publishing. Generated package scopes retain their
+producer path and contain only generated members in the compiler-loaded program,
+whether scalar or tree outputs. Config-only inputs and declared but unloaded
+files do not count as program members; compiler-loaded JSON counts even when it
+also supplies configuration. Refresh rejects scopes mixed with retained authored
+members, including files whose module format would change, and renamed producer manifests. Authored
+siblings outside the scope do not conflict. A nearer complete generated package
+scope owns its private imports and self-references, so an outer authored scope
+does not block refresh. Authored inputs keep their original scope.
+
+Generated sources may require a wider `rootDir`, including for `noEmit` projects.
+Declarations and config artifacts do not widen it. When both output directories
+are explicitly disabled, refresh conservatively includes imported generated
+sources in containment. A nonempty containment set gives the read-only editor
+project a filesystem-volume `rootDir`, preserving `composite` while containing
+workspace aliases on that volume and canonical generated paths. With active or
+inherited output directories, the compiler listing must establish containment
+eligibility: imports with unknown external-library membership are
+rejected unless they are also compiler-listed program roots. Authored and unmoved
+inputs do not need this proof.
+
+When source containment requires widening, refresh rejects active or inherited
+`outDir` and `declarationDir`: those options make package resolution depend on
+`rootDir`, even for unobserved queries. This can reject direct-source imports that
+happen to be unaffected. Use an editor configuration without emission output
+directories or an authored editor project without `generated_sources`.
+Projects retaining emission output directories preserve their `rootDir` and resolution context; open these projects through the physical workspace path, because unrelated workspace aliases are not guaranteed to contain canonical generated sources.
+Output-directory support also requires unchanged containment of the effective
+project file by every declared first-party package scope with `imports` or
+`exports`. Moving the config inside a package can enable output-to-source remapping
+without widening `rootDir`, including for declaration-only generated input.
+Refresh rejects that context change before publishing, even when the current map
+uses direct-source targets that happen to be unaffected. Configs without emission
+output directories and scopes with unchanged containment remain supported. Npm
+resolution through the declared `node_modules` chain is excluded from this local
+output-to-source remapping rule.
+
+Generated tree aliases retain native `moduleSuffixes` selection, including
+fallback and deletion. Exact file projection rejects nonempty suffixes because the compiler
+applies them again to the selected filename, potentially selecting another file
+or failing. Aliases already pointing into canonical output need no exact
+projection and retain native suffix selection.
+
+Generated projection also rejects generated inputs from external repositories and
+external authored sources the compiler reads, including `.d.ts` and `emit = False`
+dependencies. This applies even when the consuming target and its authored config
+are local. Ordinary builds can still consume these inputs.
+
+Generated inputs must share the editor project's Bazel output root. Refresh
+rejects local producers built in another configuration, such as through a
+configuration transition, before replacing the installed project. Use an authored
+editor project without `generated_sources` for those programs; ordinary builds
+and type checking remain supported.
+
+It also rejects external authored configs, conflicting selections for an exact
+alias, and aliases needing exact projection
+under `node16` or `nodenext` resolution. Exact paths can hide failed imports in
+another importer's resolution mode. Relocated original candidates, including
+explicit scalar filenames, and unprojected authored aliases retain native
+resolution in those modes. Rejection leaves the installed project intact.
+Use an authored editor project or refresh without `generated_sources` for
+unsupported programs; ordinary builds and type checking remain supported.
+
+Native-editor replacement, deletion, and recovery behavior is not measured.
+Acceptance requires one running editor with an unchanged consumer observing
+all three through its established file-watching adapter.
+
 ## Setup
 
 Declare the target once, in your root `BUILD.bazel`:
@@ -69,11 +276,11 @@ package. This repository's own `.bazelignore` starts with that line.
     `module` and every other option in it, not only `paths`. The generated file
     is a complete config and carries nothing over from yours.
 
-    Move the generator, not your file. Under Gazelle the file keeps its name:
-    a directory is a package because it holds a file named `tsconfig.json`,
-    which tsgo lists, and every target in it names the `ts_config` over that
-    file. Rename it and the next run finds no program there: every rule
-    Gazelle wrote is withdrawn, and the run names the BUILD file. Set
+    By default, Gazelle discovers the program through `tsconfig.json`.
+    Renaming it without selecting the new file through a kept `ts_config.src`
+    leaves no program there, so Gazelle withdraws the rules it wrote. The
+    [generated-source setup](#generated-sources-in-native-editors) uses that
+    explicit selection to retain the authored program. For the default setup, set
     `ts_refresh_tsconfig(tsconfig = "tsconfig.bazel.json")` and `extends` the
     generated file from yours; see
     [Extending the Generated File](#extending-the-generated-file).
@@ -475,9 +682,10 @@ would sit on the same lock a build wants.
    target built in two configurations writes two fragments, deduplicated by
    label with the first config root in sorted order winning, so the merge does
    not depend on what `bazel-out` holds
-4. **File watcher** watches the graph data file, and `bazel-bin` recursively for
-   new `.d.ts` and new fragments; a change to either rebuilds the map. npm
-   packages and path aliases are not in the map: TypeScript resolves both
+4. **Directory watchers** watch the graph data file's parent and canonical output
+   directories and their parents, renewing watches after directory replacement or
+   recreation. Changes to graph data, declarations, or fragments rebuild the map.
+   npm packages and path aliases are not in the map: TypeScript resolves both
    itself, through the checkout's `node_modules` and the tsconfig's `paths`
 
 The main thread is never blocked: the worker builds the map off-thread and posts
@@ -486,17 +694,25 @@ the worker completes.
 
 ### Resolution Priority
 
-1. `.d.ts` in `bazel-bin` — fast, precise (available once a build emitted them)
-2. `.ts` source file — always available, slower for tsserver to process
+For packages resolved through the worker map, including fragment entries, the
+worker tries `index.d.ts`, `index.ts`, and `index.tsx` in that order. For each
+filename, it checks `bazel-bin` before the checkout.
+
+Exact package aliases written by refresh retain the declared entrypoint's
+provenance: authored entrypoints resolve in the checkout, and generated-only
+entrypoints resolve in the output tree. TypeScript applies native extension
+substitution within that namespace. Generated-only entrypoints have no checkout
+fallback.
 
 npm packages are not in the map: TypeScript resolves them itself through the
 checkout's `node_modules`.
 
 ### What a Build Provides
 
-First-party resolution works without `bazel build`, since the source `.ts` files
-are always on disk. A build adds the `.d.ts` of every package a dependent's
-compile read -- of every package with `--output_groups=+declarations`
+Authored first-party entrypoints resolve without `bazel build`; generated
+entrypoints require their producer to run. A build adds the `.d.ts` of every
+package a dependent's compile read -- of every package with
+`--output_groups=+declarations`
 ([Which Tool Emits the Declarations](../rules/ts-compile.md#which-tool-emits-the-declarations))
 -- and, with the aspect enabled, the fragments naming the packages `deps` could
 not reach.

@@ -48,8 +48,11 @@ bazel run //:gazelle
 
 Five things, without program-membership directives.
 
-1. **Every `tsconfig.json`**, listed through tsgo from the repository root:
-   `tsgo -p <dir>/tsconfig.json --noEmit --listFilesOnly --explainFiles
+1. **Every selected compiler configuration**, normally `tsconfig.json`. A kept
+   `src` on the package's canonical `ts_config(name = "tsconfig")` selects an
+   authored alternative independently of an editor solution wrapper. It is listed
+   through tsgo from the repository root:
+   `tsgo -p <selected-config> --noEmit --listFilesOnly --explainFiles
    --pretty false`. The listing is the program's files and every edge between
    them -- each import, module augmentation, `/// <reference>` directive and
    `types` entry, with the file it resolved to. The binary is the toolchain's,

@@ -17,8 +17,8 @@ import (
 // pathsFile is what the generated vitest config reads: the user's map, and the
 // directory its values resolve against relative to the test's package.
 type pathsFile struct {
-	Dir   string              `json:"dir"`
-	Paths map[string][]string `json:"paths"`
+	Dir   string          `json:"dir"`
+	Paths *tsconfig.Paths `json:"paths"`
 }
 
 func writePaths(args []string) error {
@@ -39,7 +39,7 @@ func writePaths(args []string) error {
 	if err != nil {
 		return err
 	}
-	file := pathsFile{Paths: map[string][]string{}}
+	file := pathsFile{Paths: &tsconfig.Paths{}}
 	if chain.Paths != nil {
 		dir := strings.TrimPrefix(filepath.ToSlash(chain.PathsDir), binDir+"/")
 		rel, err := filepath.Rel(filepath.FromSlash(pkg), filepath.FromSlash(dir))

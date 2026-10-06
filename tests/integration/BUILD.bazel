@@ -345,6 +345,23 @@ bazel_integration_test(
 )
 
 bazel_integration_test(
+    name = "gazelle_roundtrip_generated_member_test",
+    timeout = "long",
+    bazel_binaries = bazel_binaries,
+    bazel_version = bazel_binaries.versions.current,
+    data = [
+        ":gazelle_roundtrip_workspace",
+        "//:MODULE.bazel",
+        "@gazelle_roundtrip_tarballs//:registry",
+    ],
+    env = {"GAZELLE_ROUNDTRIP_GROUP": "generated_member"},
+    tags = nested_bazel_tags(),
+    test_runner = "//tests/integration/runners:gazelle_roundtrip_runner",
+    workspace_files = integration_test_utils.glob_workspace_files("gazelle_roundtrip"),
+    workspace_path = "gazelle_roundtrip",
+)
+
+bazel_integration_test(
     name = "gazelle_roundtrip_foreign_test",
     timeout = "long",
     bazel_binaries = bazel_binaries,
@@ -505,7 +522,10 @@ bazel_integration_test(
     timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
-    data = ["//:MODULE.bazel"],
+    data = [
+        "//:MODULE.bazel",
+        "//tests/lsp:generated_editor_runtime",
+    ],
     tags = nested_bazel_tags(shard = "npm"),
     test_runner = "//tests/integration/runners:lsp_runner",
     workspace_files = integration_test_utils.glob_workspace_files("lsp"),
@@ -527,6 +547,7 @@ test_suite(
         ":gazelle_roundtrip_foreign_runtime_scope_test",
         ":gazelle_roundtrip_foreign_runtime_test",
         ":gazelle_roundtrip_foreign_test",
+        ":gazelle_roundtrip_generated_member_test",
         ":gazelle_roundtrip_incremental_test",
         ":gazelle_roundtrip_packages_test",
         ":gazelle_roundtrip_roots_helpers_test",

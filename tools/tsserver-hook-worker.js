@@ -15,8 +15,11 @@ const HOOK_DATA = '.bazel/tsserver-hook-data.json';
 // One per target, written by tsconfig_aspect's `ide_fragments` output group.
 const FRAGMENT_SUFFIX = '.tsconfig-fragment.json';
 const FRAGMENT_FORMAT = 'tsconfig-fragment-v1';
+const BOUNDARY_FILES = new Set(['MODULE.bazel', 'WORKSPACE', 'WORKSPACE.bazel']);
+const BUILD_FILES = new Set(['BUILD.bazel', 'BUILD']);
 
 const DEBUG = !!process.env.TSSERVER_HOOK_DEBUG;
+const directoryWatchers = new Map();
 
 function log(msg) {
   if (DEBUG) {
@@ -34,7 +37,8 @@ function log(msg) {
  */
 function buildResolutionMap() {
   const map = {};
-  const data = readHookData();
+  const watched = new Map();
+  const data = readHookData(watched);
 
   if (!data) {
     log(
@@ -46,7 +50,7 @@ function buildResolutionMap() {
     for (const pkg of data.packages || []) {
       const srcDir = path.join(workspaceRoot, pkg);
       const binDir = path.join(workspaceRoot, 'bazel-bin', pkg);
-      scanPackageForResolution(pkg, srcDir, binDir, map);
+      scanPackageForResolution(pkg, srcDir, binDir, map, watched);
     }
   }
 
@@ -54,11 +58,17 @@ function buildResolutionMap() {
   // replace it; there are none until a build requests the output group.
   let packages = [];
   try {
-    packages = walkWorkspace(workspaceRoot);
+    packages = walkWorkspace(workspaceRoot, watched);
   } catch (e) {
     log(`workspace walk failed: ${e.message}`);
   }
-  mergeFragments(readFragments(packages), map);
+  mergeFragments(readFragments(packages, watched), map, watched);
+
+  for (const [dir, { watcher }] of directoryWatchers) {
+    if (watched.has(dir)) continue;
+    watcher.close();
+    directoryWatchers.delete(dir);
+  }
 
   return map;
 }
@@ -75,9 +85,10 @@ function buildResolutionMap() {
  *
  * @returns {string[]}
  */
-function fragmentRoots() {
+function fragmentRoots(watched) {
   const roots = new Set();
   const add = (p) => {
+    watchDirectory(p, workspaceRoot, watched);
     try {
       if (fs.statSync(p).isDirectory()) roots.add(fs.realpathSync(p));
     } catch (_) {
@@ -87,6 +98,7 @@ function fragmentRoots() {
 
   add(path.join(workspaceRoot, 'bazel-bin'));
   const outDir = path.join(workspaceRoot, 'bazel-out');
+  watchDirectory(outDir, workspaceRoot, watched);
   let configs = [];
   try {
     configs = fs.readdirSync(outDir);
@@ -102,16 +114,18 @@ function fragmentRoots() {
 
 // The fragments under every config root, one per label. Discovery is rooted in
 // the source tree's packages, so a deleted package's fragment is never opened.
-function readFragments(packageDirs) {
+function readFragments(packageDirs, watched) {
   const seen = new Set();
   const fragments = [];
   let files = 0;
 
-  for (const root of fragmentRoots()) {
+  for (const root of fragmentRoots(watched)) {
     for (const pkg of packageDirs) {
+      const dir = path.join(root, pkg);
+      watchDirectory(dir, root, watched);
       let names;
       try {
-        names = fs.readdirSync(path.join(root, pkg));
+        names = fs.readdirSync(dir);
       } catch (_) {
         continue;
       }
@@ -185,7 +199,7 @@ function parseFragment(file) {
  * @param {object[]} fragments
  * @param {Record<string, string>} map
  */
-function mergeFragments(fragments, map) {
+function mergeFragments(fragments, map, watched) {
   const packages = new Set();
   for (const fragment of fragments) {
     for (const pkg of fragment.packages) packages.add(pkg);
@@ -197,7 +211,8 @@ function mergeFragments(fragments, map) {
       pkg,
       path.join(workspaceRoot, pkg),
       path.join(workspaceRoot, 'bazel-bin', pkg),
-      map
+      map,
+      watched
     );
   }
 }
@@ -207,7 +222,7 @@ function mergeFragments(fragments, map) {
  *
  * @returns {object | null}
  */
-function readHookData() {
+function readHookData(watched) {
   const candidates = [
     providedDataFile,
     process.env.TSSERVER_HOOK_DATA,
@@ -215,6 +230,13 @@ function readHookData() {
   ].filter(Boolean);
 
   for (const candidate of candidates) {
+    const dir = path.dirname(path.resolve(candidate));
+    const relative = path.relative(workspaceRoot, dir);
+    const root =
+      relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+        ? path.dirname(dir)
+        : workspaceRoot;
+    watchDirectory(dir, root, watched, path.basename(candidate));
     try {
       return JSON.parse(fs.readFileSync(candidate, 'utf8'));
     } catch (e) {
@@ -224,7 +246,8 @@ function readHookData() {
   return null;
 }
 
-function scanPackageForResolution(pkg, srcDir, binDir, map) {
+function scanPackageForResolution(pkg, srcDir, binDir, map, watched) {
+  watchDirectory(binDir, workspaceRoot, watched);
   for (const filename of ['index.d.ts', 'index.ts', 'index.tsx']) {
     const binCandidate = path.join(binDir, filename);
     if (fs.existsSync(binCandidate)) {
@@ -243,14 +266,13 @@ function scanPackageForResolution(pkg, srcDir, binDir, map) {
 
 // One walk of the source tree for the Bazel packages: a fragment can only sit
 // under a package directory, so nothing else in bazel-out is read.
-function walkWorkspace(root) {
-  const BOUNDARY_FILES = new Set(['MODULE.bazel', 'WORKSPACE', 'WORKSPACE.bazel']);
+function walkWorkspace(root, watched) {
   const PRUNE_DIRS = new Set(['node_modules', 'dist', 'build', '.next', '.nuxt']);
-  const BUILD_FILES = new Set(['BUILD.bazel', 'BUILD']);
 
   const packages = [];
 
   function walk(dir, isRoot) {
+    watchDirectory(dir, root, watched);
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -292,13 +314,11 @@ log(`initial resolution map: ${initialEntries} entries`);
 parentPort.postMessage({ type: 'resolution-map', data: initialMap });
 
 // ── File-system watchers ──────────────────────────────────────────────────────
-// Rebuild the map when key files change.  We use Node's built-in fs.watch
-// (no chokidar dependency).  The rebuild is debounced to avoid thrashing.
 
 let rebuildTimer = null;
 
-function scheduleRebuild(delay) {
-  if (rebuildTimer) clearTimeout(rebuildTimer);
+function scheduleRebuild() {
+  if (rebuildTimer) return;
   rebuildTimer = setTimeout(() => {
     rebuildTimer = null;
     log('rebuilding resolution map...');
@@ -309,35 +329,73 @@ function scheduleRebuild(delay) {
     } catch (e) {
       log(`rebuild failed: ${e.message}`);
     }
-  }, delay);
+  }, 500);
 }
 
-// Watch the generated graph data: with bazel-bin below, everything that changes
-// what resolves.
-const dataFile = providedDataFile || path.join(workspaceRoot, HOOK_DATA);
-if (fs.existsSync(dataFile)) {
-  try {
-    fs.watch(dataFile, { persistent: false }, () => {
-      log(`file changed: ${dataFile}`);
-      scheduleRebuild(1000);
-    });
-  } catch (_) {
-    // fs.watch can fail on some systems/filesystems — ignore.
+function watchDirectory(dir, root, watched, filename) {
+  dir = path.resolve(dir);
+  root = path.resolve(root);
+  const relative = path.relative(root, dir);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return;
   }
-}
-
-// Watch bazel-bin for the two things a `bazel build` adds: .d.ts files, and the
-// aspect's fragments. Use recursive watch so nested packages are covered.
-const bazelBin = path.join(workspaceRoot, 'bazel-bin');
-if (fs.existsSync(bazelBin)) {
+  if (dir !== root) {
+    watchDirectory(path.dirname(dir), root, watched, path.basename(dir));
+  }
   try {
-    fs.watch(bazelBin, { recursive: true, persistent: false }, (_event, filename) => {
-      if (filename && (filename.endsWith('.d.ts') || filename.endsWith(FRAGMENT_SUFFIX))) {
-        log(`bazel-bin changed: ${filename}`);
-        scheduleRebuild(500);
+    const canonical = fs.realpathSync(dir);
+    let filter = watched.get(canonical);
+    if (!filter) {
+      const stat = fs.statSync(canonical);
+      if (stat.isDirectory()) {
+        filter = { discovery: false, filenames: new Set() };
+        watched.set(canonical, filter);
+        const current = directoryWatchers.get(canonical);
+        if (!current || current.dev !== stat.dev || current.ino !== stat.ino) {
+          current?.watcher.close();
+          directoryWatchers.delete(canonical);
+          // Linux recursive fs.watch can retain the old file inode after atomic publication.
+          const watcher = fs.watch(canonical, (event, filename) => {
+            const filter = directoryWatchers.get(canonical)?.filter;
+            let directory = false;
+            if (event === 'rename' && filename && filter?.discovery) {
+              try {
+                directory = fs.statSync(path.join(canonical, filename)).isDirectory();
+              } catch (_) {}
+            }
+            if (
+              !filename ||
+              filter?.filenames.has(filename) ||
+              (filter?.discovery &&
+                (directory ||
+                  BUILD_FILES.has(filename) ||
+                  BOUNDARY_FILES.has(filename) ||
+                  filename.endsWith('.d.ts') ||
+                  filename.endsWith(FRAGMENT_SUFFIX) ||
+                  filename === 'index.ts' ||
+                  filename === 'index.tsx'))
+            ) {
+              scheduleRebuild();
+            }
+          });
+          directoryWatchers.set(canonical, { watcher, dev: stat.dev, ino: stat.ino, filter });
+          watcher.on('error', () => {
+            watcher.close();
+            if (directoryWatchers.get(canonical)?.watcher === watcher) {
+              directoryWatchers.delete(canonical);
+              scheduleRebuild();
+            }
+          });
+        } else {
+          current.filter = filter;
+        }
       }
-    });
-  } catch (_) {
-    // Recursive watch is not supported on all platforms — ignore.
+    }
+    if (filter) {
+      if (filename === undefined) filter.discovery = true;
+      else filter.filenames.add(filename);
+    }
+  } catch (e) {
+    log(`cannot watch ${dir}: ${e.message}`);
   }
 }

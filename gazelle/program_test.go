@@ -20,6 +20,36 @@ import (
 // What tsgo prints, with exit 2, for a tsconfig.json whose include matches nothing.
 const noInputsOutput = `error TS18003: No inputs were found in config file '/w/pkg/tsconfig.json'. Specified 'include' paths were '["src/**/*.ts","bin/*.ts"]' and 'exclude' paths were '["node_modules"]'.`
 
+func TestConfigOwnerDefaultRespectsAncestorSelectedSource(t *testing.T) {
+	for _, test := range []struct {
+		name, selected, boundary, want string
+		owned                          bool
+	}{
+		{name: "sibling_base", selected: "config/build.json"},
+		{name: "deeper_selected_source", selected: "config/deep/build.json"},
+		{name: "selected_base", selected: "config/tsconfig.json", want: "app", owned: true},
+		{name: "unrelated_selected_source", selected: "other/build.json", want: "app/config", owned: true},
+		{name: "existing_child_boundary", selected: "config/build.json", boundary: "app/config/BUILD.bazel", want: "app/config", owned: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			files := map[string]string{
+				"app/BUILD.bazel": fmt.Sprintf(loadDefs+`"ts_config")
+ts_config(name = "tsconfig", src = %q) # keep
+`, test.selected),
+				"app/config/tsconfig.json": `{"files":[],"include":[]}`,
+			}
+			if test.boundary != "" {
+				files[test.boundary] = `exports_files(["tsconfig.json"])`
+			}
+			c := &config.Config{RepoRoot: writeTree(t, files), ValidBuildFileNames: []string{"BUILD.bazel", "BUILD"}}
+			s := newProgramStore()
+			if owner, ok := s.configOwner(c, "app/config/tsconfig.json"); owner != test.want || ok != test.owned {
+				t.Fatalf("config owner = (%q, %t), want (%q, %t)", owner, ok, test.want, test.owned)
+			}
+		})
+	}
+}
+
 // A stand-in tsgo: a script printing output and exiting with exit.
 func fakeTsgo(t *testing.T, dir, name, output string, exit int) string {
 	t.Helper()
@@ -43,7 +73,7 @@ func TestProgram_ArgvPinsPrettyFalse(t *testing.T) {
 	if err := os.WriteFile(bin, []byte(fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argv)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := listProgram(root, "pkg", bin); err != nil {
+	if _, err := listProgram(root, "pkg/tsconfig.json", bin); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(argv)
@@ -91,7 +121,7 @@ func TestKeptManifestRootsPreserveDiscoveryIdentityAndCompilerFlags(t *testing.T
 func TestProgram_ExitCodePolicy(t *testing.T) {
 	root := t.TempDir()
 
-	p, err := listProgram(root, "pkg",
+	p, err := listProgram(root, "pkg/tsconfig.json",
 		fakeTsgo(t, root, "tsgo-no-inputs", noInputsOutput+"\n", 2))
 	if err != nil {
 		t.Fatalf("an exit 2 explained by TS18003 failed the listing: %v", err)
@@ -103,7 +133,7 @@ func TestProgram_ExitCodePolicy(t *testing.T) {
 		t.Fatalf("observed empty program cannot establish its closure: %v", err)
 	}
 
-	if _, err := listProgram(root, "pkg",
+	if _, err := listProgram(root, "pkg/tsconfig.json",
 		fakeTsgo(t, root, "tsgo-silent", "", 1)); err == nil {
 		t.Error("an exit 1 with no diagnostic did not fail the listing")
 	} else if !strings.Contains(err.Error(), "pkg/tsconfig.json") {
@@ -114,7 +144,7 @@ func TestProgram_ExitCodePolicy(t *testing.T) {
 		"  Use '\"paths\": {\"*\": [\"./*\"]}' instead.\n" +
 		"pkg/src/a.ts\n" +
 		"   Matched by include pattern 'src/**/*.ts' in 'pkg/tsconfig.json'\n"
-	p, err = listProgram(root, "pkg",
+	p, err = listProgram(root, "pkg/tsconfig.json",
 		fakeTsgo(t, root, "tsgo-baseurl", removedOption, 2))
 	if err != nil {
 		t.Fatalf("an exit 2 explained by TS5102 failed the run: %v", err)
@@ -131,7 +161,7 @@ func TestProgram_ExitCodePolicy(t *testing.T) {
 		"   Matched by include pattern 'src/**/*.ts' in 'pkg/tsconfig.json'\n" +
 		"pkg/src/broken.ts\n" +
 		"   Matched by include pattern 'src/**/*.ts' in 'pkg/tsconfig.json'\n"
-	p, err = listProgram(root, "pkg",
+	p, err = listProgram(root, "pkg/tsconfig.json",
 		fakeTsgo(t, root, "tsgo-syntax", syntaxError, 2))
 	if err != nil {
 		t.Fatalf("an exit 2 explained by a syntax error failed the run: %v", err)
@@ -142,7 +172,7 @@ func TestProgram_ExitCodePolicy(t *testing.T) {
 	}
 
 	unreadable := noInputsOutput + "\npkg/tsconfig.json(2,1): error TS1005: ']' expected.\n"
-	p, err = listProgram(root, "pkg",
+	p, err = listProgram(root, "pkg/tsconfig.json",
 		fakeTsgo(t, root, "tsgo-unreadable", unreadable, 2))
 	if err != nil {
 		t.Fatalf("an exit 2 with nothing listed failed the run instead of refusing the program: %v", err)
