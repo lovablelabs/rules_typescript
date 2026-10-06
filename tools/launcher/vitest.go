@@ -64,6 +64,12 @@ func planVitest(
 	if err := plan.own(tree, true); err != nil {
 		return nil, err
 	}
+	// The private tree links into these runfiles, so a realpath can land in them.
+	if dir := r.Dir(); dir != "" {
+		if origin, err := filepath.EvalSymlinks(dir); err == nil {
+			plan.setEnv("TS_TEST_RUNFILES_ORIGIN", origin)
+		}
+	}
 	if r, err = r.Stage(tree, cfg.RuntimeModules); err != nil {
 		return nil, err
 	}
