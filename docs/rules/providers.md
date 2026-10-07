@@ -158,7 +158,7 @@ read the manifest in the tree, as they do over an install.
 The default `//oj:dev_server` and optional `//vite:dev_server` return this
 provider. `ts_dev_server(server = ...)` accepts other implementations too.
 
-oj 0.2.5 uses a native binary, the Vite config dialect and native React Fast
+oj 0.2.16 uses a native binary, the Vite config dialect and native React Fast
 Refresh. It ignores config fields `root` and `cacheDir`;
 its root and cache come from the launcher. `server.open` is supported.
 

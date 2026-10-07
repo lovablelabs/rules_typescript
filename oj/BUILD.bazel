@@ -28,6 +28,7 @@ exports_files([
     "deno-runtime-snapshot-source.patch",
     "deno-snapshots-source.patch",
     "napi-symbol-bytes.patch",
+    "oj-deno-fs-events-indexed.patch",
     "oj-napi-link.patch",
     "oj-server-file-hmr.patch",
     "v8-output-dir.patch",

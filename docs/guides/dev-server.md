@@ -4,14 +4,14 @@
 //src/app:dev` builds the target once. The server then transforms first-party
 source in memory, so a save reaches the browser without a Bazel build.
 
-oj 0.2.5 is the default implementation at `@rules_typescript//oj:dev_server`.
+oj 0.2.16 is the default implementation at `@rules_typescript//oj:dev_server`.
 Vite is optional: set `server = "@rules_typescript//vite:dev_server"`.
 Other implementations return `DevServerInfo`; see
 [Bringing your own server](#bringing-your-own-server).
 
 ## Default oj server
 
-oj and oj_server are pinned to 0.2.5 and built from Rust source. Their V8
+oj and oj_server are pinned to 0.2.16 and built from Rust source. Their V8
 dependency uses an upstream static library fetched by Bazel with a pinned
 SHA256 digest; V8 itself is not compiled from source here. The native
 binary reads the generated Vite-format config. Its command line supplies the

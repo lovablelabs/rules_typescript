@@ -92,6 +92,12 @@ mixed_npm_store_identity_test = analysistest.make(
     extra_target_under_test_aspects = [runnable_action_aspect],
 )
 
+# Starlark exposes no target text for an unresolved symlink, so a view entry is checked as an alias beside its store.
+def _view_reaches(env, runfiles, key, store, msg):
+    alias = {link.path: link.target_file for link in runfiles.root_symlinks.to_list()}.get(key)
+    files = runfiles.files.to_list()
+    asserts.true(env, alias != None and alias.is_symlink and alias in files and store in files, msg)
+
 def _dev_npm_path(env, target):
     configs = [action for action in target[RunnableActionOwnerInfo].actions if any([file.basename.endswith("_launcher.json") for file in action.outputs.to_list()])]
     asserts.equals(env, 1, len(configs), "one launcher owns the actual npm lookup path")
@@ -106,16 +112,15 @@ def _inherited_dev_npm_impl(ctx):
     name = ctx.attr.package[NpmPackageInfo].package_name
     parent_link = importer.parent.links[name].link
     view = _dev_npm_path(env, target)
-    roots = {link.path: link.target_file for link in target[DefaultInfo].default_runfiles.root_symlinks.to_list()}
     files = target[DefaultInfo].default_runfiles.files.to_list()
     asserts.false(env, name in importer.links, "the child must not redeclare the inherited package")
     bindings = [(link, selected) for owner in entry.owners.to_list() for bound_name, link, selected in owner.npm_bindings if bound_name == name]
     asserts.equals(env, [(parent_link, store)], bindings, "the real compiler retains the parent's exact binding")
-    asserts.equals(env, store, roots.get(view + "/" + name), "the configured app lookup reaches the exact parent store")
+    _view_reaches(env, target[DefaultInfo].default_runfiles, view + "/" + name, store, "the configured app lookup reaches the exact parent store")
     asserts.true(env, parent_link in files and store in files, "the original link and store stay declared")
     for direct_name, link in importer.links.items():
         asserts.true(env, link.link in files, "original direct links stay present")
-        asserts.equals(env, link.store.tree, roots.get(view + "/" + direct_name), "direct names select their original exact stores")
+        _view_reaches(env, target[DefaultInfo].default_runfiles, view + "/" + direct_name, link.store.tree, "direct names select their original exact stores")
     if ctx.attr.other:
         other = ctx.attr.other[DefaultInfo].default_runfiles
         other_store = ctx.attr.other_package[NpmPackageInfo].store.tree
@@ -140,8 +145,8 @@ def _inherited_dev_npm_impl(ctx):
                 asserts.true(env, data_path.split("/", 1)[0] != view.split("/", 1)[0], "canonical repository Files cannot occupy the private root")
                 asserts.false(env, any([data_path == path or data_path.startswith(path + "/") or path.startswith(data_path + "/") for path in merged_roots]), "no private root alias hides the enclosing File")
             for selected_view in [view, other_view]:
-                asserts.equals(env, store, merged_roots.get(selected_view + "/" + name), "live edits retain the declared companion in both views")
-                asserts.equals(env, other_store, merged_roots.get(selected_view + "/" + other_name), "optimizer lookup retains all declared parent names in both views")
+                _view_reaches(env, merged, selected_view + "/" + name, store, "live edits retain the declared companion in both views")
+                _view_reaches(env, merged, selected_view + "/" + other_name, other_store, "optimizer lookup retains all declared parent names in both views")
     return analysistest.end(env)
 
 inherited_dev_npm_test = analysistest.make(
@@ -181,9 +186,8 @@ def _member_dev_npm_impl(ctx):
     asserts.true(env, view != other_view, "different effective bindings never share an app view")
     other = ctx.attr.other[DefaultInfo].default_runfiles
     for merged in [target[DefaultInfo].default_runfiles.merge(other), other.merge(target[DefaultInfo].default_runfiles)]:
-        roots = {link.path: link.target_file for link in merged.root_symlinks.to_list()}
-        asserts.equals(env, member.store.tree, roots.get(view + "/" + name), "the nearer member wins in its own view")
-        asserts.equals(env, registry.store.tree, roots.get(other_view + "/" + name), "the sibling view retains its inherited registry")
+        _view_reaches(env, merged, view + "/" + name, member.store.tree, "the nearer member wins in its own view")
+        _view_reaches(env, merged, other_view + "/" + name, registry.store.tree, "the sibling view retains its inherited registry")
     return analysistest.end(env)
 
 member_dev_npm_test = analysistest.make(

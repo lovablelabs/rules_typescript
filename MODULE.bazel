@@ -119,7 +119,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:oj-js-code-cache-bounded.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.5",
+    version = "0.2.16",
 )
 crate.annotation(
     crate = "libsqlite3-sys",
@@ -162,7 +162,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:oj-server-file-hmr.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.5",
+    version = "0.2.16",
 )
 crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
@@ -171,7 +171,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:oj-napi-link.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.5",
+    version = "0.2.16",
 )
 crate.annotation(
     crate = "cranelift-assembler-x64",
@@ -193,7 +193,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:napi-symbol-bytes.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.5",
+    version = "0.2.16",
 )
 crate.annotation(
     crate = "deno_napi",
@@ -239,17 +239,20 @@ crate.annotation(
 crate.annotation(
     crate = "oj_deno_runtime",
     patch_args = ["-p1"],
-    patches = ["//oj:deno-runtime-snapshot-source.patch"],
+    patches = [
+        "//oj:deno-runtime-snapshot-source.patch",
+        "//oj:oj-deno-fs-events-indexed.patch",
+    ],
     repositories = ["oj_crates"],
-    version = "0.2.5",
+    version = "0.2.16",
 )
 crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
-    crate = "deno_snapshots",
+    crate = "oj_deno_snapshots",
     patch_args = ["-p1"],
     patches = ["//oj:deno-snapshots-source.patch"],
     repositories = ["oj_crates"],
-    version = "0.74.0",
+    version = "0.2.16",
 )
 crate.annotation(
     crate = "deno_features",

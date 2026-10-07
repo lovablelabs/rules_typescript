@@ -29,7 +29,7 @@ at that version. BUILD generation uses the separate aspect-gazelle project.
 | **Type-checker** | TypeScript tsc, including [native TypeScript 7][aspect-native] | tsgo |
 | **Compilation boundary** | Per [`ts_project`][aspect-project]; `.d.ts` when declarations are enabled; each invokes `tsc --project` | `.d.ts` per target |
 | **Bundler** | Bring your own | Bring your own, through `BundlerInfo` on `ts_binary` |
-| **Dev server** | [`js_run_devserver`][aspect-devserver] (rules_js) runs the named binary or command; under ibazel it syncs changed `data` | oj 0.2.5 by default, optional Vite; any `DevServerInfo` rule per target |
+| **Dev server** | [`js_run_devserver`][aspect-devserver] (rules_js) runs the named binary or command; under ibazel it syncs changed `data` | oj 0.2.16 by default, optional Vite; any `DevServerInfo` rule per target |
 | **npm management** | rules_js (pnpm virtual store, symlinks) | Own pnpm lockfile reader: a `pnpm-lock.yaml` is required, npm and yarn lockfiles are not read; one Bazel repository per package, fetched on demand; pnpm's virtual store as Bazel artifacts |
 | **BUILD generation** | Can use [aspect-gazelle][aspect-gazelle] with its `js` language (Apache-2.0), from source or a prebuilt binary | Gazelle (one package per `tsconfig.json`) |
 | **Framework support** | None built-in | None built-in; a framework's Vite plugin runs in the dev server through `vite_config` |
@@ -100,7 +100,7 @@ tsgo listing the check reads.
 
 ### Dev server choice
 
-oj 0.2.5 is the default dev server and provides native React Fast Refresh.
+oj 0.2.16 is the default dev server and provides native React Fast Refresh.
 Select Vite explicitly for framework Vite plugins. Both receive a generated
 Vite-format config through `DevServerInfo`: `ts_dev_server(server = ...)` is a per-target
 choice. With rules_js, [`js_run_devserver`][aspect-devserver] runs the binary

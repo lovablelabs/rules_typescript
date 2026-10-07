@@ -332,7 +332,17 @@ export class BazelResolver {
       if (logical !== undefined && this.currentRealPath(candidate) === clean) return logical;
     }
 
+    // A declared file matches only a canonical query: a watcher event under the bazel-bin symlink must not
+    // realpath every declared file, which kept oj's plugin host busy for minutes on a large application.
+    let canonicalQuery = true;
+    try {
+      canonicalQuery = fs.realpathSync(clean) === clean;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      canonicalQuery = code !== 'ENOENT' && code !== 'ENOTDIR';
+    }
     for (const [declaredPath, logical] of this.selectedFiles) {
+      if (!canonicalQuery && !this.declaredFiles[logical]!.directory) continue;
       const realPath = this.currentRealPath(declaredPath);
       if (realPath === clean) return logical;
       if (realPath !== undefined && this.declaredFiles[logical]!.directory

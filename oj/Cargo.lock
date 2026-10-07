@@ -2853,15 +2853,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deno_snapshots"
-version = "0.74.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1511c534c77e0e0a60e436f27650d17d12d3ed9d7789fe305af16afa7576f58"
-dependencies = [
- "deno_runtime",
-]
-
-[[package]]
 name = "deno_subprocess_windows"
 version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6000,13 +5991,14 @@ dependencies = [
 
 [[package]]
 name = "oj"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e624c65e560f7677932aa691c4e83f4b98e688a0ed174c2cd819e497c46b37"
+checksum = "7c471084abec080ad4d6fd8360404e8e7787b65f818315451758b6390e602cf8"
 dependencies = [
  "anyhow",
  "arcstr",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "clap",
  "deno_core",
@@ -6052,26 +6044,29 @@ dependencies = [
  "string_wizard",
  "tokio",
  "tokio-stream",
+ "tower",
  "url",
 ]
 
 [[package]]
 name = "oj_cache"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "780d6606aac9c6818926629928cbc1e34ccb5b858914e723263a62e3a6c78008"
+checksum = "f5b769bc3c3f038b6b0db832099b512ccf2048c35c6fc23a244e9158f3bbfc4f"
 dependencies = [
  "blake3",
+ "oj_env",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "oj_compiler"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0762c502bc98c6f3c6fa1bf588d17df1abd2a48ff6a5a6fff5fa5c22c7c0943e"
+checksum = "d6469552e3b23ff4db3f6a5b515110cdfddedea5668f1f2204f03fc4e47687a7"
 dependencies = [
+ "base64 0.22.1",
  "glob",
  "memchr",
  "oxc_allocator",
@@ -6081,6 +6076,7 @@ dependencies = [
  "oxc_ecmascript",
  "oxc_minifier",
  "oxc_parser",
+ "oxc_resolver",
  "oxc_semantic",
  "oxc_sourcemap",
  "oxc_span",
@@ -6093,10 +6089,11 @@ dependencies = [
 
 [[package]]
 name = "oj_config"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dc0a6f38c9f3d41d8d4e4a1ce5ce28f56bd585e7769def5fb427b3d29c8564f"
+checksum = "3424031d290dd8402a6027470c730afc845d8d8098005c140519c9406c2f9573"
 dependencies = [
+ "oj_env",
  "oxc_allocator",
  "oxc_codegen",
  "oxc_parser",
@@ -6112,10 +6109,11 @@ dependencies = [
 
 [[package]]
 name = "oj_css"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75c0f0552a21a95bc7bfde302125943d9d9bb056b91a589efeaa71fc445822d5"
+checksum = "bef58cd0a1f520e80a85c2e4f98ce82a4842a6139c85541c305fd8bc513ce57b"
 dependencies = [
+ "base64 0.22.1",
  "grass",
  "lightningcss",
  "parcel_sourcemap",
@@ -6125,9 +6123,9 @@ dependencies = [
 
 [[package]]
 name = "oj_deno_napi"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "887f822083aa7beeeb4b1412a5c43b8f98d80387b94826920d3cf4d0ced6c10a"
+checksum = "e4170acb811adf748ca5863e29cd5609f17aa1accbd7b62c5bab6b4deee58993"
 dependencies = [
  "deno_core",
  "deno_error",
@@ -6145,10 +6143,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "oj_deno_runtime"
-version = "0.2.5"
+name = "oj_deno_process"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7b803814293174081950a475cbae012a26bab4dd430a30bf6993d4591d9056e"
+checksum = "cb81372667cd979b68d7ce316a8e2dd9b82fe2022757735b601416877a0807e9"
+dependencies = [
+ "deno_core",
+ "deno_error",
+ "deno_fs",
+ "deno_io",
+ "deno_os",
+ "deno_path_util",
+ "deno_permissions",
+ "deno_process",
+ "deno_signals",
+ "deno_subprocess_windows",
+ "libc",
+ "log",
+ "memchr",
+ "nix 0.30.1",
+ "rand 0.8.5",
+ "serde",
+ "sys_traits",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "oj_deno_runtime"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d05ba568d9d2b53ce69e580025ed18d34970d68255876842c3c66083dda93d1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6177,7 +6204,6 @@ dependencies = [
  "deno_os",
  "deno_path_util",
  "deno_permissions",
- "deno_process",
  "deno_resolver",
  "deno_signals",
  "deno_telemetry",
@@ -6201,6 +6227,7 @@ dependencies = [
  "node_resolver",
  "notify",
  "oj_deno_napi",
+ "oj_deno_process",
  "once_cell",
  "qbsdiff",
  "raw-window-handle",
@@ -6221,25 +6248,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "oj_env"
-version = "0.2.5"
+name = "oj_deno_snapshots"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4dd1330f7956ddae2629d471f13d1b729fe733750abbee882520f573c9536e"
+checksum = "27fa51511dd7c7cbd94f2c0ce740d0a7bece3f7cc55fcdfbea4a0c7764bbcf21"
+dependencies = [
+ "deno_runtime",
+]
+
+[[package]]
+name = "oj_env"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fa37ed34715e19dfac0c6e4ca6f71fc393b7fddf9543f80b9dd84338a3fe0f8"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "oj_graph"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ead566d4df42b632c1674c0f2a3bb80a1ec22194fcd8013f37cceb4f9e736cc"
+checksum = "dacc154f31626e37e89eb5fa19735298dc5301a299c83d6f30f4d4ff3995b07b"
 
 [[package]]
 name = "oj_js"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20456a413564241b33e63e50c064a7639ea06744562e8a781b7e0217dd37971"
+checksum = "c69f20830021a8e318cda138e5c77728946408eaff5ef7eb8c8b50cc2f73738b"
 dependencies = [
  "deno_config",
  "deno_core",
@@ -6247,10 +6283,10 @@ dependencies = [
  "deno_media_type",
  "deno_path_util",
  "deno_resolver",
- "deno_snapshots",
  "node_resolver",
  "oj_deno_napi",
  "oj_deno_runtime",
+ "oj_deno_snapshots",
  "serde_json",
  "sys_traits",
  "thiserror 2.0.20",
@@ -6259,19 +6295,20 @@ dependencies = [
 
 [[package]]
 name = "oj_resolver"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37dcadd1847b2be564dc8f4ebfdda69bbd021ab000f7e82066b4d5f5cbd824fd"
+checksum = "b4069f6455107aa4f6d8a0be91242ef44fa16f33362e50953e4c626d72e28cb3"
 dependencies = [
  "oxc_resolver",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "oj_server"
-version = "0.2.5"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcd1d57ae90b8c7cb75c501e41542d3e9a8feabbfc29ded1dc5988b6fd3470ce"
+checksum = "88c4bc73c82a5e26e4a2013bda41897d1debb320c22b8e73512b443243937385"
 dependencies = [
  "anyhow",
  "axum",
@@ -6285,6 +6322,7 @@ dependencies = [
  "oj_compiler",
  "oj_config",
  "oj_css",
+ "oj_deno_process",
  "oj_env",
  "oj_graph",
  "oj_js",
