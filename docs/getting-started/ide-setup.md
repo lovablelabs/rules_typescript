@@ -50,6 +50,12 @@ plugin respects the projected aliases. After upgrading the ruleset, run refresh
 and restart the TS server once to load the updated plugin. Later BUILD or
 generator-input refreshes use the same running editor session.
 
+When refresh serves a generated file from a cache, Bazel replaces it within about
+a millisecond. tsserver's own file watcher can miss that replacement and keep the
+old declaration, for example a completion for a deleted generated member, until
+the TS server restarts. Restart it if the editor shows a generated declaration
+that the refreshed file no longer has.
+
 Derived projects retain the native compiler’s effective resolution mode, including
 defaults omitted from its printed configuration. The editor compiler must support
 that mode and the authored options. For example, TypeScript 5.9 rejects Bundler

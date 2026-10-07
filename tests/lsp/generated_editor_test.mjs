@@ -93,21 +93,30 @@ const preserved = new Map(
 function refresh(phase) {
   process.stdout.write(`editor ${phase}: refresh started\n`);
   if (deadline) assert(Date.now() < deadline, 'enclosing test deadline exhausted before refresh');
-  const result = spawnSync(
-    bazel,
-    [
-      'run',
-      '--symlink_prefix=bazel-editor-refresh-',
-      '--run_validations=false',
-      '--output_groups=-_validation',
-      '//generated:refresh_generated',
-    ],
-    {
-      cwd: workspaceRoot,
-      stdio: 'inherit',
-      ...(deadline ? { timeout: Math.max(1, deadline - Date.now()) } : {}),
-    }
-  );
+  // tsserver stops watching a file it finds missing mid-replacement and recreated before its
+  // fallback poller's first stat; a cache hit replaces outputs that fast, so hold it until done.
+  const paused = sessions.filter(({ server }) => server?.alive());
+  for (const { server } of paused) process.kill(server.pid, 'SIGSTOP');
+  let result;
+  try {
+    result = spawnSync(
+      bazel,
+      [
+        'run',
+        '--symlink_prefix=bazel-editor-refresh-',
+        '--run_validations=false',
+        '--output_groups=-_validation',
+        '//generated:refresh_generated',
+      ],
+      {
+        cwd: workspaceRoot,
+        stdio: 'inherit',
+        ...(deadline ? { timeout: Math.max(1, deadline - Date.now()) } : {}),
+      }
+    );
+  } finally {
+    for (const { server } of paused) process.kill(server.pid, 'SIGCONT');
+  }
   assert.ifError(result.error);
   assert.equal(result.status, 0, 'actual generated_sources refresh failed');
   process.stdout.write(`editor ${phase}: refresh completed\n`);
@@ -182,6 +191,7 @@ function assertGeneratedInputs(phase, present) {
   }
 }
 
+const stalledAssertionMs = 30_000;
 const nativeResults = new Map();
 
 async function checkNativeNamespace(request, diagnostics, file, plugin) {
@@ -615,6 +625,7 @@ try {
         );
       }
       let last;
+      let since;
       let trace = true;
       do {
         assert(
@@ -629,11 +640,14 @@ try {
           if (!(error instanceof assert.AssertionError)) throw error;
           trace = error.message !== last?.message;
           if (trace) {
+            since = Date.now();
             process.stdout.write(
               `editor ${name} phase ${phase}: awaiting assertion: ${error.message}\n`
             );
           }
           last = error;
+          // Settling takes a few watcher polls; an unchanged failure past this is a missed change.
+          if (Date.now() - since > stalledAssertionMs) break;
         }
         await delay(250);
       } while (!deadline || Date.now() < deadline);
