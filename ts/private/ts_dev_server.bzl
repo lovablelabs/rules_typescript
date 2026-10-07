@@ -122,11 +122,15 @@ def _generate_dev_config(
             "[{}]: {{ path: {}, context: {}, isSource: {}{}{}{} }}".format(json.encode(logical), _file_path_js(ctx, selected), json.encode(context), json.encode(selected.is_source), ", directory: true" if selected.is_directory else "", source_scope, importer),
         )
 
-    npm_paths = [
-        "[{}, {}]".format(json.encode(logical), json.encode(npm_contexts[original]))
-        for logical, (original, _selected, _context) in sorted(declared_files.items())
-        if original in npm_contexts
-    ]
+    # One entry per distinct binding set: an application's files share a few, and inlining
+    # each file's copy grew a large application's config past what oj evaluates in 60 s.
+    npm_binding_sets = {}
+    npm_paths = []
+    for logical, (original, _selected, _context) in sorted(declared_files.items()):
+        if original in npm_contexts:
+            encoded = json.encode(npm_contexts[original])
+            index = npm_binding_sets.setdefault(encoded, len(npm_binding_sets))
+            npm_paths.append("[{}, {}]".format(json.encode(logical), index))
 
     port = ctx.attr.port
     host = ctx.attr.host
@@ -171,6 +175,7 @@ def _generate_dev_config(
         "const nodeModulesPath = process.env['NODE_MODULES_PATH'] || null;\n" +
         "\n" +
         "const declaredFiles = {" + ", ".join(declared_paths) + "};\n" +
+        "const npmBindingSets = [" + ", ".join(npm_binding_sets.keys()) + "];\n" +
         "const npmContexts = [" + ", ".join(npm_paths) + "];\n" +
         "const admittedNpmPaths = new Set();\n" +
         "const npmViews = " + json.encode(npm_views) + ".map(view => path.join(path.dirname(nodeModulesPath), view));\n" +
@@ -178,6 +183,8 @@ def _generate_dev_config(
         "const slashPath = file => path.sep === '\\\\' ? file.replace(/\\\\/g, '/') : file;\n" +
         "const npmStores = new Map();\n" +
         "const realpath = file => {\n" +
+        "  // existsSync, because a throw from this multi-megabyte module costs milliseconds (statSync's throwIfNoEntry still throws inside oj).\n" +
+        "  if (!fs.existsSync(file)) return undefined;\n" +
         "  try { return fs.realpathSync(file); } catch (error) {\n" +
         "    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;\n" +
         "  }\n" +
@@ -188,7 +195,28 @@ def _generate_dev_config(
         "  const manifest = realpath(path.join(directory, 'package.json'));\n" +
         "  return manifest === undefined ? realpath(directory) : path.dirname(manifest);\n" +
         "};\n" +
-        "for (const [logical, bindings] of npmContexts) {\n" +
+        "// Files share a few binding sets and many directories, so each\n" +
+        "// (binding set, directory) pair is checked once, not once per file and package.\n" +
+        "const npmDirectories = new Map();\n" +
+        "const npmInstalls = new Map();\n" +
+        "const hasNodeModules = directory => {\n" +
+        "  if (!npmInstalls.has(directory)) npmInstalls.set(directory, realpath(path.join(directory, 'node_modules')) !== undefined);\n" +
+        "  return npmInstalls.get(directory);\n" +
+        "};\n" +
+        "const npmAncestors = source => {\n" +
+        "  if (!npmDirectories.has(source)) {\n" +
+        "    const found = [];\n" +
+        "    for (let directory = source; ; directory = path.dirname(directory)) {\n" +
+        "      if (path.basename(directory) !== 'node_modules' && hasNodeModules(directory)) found.push(directory);\n" +
+        "      if (path.dirname(directory) === directory) break;\n" +
+        "    }\n" +
+        "    npmDirectories.set(source, found);\n" +
+        "  }\n" +
+        "  return npmDirectories.get(source);\n" +
+        "};\n" +
+        "const npmChecks = npmBindingSets.map(() => new Set());\n" +
+        "for (const [logical, bindingSet] of npmContexts) {\n" +
+        "  const bindings = npmBindingSets[bindingSet];\n" +
         "  const file = declaredFiles[logical];\n" +
         "  const directories = new Set();\n" +
         "  for (const source of [file.path, file.importer]) {\n" +
@@ -201,34 +229,38 @@ def _generate_dev_config(
         "    const resolved = realpath(directory);\n" +
         "    if (resolved !== undefined) directories.add(resolved);\n" +
         "  }\n" +
+        "  for (const directory of directories) npmChecks[bindingSet].add(directory);\n" +
+        "  if (path.basename(file.path) === 'package.json') continue;\n" +
+        "  let sources;\n" +
         "  for (const [name, member] of Object.entries(bindings)) {\n" +
+        "    if (member === null) continue;\n" +
+        "    sources ??= [file.path, file.importer, realpath(file.path)];\n" +
+        "    for (const source of sources) {\n" +
+        "      if (source === undefined) continue;\n" +
+        "      const key = slashPath(source);\n" +
+        "      if (!memberNpmViews.has(key)) memberNpmViews.set(key, new Map());\n" +
+        "      memberNpmViews.get(key).set(name, member);\n" +
+        "    }\n" +
+        "  }\n" +
+        "}\n" +
+        "for (const [bindingSet, directories] of npmChecks.entries()) {\n" +
+        "  for (const [name, member] of Object.entries(npmBindingSets[bindingSet])) {\n" +
         "    const view = member === null ? nodeModulesPath : npmViews[member];\n" +
         "    const linked = path.join(view, name);\n" +
         "    if (!npmStores.has(linked)) npmStores.set(linked, npmStore(linked) ?? fs.realpathSync(linked));\n" +
         "    const expected = npmStores.get(linked);\n" +
-        "    if (member !== null && path.basename(file.path) !== 'package.json') {\n" +
-        "      for (const source of [file.path, file.importer, realpath(file.path)]) {\n" +
-        "        if (source === undefined) continue;\n" +
-        "        const key = slashPath(source);\n" +
-        "        if (!memberNpmViews.has(key)) memberNpmViews.set(key, new Map());\n" +
-        "        memberNpmViews.get(key).set(name, member);\n" +
-        "      }\n" +
-        "    }\n" +
         "    for (const source of directories) {\n" +
-        "      for (let directory = source; ; directory = path.dirname(directory)) {\n" +
-        "        if (path.basename(directory) !== 'node_modules') {\n" +
-        "          const candidate = path.join(directory, 'node_modules', name);\n" +
-        "          if (admittedNpmPaths.has(candidate + '\\0' + expected)) break;\n" +
-        "          const actual = npmStore(candidate);\n" +
-        "          if (actual !== undefined && actual !== expected) {\n" +
-        "            throw new Error('[ts_dev_server] conflicting npm installation for ' + name + ' from ' + source +\n" +
-        "              ': ' + candidate + ' resolves to ' + actual + ', but the declared ' + (member === null ? 'app' : 'member importer') + ' store is ' + expected +\n" +
-        "              '. Remove the conflicting installation yourself or link this package to the declared store before restarting.');\n" +
-        "          }\n" +
-        "          admittedNpmPaths.add(candidate + '\\0' + expected);\n" +
-        "          if (actual !== undefined) break;\n" +
+        "      for (const directory of npmAncestors(source)) {\n" +
+        "        const candidate = path.join(directory, 'node_modules', name);\n" +
+        "        if (admittedNpmPaths.has(candidate + '\\0' + expected)) break;\n" +
+        "        const actual = npmStore(candidate);\n" +
+        "        if (actual !== undefined && actual !== expected) {\n" +
+        "          throw new Error('[ts_dev_server] conflicting npm installation for ' + name + ' from ' + source +\n" +
+        "            ': ' + candidate + ' resolves to ' + actual + ', but the declared ' + (member === null ? 'app' : 'member importer') + ' store is ' + expected +\n" +
+        "            '. Remove the conflicting installation yourself or link this package to the declared store before restarting.');\n" +
         "        }\n" +
-        "        if (path.dirname(directory) === directory) break;\n" +
+        "        admittedNpmPaths.add(candidate + '\\0' + expected);\n" +
+        "        if (actual !== undefined) break;\n" +
         "      }\n" +
         "    }\n" +
         "  }\n" +
