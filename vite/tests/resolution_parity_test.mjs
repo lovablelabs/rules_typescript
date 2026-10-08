@@ -223,6 +223,31 @@ test('a canonical importer in a symlinked workspace still resolves generated out
   }
 });
 
+test('a watcher event under a linked bazel-bin does not realpath every declared file', () => {
+  const linkedBin = path.join(root, 'event-bin');
+  fs.symlinkSync(bazelBin, linkedBin, 'dir');
+  const declaredFiles = {};
+  for (let i = 0; i < 200; i++) {
+    write(path.join(bazelBin, `events/gen${i}.ts`), 'export {};\n');
+    declaredFiles[`events/gen${i}.ts`] = { path: path.join(linkedBin, `events/gen${i}.ts`), context: 'source' };
+  }
+  write(path.join(bazelBin, 'events/cache/chunk.js'), 'export {};\n');
+  const resolver = new BazelResolver({ workspaceRoot, bazelBin: linkedBin, mode: 'serve', declaredFiles });
+  const realpathSync = fs.realpathSync;
+  let calls = 0;
+  fs.realpathSync = (...args) => {
+    calls++;
+    return realpathSync(...args);
+  };
+  try {
+    assert.equal(resolver.isDeclaredFile(path.join(linkedBin, 'events/cache/chunk.js')), false);
+  } finally {
+    fs.realpathSync = realpathSync;
+  }
+  assert.ok(calls < 20, `one undeclared event resolved ${calls} paths`);
+  assert.equal(resolver.isDeclaredFile(fs.realpathSync(path.join(linkedBin, 'events/gen7.ts'))), true);
+});
+
 test('a moved package asset keeps its exact source authority without a source alias', () => {
   for (const [name, original] of [
     ['generated', path.join(bazelBin, 'assets/generated.css')],

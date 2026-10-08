@@ -5,7 +5,7 @@ first-party source in memory, so Bazel is out of the edit-to-browser loop;
 `bazel-bin` supplies what it cannot produce itself (`ts_codegen` output, the
 npm tree, assets, data srcs, passthrough `.d.ts`).
 
-oj 0.2.5 is the default implementation at `@rules_typescript//oj:dev_server`.
+oj 0.2.16 is the default implementation at `@rules_typescript//oj:dev_server`.
 Set `server = "@rules_typescript//vite:dev_server"` to use Vite. Other
 implementations return `DevServerInfo`. See
 [Bringing Your Own Server](../guides/dev-server.md#bringing-your-own-server).

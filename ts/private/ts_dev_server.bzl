@@ -698,16 +698,19 @@ def _ts_dev_server_impl(ctx):
         view_entries.extend([(member + "/" + name, store) for name, store in stores.items()])
     for relative, target in view_entries:
         path = "@rules_typescript_dev/" + view_name + "/" + relative
-        if target.is_symlink:
-            alias = ctx.actions.declare_symlink("_rules_typescript_dev/" + view_name + "/" + relative)
 
-            # Bazel republishes unresolved link text here; private and canonical roots share no path components.
-            ctx.actions.symlink(output = alias, target_path = "../" * (len(path.split("/")) - 1) + rlocation_path(ctx, target))
+        # A link even to a store tree: remote execution copies a root symlink's tree in place, where
+        # the package no longer finds the dependency links beside its store directory.
+        alias = ctx.actions.declare_symlink("_rules_typescript_dev/" + view_name + "/" + relative)
 
-            # Bazel reads unresolved-link metadata only from runfiles.files.
-            explicit_runfiles.append(alias)
-            target = alias
-        root_symlinks[path] = target
+        # Bazel republishes unresolved link text here; private and canonical roots share no path components.
+        ctx.actions.symlink(output = alias, target_path = "../" * (len(path.split("/")) - 1) + rlocation_path(ctx, target))
+
+        # Bazel reads unresolved-link metadata only from runfiles.files.
+        explicit_runfiles.append(alias)
+        if not target.is_symlink:
+            explicit_runfiles.append(target)
+        root_symlinks[path] = alias
 
     runfiles = ctx.runfiles(
         files = explicit_runfiles,
