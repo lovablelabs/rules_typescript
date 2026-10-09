@@ -136,6 +136,13 @@ function workerBootstrap() {
   fs.watch = (directory, ...args) => {
     const listener = args.pop();
     const watcher = watch(directory, ...args, (event, filename) => {
+      // macOS FSEvents can drop a change made while the stream starts; the worker must not need it.
+      if (
+        directory === registrationParent &&
+        filename === path.basename(path.dirname(registrationDirectory))
+      ) {
+        return;
+      }
       const sibling = path.basename(workerData.ancestorNoise);
       if (
         directory === workerData.workspaceRoot &&

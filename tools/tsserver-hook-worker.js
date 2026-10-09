@@ -20,6 +20,8 @@ const BUILD_FILES = new Set(['BUILD.bazel', 'BUILD']);
 
 const DEBUG = !!process.env.TSSERVER_HOOK_DEBUG;
 const directoryWatchers = new Map();
+// Declared before the initial build, whose watch attachment may already schedule a rebuild.
+let rebuildTimer = null;
 
 function log(msg) {
   if (DEBUG) {
@@ -315,8 +317,6 @@ parentPort.postMessage({ type: 'resolution-map', data: initialMap });
 
 // ── File-system watchers ──────────────────────────────────────────────────────
 
-let rebuildTimer = null;
-
 function scheduleRebuild() {
   if (rebuildTimer) return;
   rebuildTimer = setTimeout(() => {
@@ -386,6 +386,14 @@ function watchDirectory(dir, root, watched, filename) {
               scheduleRebuild();
             }
           });
+          // A directory replaced while its watch attaches may never send an event (macOS FSEvents).
+          let attached;
+          try {
+            attached = fs.statSync(canonical);
+          } catch (_) {}
+          if (!attached || attached.dev !== stat.dev || attached.ino !== stat.ino) {
+            scheduleRebuild();
+          }
         } else {
           current.filter = filter;
         }
