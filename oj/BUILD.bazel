@@ -19,7 +19,6 @@ exports_files([
     "Cargo.toml",
     "Cargo.lock",
     "aws-lc-macos-headers.patch",
-    "oj-js-code-cache-bounded.patch",
     "llvm-resource-directory.patch",
     "libffi-static-archive.patch",
     "cranelift-assembler-isle.patch",
@@ -28,9 +27,11 @@ exports_files([
     "deno-runtime-snapshot-source.patch",
     "deno-snapshots-source.patch",
     "napi-symbol-bytes.patch",
-    "oj-deno-fs-events-indexed.patch",
+    "oj-cache-start-bundle-stable-key.patch",
+    "oj-js-parked-watchdog-grace.patch",
     "oj-napi-link.patch",
-    "oj-server-file-hmr.patch",
+    "oj-server-restart-startup-env.patch",
+    "oj-server-scan-outside-plugin-host.patch",
     "v8-output-dir.patch",
     "sqlite-build-script-path.patch",
 ])
@@ -59,6 +60,25 @@ rust_test(
     edition = "2024",
     features = ["-static_link_cpp_runtimes"],
     deps = ["@oj_crates//:oj_deno_napi"],
+)
+
+rust_test(
+    name = "parked_watchdog_test",
+    srcs = ["parked_watchdog_tests.rs"],
+    edition = "2024",
+    features = ["-static_link_cpp_runtimes"],
+    deps = [
+        "@oj_crates//:oj_js",
+        "@oj_crates//:tokio",
+    ],
+)
+
+rust_test(
+    name = "start_bundle_key_test",
+    srcs = ["start_bundle_key_tests.rs"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = ["@oj_crates//:oj_cache"],
 )
 
 rust_test(

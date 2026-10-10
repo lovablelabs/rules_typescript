@@ -280,7 +280,7 @@ func write(t *testing.T, path, content string) {
 
 // Vite may expose dependencies through /@fs/, /@id/, or its pre-bundle cache.
 func depURL(body string) string {
-	m := regexp.MustCompile(`"(/(?:@(?:fs|id)/|bazel-bin/)[^"]+)"`).FindStringSubmatch(body)
+	m := regexp.MustCompile(`"(/(?:@(?:fs|id|oj-deps)/|bazel-bin/)[^"]+)"`).FindStringSubmatch(body)
 	if m == nil {
 		return ""
 	}

@@ -1339,9 +1339,10 @@ process.stdout.write(JSON.stringify(names));
 			t.Fatalf("nothing in the response points at a resolved dependency:\n%s", r.body)
 		}
 		m := get(t, base, dep)
-		// Vite may serve the dependency directly or from its pre-bundle cache.
+		// Either server may serve the dependency directly or from its pre-bundle.
 		if !strings.Contains(m.finalURL, "/node_modules/zod/") &&
-			!strings.Contains(m.finalURL, "/vite-cache/deps/") {
+			!strings.Contains(m.finalURL, "/vite-cache/deps/") &&
+			!strings.Contains(m.finalURL, "/@oj-deps/") {
 			t.Errorf("`import \"zod\"` resolved to %q, which is neither a Bazel npm "+
 				"tree nor this target's dependency cache", m.finalURL)
 		}
