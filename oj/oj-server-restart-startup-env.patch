@@ -1,0 +1,43 @@
+diff --git a/src/watch.rs b/src/watch.rs
+index 673e70e..cbdce67 100644
+--- a/src/watch.rs
++++ b/src/watch.rs
+@@ -358,6 +358,11 @@ pub(crate) fn restart_process() -> ! {
+         if let Some(dir) = launch_dir {
+             cmd.current_dir(dir);
+         }
++        // An in-process plugin host's `process.env` writes land in this
++        // process; inherited, they change the restart's cache keys.
++        if let Some(env) = STARTUP_ENV.get() {
++            cmd.env_clear().envs(env.iter().cloned());
++        }
+         let err = cmd.exec();
+         eprintln!("oj: restart failed: {err}");
+         std::process::exit(1);
+@@ -369,6 +374,9 @@ pub(crate) fn restart_process() -> ! {
+         if let Some(dir) = launch_dir {
+             cmd.current_dir(dir);
+         }
++        if let Some(env) = STARTUP_ENV.get() {
++            cmd.env_clear().envs(env.iter().cloned());
++        }
+         let code = cmd.status().ok().and_then(|s| s.code()).unwrap_or(0);
+         std::process::exit(code);
+     }
+@@ -378,11 +386,16 @@ pub(crate) fn restart_process() -> ! {
+ /// any engine boots (each in-process host really chdirs to its app root).
+ pub(crate) static STARTUP_CWD: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+ 
++/// The environment oj was launched with, so a restart starts as the launch did.
++static STARTUP_ENV: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
++    std::sync::OnceLock::new();
++
+ /// Call once at process start, before any plugin host or engine exists.
+ pub fn capture_startup_cwd() {
+     if let Ok(dir) = std::env::current_dir() {
+         let _ = STARTUP_CWD.set(dir);
+     }
++    let _ = STARTUP_ENV.set(std::env::vars_os().collect());
+ }
+ 
+ /// The watcher thread's inbox: filesystem notifications, and directories to

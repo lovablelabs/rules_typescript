@@ -117,9 +117,9 @@ crate.annotation(
 crate.annotation(
     crate = "oj_js",
     patch_args = ["-p1"],
-    patches = ["//oj:oj-js-code-cache-bounded.patch"],
+    patches = ["//oj:oj-js-parked-watchdog-grace.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.16",
+    version = "0.2.22",
 )
 crate.annotation(
     crate = "libsqlite3-sys",
@@ -158,11 +158,21 @@ use_repo(
 )
 
 crate.annotation(
+    crate = "oj_cache",
+    patch_args = ["-p1"],
+    patches = ["//oj:oj-cache-start-bundle-stable-key.patch"],
+    repositories = ["oj_crates"],
+    version = "0.2.22",
+)
+crate.annotation(
     crate = "oj_server",
     patch_args = ["-p1"],
-    patches = ["//oj:oj-server-file-hmr.patch"],
+    patches = [
+        "//oj:oj-server-restart-startup-env.patch",
+        "//oj:oj-server-scan-outside-plugin-host.patch",
+    ],
     repositories = ["oj_crates"],
-    version = "0.2.16",
+    version = "0.2.22",
 )
 crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
@@ -171,7 +181,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:oj-napi-link.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.16",
+    version = "0.2.22",
 )
 crate.annotation(
     crate = "cranelift-assembler-x64",
@@ -193,7 +203,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:napi-symbol-bytes.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.16",
+    version = "0.2.22",
 )
 crate.annotation(
     crate = "deno_napi",
@@ -239,12 +249,9 @@ crate.annotation(
 crate.annotation(
     crate = "oj_deno_runtime",
     patch_args = ["-p1"],
-    patches = [
-        "//oj:deno-runtime-snapshot-source.patch",
-        "//oj:oj-deno-fs-events-indexed.patch",
-    ],
+    patches = ["//oj:deno-runtime-snapshot-source.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.16",
+    version = "0.2.22",
 )
 crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
@@ -252,7 +259,7 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//oj:deno-snapshots-source.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.16",
+    version = "0.2.22",
 )
 crate.annotation(
     crate = "deno_features",

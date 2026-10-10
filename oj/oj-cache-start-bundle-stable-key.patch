@@ -1,0 +1,47 @@
+diff --git a/src/start_bundle/mod.rs b/src/start_bundle/mod.rs
+index edb0969..f903f34 100644
+--- a/src/start_bundle/mod.rs
++++ b/src/start_bundle/mod.rs
+@@ -220,6 +220,7 @@ impl StartBundleStore {
+             let _ = fs::remove_dir_all(&current_dir);
+             return Err(Miss::ClosureUnreadable);
+         };
++        let files = self.key_closure(files);
+         let memo = read_memo(&current_dir);
+         let (digests, rehashed) = verified_digests(&files, memo.as_ref());
+         let key = self.key_from(&files, &digests)?;
+@@ -309,6 +310,21 @@ impl StartBundleStore {
+         Ok(())
+     }
+ 
++    /// The closure without oj's own cache files. bundle-client.mjs drops its
++    /// build dir by path prefix, which misses when that dir is reached through
++    /// a symlink and the bundler reports realpaths; `manifest.ts` then joins
++    /// the key, and every boot rewrites it before restoring.
++    fn key_closure(&self, files: Vec<PathBuf>) -> Vec<PathBuf> {
++        let Some(cache) = self.dir.parent() else {
++            return files;
++        };
++        let real = fs::canonicalize(cache).ok();
++        files
++            .into_iter()
++            .filter(|p| !p.starts_with(cache) && !real.as_ref().is_some_and(|r| p.starts_with(r)))
++            .collect()
++    }
++
+     fn key_from(
+         &self,
+         files: &[PathBuf],
+diff --git a/src/start_bundle/persist.rs b/src/start_bundle/persist.rs
+index 46142d6..a2b6946 100644
+--- a/src/start_bundle/persist.rs
++++ b/src/start_bundle/persist.rs
+@@ -14,7 +14,7 @@ use super::{
+ 
+ impl StartBundleStore {
+     pub fn persist(&self, start_dir: &Path) -> Option<(String, PinnedBundle)> {
+-        let files = read_closure(&start_dir.join(CLOSURE_FILE))?;
++        let files = self.key_closure(read_closure(&start_dir.join(CLOSURE_FILE))?);
+         let digests = par_map(&files, |p| hash_file(p));
+         let key = self.key_from(&files, &digests).ok()?;
+         let index = read_chunk_index(start_dir)?;

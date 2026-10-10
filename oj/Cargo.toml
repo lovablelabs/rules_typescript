@@ -7,9 +7,12 @@ edition = "2024"
 path = "unused.rs"
 
 [dependencies]
-oj = { version = "=0.2.16" }
+oj = { version = "=0.2.22" }
 deno_core = { version = "=0.412.0", default-features = false }
-oj_server = { version = "=0.2.16" }
+oj_server = { version = "=0.2.22" }
+oj_js = { version = "=0.2.22" }
+oj_cache = { version = "=0.2.22" }
+tokio = { version = "=1.53.1", features = ["full"] }
 cranelift-assembler-x64 = { version = "=0.117.2", default-features = false }
 cranelift-codegen-meta = { version = "=0.117.2", default-features = false }
-oj_deno_napi = { version = "=0.2.16", default-features = false }
+oj_deno_napi = { version = "=0.2.22", default-features = false }

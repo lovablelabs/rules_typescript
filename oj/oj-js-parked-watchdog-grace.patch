@@ -1,0 +1,85 @@
+diff --git a/src/scheduler.rs b/src/scheduler.rs
+index c6f344f..e599590 100644
+--- a/src/scheduler.rs
++++ b/src/scheduler.rs
+@@ -10,9 +10,9 @@
+ //!
+ //! A parked call's deadline is part of its future (`tokio::time::timeout_at`),
+ //! so expiry arrives through the same settlement path as success — there is
+-//! no separate timer bookkeeping to keep in sync. The watchdog guard stays
+-//! armed underneath for the one case the timer cannot reach: a continuation
+-//! wedging the event loop in a busy loop.
++//! no separate timer bookkeeping to keep in sync. A watchdog guard stays
++//! armed underneath, a grace period past the deadline, for the one case the
++//! timer cannot reach: a continuation wedging the event loop in a busy loop.
+ 
+ use std::future::Future;
+ use std::pin::Pin;
+@@ -81,6 +81,11 @@ pub(crate) fn engine_thread(
+     });
+ }
+ 
++/// How long after a parked call's deadline the watchdog backstop fires. The
++/// deadline itself settles through `timeout_at`; terminating at the same
++/// instant would stop whatever other call's JS is on the stack (oj#347).
++const PARKED_WATCHDOG_GRACE: Duration = Duration::from_secs(10);
++
+ /// How a parked call left the pending set: settled by its promise, or timed
+ /// out by the deadline baked into its future.
+ type ParkedOutcome = Result<SettledResult, Elapsed>;
+@@ -101,7 +106,8 @@ enum Tick {
+ 
+ /// A call whose module ran and whose function was invoked, waiting for the
+ /// returned promise to settle while the scheduler drives the event loop.
+-/// `guard` is the same deadline on the watchdog, for a wedged event loop.
++/// `guard` is the deadline plus [`PARKED_WATCHDOG_GRACE`] on the watchdog,
++/// for a wedged event loop.
+ struct ParkedCall {
+     fut: Pin<Box<dyn Future<Output = ParkedOutcome>>>,
+     guard: Option<DeadlineGuard>,
+@@ -247,11 +253,10 @@ impl Scheduler {
+         deadline: Option<Duration>,
+         reply: Reply,
+     ) {
+-        // The watchdog stays armed for the call's whole life. In the
+-        // EXCLUSIVE setup phase no other JS can be on the stack, so a
+-        // termination can never hit an innocent job; while the call is
+-        // parked, its future's own timeout normally settles the deadline and
+-        // the watchdog only matters for a wedged event loop.
++        // In the EXCLUSIVE setup phase no other JS can be on the stack, so
++        // the watchdog may terminate at the deadline itself. Once parked,
++        // another call's JS may be on the stack at that instant: the parked
++        // guard lands PARKED_WATCHDOG_GRACE later, for a wedged loop only.
+         let deadline_at = deadline.map(|d| tokio::time::Instant::now() + d);
+         let guard = self.isolate.arm(deadline);
+         match self.setup_call(&module, &export, args).await {
+@@ -262,11 +267,28 @@ impl Scheduler {
+                 let _ = reply.send(Err(verdict.cutoff()));
+             }
+             Ok(fut) => {
++                let parked = self
++                    .isolate
++                    .arm(deadline.map(|d| d + PARKED_WATCHDOG_GRACE));
++                // Settling the setup guard also catches a watchdog that fired
++                // after the check above, and cancels its pending termination.
++                let verdict = self.settle(guard);
++                if !matches!(verdict, Verdict::Clean) {
++                    if let Some(parked) = parked {
++                        let _ = parked.disarm();
++                    }
++                    let _ = reply.send(Err(verdict.cutoff()));
++                    return;
++                }
+                 let fut: Pin<Box<dyn Future<Output = ParkedOutcome>>> = match deadline_at {
+                     Some(at) => Box::pin(tokio::time::timeout_at(at, fut)),
+                     None => Box::pin(async move { Ok(fut.await) }),
+                 };
+-                self.calls.push(ParkedCall { fut, guard, reply });
++                self.calls.push(ParkedCall {
++                    fut,
++                    guard: parked,
++                    reply,
++                });
+             }
+             Err(e) => {
+                 let verdict = self.settle(guard);
