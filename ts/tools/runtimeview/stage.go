@@ -82,7 +82,19 @@ func npmContextConflict(d npmDemand, destination, occupied string) error {
 		d.context.Source, d.name, d.binding, d.context.Module, destination, occupied)
 }
 
+// PlaceNpmContexts links every demanded <directory>/node_modules/<name> that
+// is free, the contract of the build-time native view.
 func PlaceNpmContexts(root string, contexts []NpmContext, modules []string) error {
+	return placeNpmContexts(root, contexts, modules, false)
+}
+
+// PlaceNpmContextsSkippingResolved omits a link when node's walk-up from its
+// directory already reaches the same store, which changes no resolution.
+func PlaceNpmContextsSkippingResolved(root string, contexts []NpmContext, modules []string) error {
+	return placeNpmContexts(root, contexts, modules, true)
+}
+
+func placeNpmContexts(root string, contexts []NpmContext, modules []string, skipResolved bool) error {
 	if root != "" {
 		// Stores below resolve to real paths; the links must count ".." from the real root too.
 		resolved, err := filepath.EvalSymlinks(root)
@@ -169,47 +181,137 @@ func PlaceNpmContexts(root string, contexts []NpmContext, modules []string) erro
 			}
 		}
 	}
+	type pathState struct {
+		exists bool
+		isDir  bool
+	}
+	lstatCache := map[string]pathState{}
+	lstat := func(relative string) (pathState, error) {
+		if state, ok := lstatCache[relative]; ok {
+			return state, nil
+		}
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
+		state := pathState{}
+		if err == nil {
+			state = pathState{exists: true, isDir: info.IsDir()}
+		} else if !os.IsNotExist(err) {
+			return state, err
+		}
+		lstatCache[relative] = state
+		return state, nil
+	}
+	statCache := map[string]os.FileInfo{}
+	selects := func(candidate string, expected os.FileInfo) bool {
+		actual, ok := statCache[candidate]
+		if !ok {
+			// A failed Stat (a dangling link) caches nil: it never selects a store.
+			actual, _ = os.Stat(filepath.Join(root, filepath.FromSlash(candidate)))
+			statCache[candidate] = actual
+		}
+		return actual != nil && os.SameFile(actual, expected)
+	}
+	// nearestSelects reports whether the nearest <ancestor>/node_modules/<name>
+	// on node's walk-up from directory is the expected store.
+	nearestSelects := func(directory, name string, expected os.FileInfo) (bool, error) {
+		parts := strings.Split(directory, "/")
+		for depth := len(parts); depth > 0; depth-- {
+			if parts[depth-1] == "node_modules" {
+				continue
+			}
+			candidate := strings.Join(parts[:depth], "/") + "/node_modules/" + name
+			state, err := lstat(candidate)
+			if err != nil {
+				return false, err
+			}
+			if !state.exists {
+				continue
+			}
+			return selects(candidate, expected), nil
+		}
+		return false, nil
+	}
+	listings := map[string]map[string]bool{}
+	listing := func(relative string) (map[string]bool, error) {
+		if names, ok := listings[relative]; ok {
+			return names, nil
+		}
+		entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		names := make(map[string]bool, len(entries))
+		for _, entry := range entries {
+			names[entry.Name()] = true
+		}
+		listings[relative] = names
+		return names, nil
+	}
+	// resolvedAbove reports whether node's CJS and ESM walks and vite's all
+	// reach the expected store for name from directory without a link there.
+	resolvedAbove := func(directory, name string, expected os.FileInfo) (bool, error) {
+		parts := strings.Split(directory, "/")
+		// Only CJS skips node_modules segments on its walk, so the walks differ below one.
+		if slices.Contains(parts, "node_modules") {
+			return false, nil
+		}
+		scope, base := "", name
+		if i := strings.LastIndex(name, "/"); i >= 0 {
+			scope, base = "/"+name[:i], name[i+1:]
+		}
+		for depth := len(parts); depth > 0; depth-- {
+			parent := strings.Join(parts[:depth], "/") + "/node_modules" + scope
+			names, err := listing(parent)
+			if err != nil {
+				return false, err
+			}
+			// CJS tries <name>.js, .json and .node before the <name> directory.
+			if names[base+".js"] || names[base+".json"] || names[base+".node"] {
+				return false, nil
+			}
+			if names[base] {
+				return selects(parent+"/"+base, expected), nil
+			}
+		}
+		return false, nil
+	}
+	// Sorted order settles every ancestor directory before its descendants, so
+	// a walk-up sees each link this pass places above it.
 	for _, directory := range slices.Sorted(maps.Keys(byDirectory)) {
 		for _, name := range slices.Sorted(maps.Keys(byDirectory[directory])) {
 			demand := byDirectory[directory][name]
 			destination := directory + "/node_modules/" + name
+			expected := storeCache[demand.binding].info
+			if skipResolved {
+				if matched, err := resolvedAbove(directory, name, expected); err == nil && matched {
+					continue
+				}
+			}
 			occupied := ""
 			parts := strings.Split(destination, "/")
 			for depth := 1; depth <= len(parts); depth++ {
 				relative := strings.Join(parts[:depth], "/")
-				info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
-				if err == nil {
-					if depth == len(parts) || !info.IsDir() {
-						occupied = relative
-						break
-					}
-				} else if !os.IsNotExist(err) {
+				state, err := lstat(relative)
+				if err != nil {
 					return err
+				}
+				if state.exists && (depth == len(parts) || !state.isDir) {
+					occupied = relative
+					break
 				}
 			}
 			if occupied == "" {
 				if err := relativeLink(filepath.Join(root, filepath.FromSlash(destination)), demand.store); err != nil {
 					return err
 				}
+				// The new link can surface through a directory alias at another cached path.
+				clear(lstatCache)
+				clear(statCache)
+				clear(listings)
 				continue
 			}
-			matched := false
-			parts = strings.Split(directory, "/")
-			for depth := len(parts); depth > 0; depth-- {
-				if parts[depth-1] == "node_modules" {
-					continue
-				}
-				candidate := filepath.Join(root, filepath.FromSlash(strings.Join(parts[:depth], "/")+"/node_modules/"+name))
-				if _, err := os.Lstat(candidate); err != nil {
-					if os.IsNotExist(err) {
-						continue
-					}
-					return err
-				}
-				actual, actualErr := os.Stat(candidate)
-				expected, expectedErr := os.Stat(demand.store)
-				matched = actualErr == nil && expectedErr == nil && os.SameFile(actual, expected)
-				break
+			matched, err := nearestSelects(directory, name, expected)
+			if err != nil {
+				return err
 			}
 			if !matched {
 				return npmContextConflict(demand, destination, fmt.Sprintf("runtime entry %q", occupied))

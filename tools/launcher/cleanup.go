@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type cleanupResource struct {
@@ -19,6 +20,9 @@ func (resources cleanupResources) remove() error {
 	for _, resource := range resources {
 		remove := os.Remove
 		if resource.Recursive {
+			if keptForBazel(resource.Path) {
+				continue
+			}
 			remove = os.RemoveAll
 		}
 		if err := remove(resource.Path); err != nil && !os.IsNotExist(err) {
@@ -26,6 +30,20 @@ func (resources cleanupResources) remove() error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// Opt-in because a local `bazel test` keeps TEST_TMPDIR until the next run;
+// a remote executor discards it with the action.
+func keptForBazel(path string) bool {
+	tmp := os.Getenv("TEST_TMPDIR")
+	if os.Getenv("TS_TEST_SKIP_TMPDIR_CLEANUP") != "1" || tmp == "" {
+		return false
+	}
+	tmp, err := filepath.Abs(tmp)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(path, tmp+string(filepath.Separator))
 }
 
 func (p *Plan) own(path string, recursive bool) error {
