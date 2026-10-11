@@ -368,7 +368,7 @@ def _npm_store_hoist_impl(ctx):
             [entry.link for entry in links.values()] + members.values(),
             transitive = [entry.store.transitive for entry in links.values()],
         )),
-        NpmHoistInfo(links = links, members = members),
+        NpmHoistInfo(links = links, members = members, member_names = ctx.attr.member_names),
     ]
 
 _HOISTED = attr.label_keyed_string_dict(
@@ -388,6 +388,9 @@ npm_store_hoist = rule(
         "public": _HOISTED,
         "private_members": _MEMBERS,
         "public_members": _MEMBERS,
+        "member_names": attr.string_dict(
+            doc = "Every workspace member's directory from the workspace root -> its package name.",
+        ),
     },
     doc = """The hidden hoist of one lockfile: a declared symlink into a store
 tree per hoisted name, `private` ones under this target's name
@@ -553,6 +556,7 @@ def virtual_store(name, graph, members, files, package_dir):
             for (kind, name) in hoisted_members
             if kind == "public"
         ]),
+        member_names = {member["path"]: member["name"] for member in graph["members"]},
         tags = ["manual"],
         visibility = ["//visibility:public"],
     )

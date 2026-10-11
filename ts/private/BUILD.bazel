@@ -70,6 +70,7 @@ bzl_library(
         ":node_modules",
         ":providers",
         ":runtime",
+        ":runtime_tools",
         ":toolchain",
     ],
 )
@@ -81,6 +82,7 @@ bzl_library(
         ":node_modules",
         ":providers",
         ":runtime",
+        ":runtime_tools",
         ":toolchain",
     ],
 )
@@ -137,6 +139,11 @@ bzl_library(
     deps = [
         "//platforms",
     ],
+)
+
+bzl_library(
+    name = "runtime_tools",
+    srcs = ["runtime_tools.bzl"],
 )
 
 bzl_library(

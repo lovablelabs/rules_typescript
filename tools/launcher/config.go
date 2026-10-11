@@ -38,6 +38,7 @@ type Config struct {
 	Runtime          string            `json:"runtime,omitempty"`
 	RunArgs          []string          `json:"runtime_args,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
+	ToolEnv          map[string]string `json:"tool_env,omitempty"`
 	RuntimeModules   []string          `json:"runtime_modules,omitempty"`
 	NativeViewAnchor string            `json:"native_view_anchor,omitempty"`
 
@@ -185,6 +186,11 @@ func ParseConfig(data []byte) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	for name := range c.ToolEnv {
+		if _, ok := c.Env[name]; ok {
+			return fmt.Errorf("tool_env and env both set %s", name)
+		}
+	}
 	switch c.Mode {
 	case ModeNode:
 		if c.Node == nil {

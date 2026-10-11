@@ -108,6 +108,40 @@ func TestNativePlansKeepStandardLookupInTheBuiltView(t *testing.T) {
 	}
 }
 
+func TestPlanSetsToolEnvToTheToolsAbsolutePath(t *testing.T) {
+	for _, layout := range []string{"directory", "manifest"} {
+		t.Run(layout, func(t *testing.T) {
+			const entry, tool = "_main/app/main.js", "tools+/bin/probe"
+			r, real := fakeRunfiles(t, map[string]string{
+				entry: "export {};",
+				tool:  "#!/bin/sh\n",
+			})
+			if layout == "directory" {
+				r, _ = withRunfilesDir(t, real[entry], entry)
+			}
+			cfg := &Config{
+				Mode:           ModeNode,
+				Workspace:      "_main",
+				Env:            map[string]string{"KEPT": "literal"},
+				ToolEnv:        map[string]string{"PROBE_BINARY": tool},
+				RuntimeModules: []string{entry},
+				Node:           &NodeConfig{Entry: entry},
+			}
+			plan, err := fixturePlan(t, cfg, r, real, nil, Shard{Total: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := plan.EnvOverrides["PROBE_BINARY"]
+			if !filepath.IsAbs(got) || got != real[tool] {
+				t.Errorf("PROBE_BINARY = %q, want the absolute path %q in the original runfiles", got, real[tool])
+			}
+			if plan.EnvOverrides["KEPT"] != "literal" {
+				t.Errorf("KEPT = %q, want env's literal value", plan.EnvOverrides["KEPT"])
+			}
+		})
+	}
+}
+
 func TestPlanNodeFallsBackToSystemNode(t *testing.T) {
 	r, real := fakeRunfiles(t, map[string]string{"_main/a.js": "x"})
 	cfg := &Config{Mode: ModeNode, Node: &NodeConfig{Entry: "_main/a.js"}}

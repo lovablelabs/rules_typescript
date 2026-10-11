@@ -19,6 +19,7 @@ bzl_library(
         ":tsgo",
         "//ts/private:node_modules",
         "//ts/private:providers",
+        "//ts/private:runtime_tools",
         "//ts/private:toolchain",
     ],
 )

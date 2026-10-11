@@ -132,7 +132,9 @@ ts/BUILD.bazel
 - `ts/private/go_mod.bzl` — the go.mod and go.sum readers behind the source-built tsgo; `ts/private/tsgo_source/` holds the compiler's pin (go.mod) and the patch the build applies, `//ts/toolchain/tsgo_source` is the toolchain over rules_go's build of it, outside `//ts/toolchain:all`; `//ts/private/tsgo:tsgo_test` holds the pin to the lockfile's binary
 - `ts/private/ts_config.bzl` — the public `ts_config` rule (a hand-written tsconfig.json and its `extends` chain)
 - `platforms/platforms.bzl` — the one platform table (`PLATFORMS`) everything loads
-- `ts/toolchain/BUILD.bazel` — the six toolchain types and their instances;
+- `ts/toolchain/BUILD.bazel` — the toolchain types and their instances
+  (`runtime_tools_type` has none: a consumer's `ts_runtime_tools`,
+  `ts/private/runtime_tools.bzl`, is one, and every launcher rule resolves it);
   `//ts/toolchain:all`; `ts/private/tools_lock.bzl` names the tools release the
   tools and launcher instances download, and `//ts/tools/tsaction:
   source_toolchain` and `//tools/launcher:all` are the source-built instances

@@ -211,6 +211,7 @@ in `hoist`, and every importer on the chain carries it as
 |---|---|---|
 | `links` | `dict of string -> NpmLinkInfo` | Per hoisted name, the declared symlink `node_modules/.pnpm/node_modules/<name>` (a `public-hoist-pattern` match's at the root importer's `node_modules/<name>`) and the store it enters |
 | `members` | `dict of string -> File` | Per hoisted workspace member, the declared symlink alone, with no dependency on the member's tree; a consumer's closure holds the tree through the member's link target |
+| `member_names` | `dict of string -> string` | Per workspace member of the lockfile, hoisted or not, its directory from the workspace root -> its package name; a runtime tools toolchain's `packages` matches a target by the member its package lies in |
 
 ## NpmLinkInfo
 
@@ -228,8 +229,9 @@ the member.
 
 ## Toolchain Contract
 
-`@rules_typescript//ts/toolchain:defs.bzl` exports seventeen names: six
-toolchain type labels, five providers, and six accessors.
+`@rules_typescript//ts/toolchain:defs.bzl` exports twenty-one names: seven
+toolchain type labels, six providers, seven accessors, and the
+`ts_runtime_tools` rule.
 
 ```python
 load(
@@ -238,19 +240,23 @@ load(
     "JS_TOOL_TOOLCHAIN_TYPE",
     "LAUNCHER_TOOLCHAIN_TYPE",
     "OXC_TOOLCHAIN_TYPE",
+    "RUNTIME_TOOLS_TOOLCHAIN_TYPE",
     "TOOLS_TOOLCHAIN_TYPE",
     "TSGO_TOOLCHAIN_TYPE",
     "JsRuntimeInfo",
     "LauncherInfo",
     "OxcToolchainInfo",
+    "RuntimeToolsInfo",
     "ToolsInfo",
     "TsgoToolchainInfo",
     "get_js_runtime",
     "get_js_tool",
     "get_launcher_toolchain",
     "get_oxc_toolchain",
+    "get_runtime_tools",
     "get_tools_toolchain",
     "get_tsgo_toolchain",
+    "ts_runtime_tools",
 )
 ```
 
@@ -262,6 +268,7 @@ load(
 | `LAUNCHER_TOOLCHAIN_TYPE` | `//ts/toolchain:launcher_toolchain_type` | the target platform | `get_launcher_toolchain(ctx)` | `LauncherInfo`, or `None` when no toolchain resolved |
 | `JS_RUNTIME_TOOLCHAIN_TYPE` | `//ts/toolchain:js_runtime_type` | the target platform | `get_js_runtime(ctx)` | `JsRuntimeInfo`, or `None` when no toolchain resolved |
 | `JS_TOOL_TOOLCHAIN_TYPE` | `//ts/toolchain:js_tool_type` | the exec platform | `get_js_tool(ctx)` | `JsRuntimeInfo`, or `None` when no toolchain resolved |
+| `RUNTIME_TOOLS_TOOLCHAIN_TYPE` | `//ts/toolchain:runtime_tools_type` | the target platform | `get_runtime_tools(ctx)` | `RuntimeToolsInfo`, or `None` when no toolchain resolved |
 
 The labels are `Label()` values, so they resolve in this ruleset's own
 repository mapping and keep working under another repository name.
@@ -284,6 +291,9 @@ build and differ the moment `--platforms` does.
 | `JsRuntimeInfo` | `runtime_binary` | `File` | The runtime executable: node, or a Deno, Bun or wrapper a consumer registers |
 | | `runtime_name` | `string` | The name diagnostics use; `"node"` for the shipped toolchains |
 | | `args_prefix` | `list of string` | Arguments placed before the entry script |
+| `RuntimeToolsInfo` | `tool_env` | `dict of string -> FilesToRunProvider` | Per environment variable, the executable whose absolute path the launcher sets it to |
+| | `runfiles` | `runfiles` | The executables and their runfiles |
+| | `packages` | `list of string` | npm package names a program's closure must hold to get the tools; empty, every program does |
 
 A rule declares the types it needs and reads them through the accessors:
 
@@ -325,6 +335,9 @@ platform runs the build; one tsgo toolchain per platform in `TSGO_PLATFORMS`,
 constrained on the exec platform; one source-built tools toolchain for the execution platform and one source-built launcher toolchain per supported target platform; one Node runtime toolchain
 per platform in `NODE_PLATFORMS`, constrained on the target platform; and one
 Node tool toolchain per platform, constrained on the exec platform.
+`runtime_tools_type` has no instance there: a workspace declares one with
+`ts_runtime_tools` and registers it itself ([Runtime Tools
+](../guides/runtime-tools.md)).
 
 Which compiler the tsgo toolchains hold is the `ts` extension's to say, and it
 reads a pnpm lockfile: the root importer's `typescript` entry names the version,

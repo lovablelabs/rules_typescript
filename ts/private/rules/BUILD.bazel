@@ -51,6 +51,7 @@ bzl_library(
         "//ts/private:node_modules",
         "//ts/private:providers",
         "//ts/private:runtime",
+        "//ts/private:runtime_tools",
         "//ts/private:toolchain",
         "//ts/private/actions:workers_pool",
     ],

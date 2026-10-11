@@ -55,6 +55,7 @@ nav:
     - Testing with vitest: guides/testing.md
     - Bundling with Vite: guides/bundling.md
     - Dev Server: guides/dev-server.md
+    - Runtime Tools: guides/runtime-tools.md
     - Tailwind v4: guides/tailwind.md
     - Monorepo Layout: guides/monorepo.md
     - Troubleshooting: guides/troubleshooting.md

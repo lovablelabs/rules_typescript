@@ -30,6 +30,7 @@ bzl_library(
     ],
     deps = [
         "//ts/private:runtime",
+        "//ts/private:runtime_tools",
         "//ts/private:toolchain",
     ],
 )
@@ -53,6 +54,9 @@ toolchain_type(name = "js_runtime_type")
 
 # A JS runtime used as a build tool (exec platform).
 toolchain_type(name = "js_tool_type")
+
+# Executables a launched program spawns (target platform); no instance here.
+toolchain_type(name = "runtime_tools_type")
 
 # ─── Toolchain instances ───────────────────────────────────────────────────────
 #

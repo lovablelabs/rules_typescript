@@ -55,6 +55,13 @@ func MakePlan(cfg *Config, r *Resolver, args []string, shard Shard) (*Plan, erro
 	for k, v := range cfg.Env {
 		plan.setEnv(k, v)
 	}
+	for name, rlocation := range cfg.ToolEnv {
+		path, err := r.Path(rlocation)
+		if err != nil {
+			return nil, fmt.Errorf("ts_launcher: tool_env %s: %w", name, err)
+		}
+		plan.setEnv(name, path)
+	}
 	switch cfg.Mode {
 	case ModeNode:
 		return planNode(cfg, r, plan, args)

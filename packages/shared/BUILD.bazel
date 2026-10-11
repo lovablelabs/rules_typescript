@@ -48,3 +48,17 @@ ts_test(
         "@npm//:vitest",
     ],
 )
+
+# //tests/runtime_tools:self_package_gets_tools_test: a test in this member
+# whose npm closure names neither `shared` nor vitest.
+# keep
+ts_test(
+    name = "self_tools_test",
+    srcs = ["self_tools.test.ts"],
+    emit = True,  # keep
+    node_modules = ":node_modules",
+    runner = "//ts/runners:node_test",
+    tags = ["manual"],
+    visibility = ["//tests/runtime_tools:__pkg__"],
+    deps = ["@npm//:types_node"],
+)

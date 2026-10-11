@@ -25,13 +25,14 @@ load(
     "runfiles_scope_paths",
     "validate_runfiles_modules",
 )
-load("//ts/private:node_modules.bzl", "runfiles_dir", "runtime_npm_contexts")
+load("//ts/private:node_modules.bzl", "own_package_name", "runfiles_dir", "runtime_npm_contexts")
 load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations")
 load(
     "//ts/private:runtime.bzl",
     "JS_RUNTIME_TOOLCHAIN_TYPE",
     "get_js_runtime",
 )
+load("//ts/private:runtime_tools.bzl", "program_runtime_tools")
 load("//ts/private:toolchain.bzl", "TOOLS_TOOLCHAIN_TYPE")
 load("//ts/private/actions:workers_pool.bzl", "WORKERS_POOL_ATTRS")
 load(
@@ -512,6 +513,11 @@ def _ts_test_impl(ctx):
         for path, file in visible.items()
         if file != None and "external/" + path in launched.symlinks
     }))
+
+    def own_names():
+        own = own_package_name(ctx.label, ctx.attr.node_modules[NodeModulesInfo] if ctx.attr.node_modules else None)
+        return linked.keys() + ([own] if own != None else [])
+
     launcher = declare_launcher(
         ctx,
         config,
@@ -519,8 +525,12 @@ def _ts_test_impl(ctx):
         runfiles = runfiles,
         runtime_file = runtime_binary,
         canonical_links = [(link, module_paths.get(canonical, (None, canonical))[1]) for link, canonical in canonical_links],
+        runtime_tools = program_runtime_tools(ctx, own_names),
     )
-    runfiles = runfiles.merge(ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks))
+    runfiles = runfiles.merge_all([
+        ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks),
+        launcher.tool_runfiles,
+    ])
 
     providers = [
         DefaultInfo(executable = launcher.executable, runfiles = runfiles),
