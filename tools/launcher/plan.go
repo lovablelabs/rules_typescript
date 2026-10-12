@@ -169,7 +169,7 @@ func placeNpmContexts(r *Resolver, contexts []NpmContext, sets []map[string]stri
 	if err := runtimeview.ResolveNpmBindings(contexts, sets); err != nil {
 		return err
 	}
-	return runtimeview.PlaceNpmContexts(r.Dir(), contexts, modules)
+	return runtimeview.PlaceNpmContextsSkippingResolved(r.Dir(), contexts, modules)
 }
 
 func stageManifest(root, manifest string, include func(string) bool, modules []string) error {

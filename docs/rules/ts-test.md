@@ -150,7 +150,7 @@ member -- resolves to the compiled file ([`.ts` Specifiers](#ts-specifiers);
 under node:test, the runner's hook:
 [The node:test Runner](#the-nodetest-runner)).
 
-Both shipped runners preserve each source owner's declared npm bindings at the admitted module and package-scope paths, as [binaries do](ts-binary.md#without-a-bundler). This includes relocated source TypeScript and an ES twin selected in place of a CommonJS output. Conflicting bindings at one directory or occupied projection destinations fail before test execution; erased imports do not remove declared bindings.
+Both shipped runners preserve each source owner's declared npm bindings at the admitted module and package-scope paths, as [binaries do](ts-binary.md#without-a-bundler). This includes relocated source TypeScript and an ES twin selected in place of a CommonJS output. Conflicting bindings at one directory or occupied projection destinations fail before test execution; erased imports do not remove declared bindings. Under vitest the launcher leaves out a binding's link when node's walk up from that directory already reaches the same store, so a resolution is the same with or without it.
 
 Other bare specifiers resolve through the importer chain by the runner's own route. Under vitest the resolver walks up from the test's runfiles path
 through each importer's `node_modules` to the lockfile's root importer's;
@@ -298,6 +298,15 @@ package up, the JS runtime the toolchain's: the Node your `.nvmrc` names
 ([Node.js](../getting-started/quickstart.md#nodejs)). Under `bazel test` the
 runner sets `CI=true` so vitest writes no `.snap` ([Snapshots](#snapshots));
 `env = {"CI": "false"}` opts out.
+
+The launcher stages the test's runfiles tree under `TEST_TMPDIR` and removes
+it after the run. With `TS_TEST_SKIP_TMPDIR_CLEANUP=1` in the test's
+environment it leaves every tree under `TEST_TMPDIR` in place; anything it owns
+elsewhere is still removed. Set it for remote execution, where the executor
+discards `TEST_TMPDIR` with the action, for example
+`test:remote --test_env=TS_TEST_SKIP_TMPDIR_CLEANUP=1` in `.bazelrc`. Leave it
+unset locally: Bazel keeps a local `TEST_TMPDIR` until the test's next run,
+and a large tree stays in `bazel-out` until then.
 
 ### The Generated vitest Config
 

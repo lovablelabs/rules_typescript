@@ -51,3 +51,43 @@ func requireRemoved(t *testing.T, path string) {
 		t.Fatalf("mutable resource remains after cleanup: %v", err)
 	}
 }
+
+func TestCleanupSkipTmpdirOptInKeepsOnlyTreesUnderTestTmpdir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TEST_TMPDIR", tmp)
+	inside := filepath.Join(tmp, "ts_test_runfiles123")
+	if err := os.MkdirAll(filepath.Join(inside, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := cleanupInput(t)
+	sibling := tmp + "-sibling"
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sibling) })
+	resources := cleanupResources{{Path: inside, Recursive: true}, {Path: outside, Recursive: true}, {Path: sibling, Recursive: true}}
+
+	t.Setenv("TEST_TMPDIR", "")
+	t.Setenv("TS_TEST_SKIP_TMPDIR_CLEANUP", "1")
+	t.Chdir(filepath.Dir(outside))
+	if keptForBazel(outside) {
+		t.Fatal("an unset TEST_TMPDIR kept a tree under the working directory")
+	}
+	t.Setenv("TEST_TMPDIR", tmp)
+
+	t.Setenv("TS_TEST_SKIP_TMPDIR_CLEANUP", "1")
+	if err := resources.remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(inside, "node_modules")); err != nil {
+		t.Fatalf("opted-in cleanup removed the tree under TEST_TMPDIR: %v", err)
+	}
+	requireRemoved(t, outside)
+	requireRemoved(t, sibling)
+
+	t.Setenv("TS_TEST_SKIP_TMPDIR_CLEANUP", "")
+	if err := resources.remove(); err != nil {
+		t.Fatal(err)
+	}
+	requireRemoved(t, inside)
+}
