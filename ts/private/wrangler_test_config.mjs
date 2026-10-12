@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, realpathSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, posix, resolve } from "node:path";
 
@@ -22,7 +22,12 @@ const flags = {
   runtimeSources: [],
   runtimeJs: [],
 };
-const argv = process.argv.slice(2);
+// A multiline param file holds one argument per line.
+const argv = process.argv
+  .slice(2)
+  .flatMap((arg) =>
+    arg.startsWith("@") ? readFileSync(arg.slice(1), "utf8").replace(/\n$/, "").split("\n") : [arg],
+  );
 for (let i = 0; i < argv.length; i += 2) {
   const name = names[argv[i]] ?? argv[i];
   if (Array.isArray(flags[name])) flags[name].push(argv[i + 1]);

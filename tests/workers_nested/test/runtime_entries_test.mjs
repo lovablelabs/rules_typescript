@@ -7,30 +7,30 @@ const [patcher, nodeModules] = process.argv.slice(2);
 const temp = mkdtempSync(join(process.env.TEST_TMPDIR, "entries-"));
 writeFileSync(join(temp, "entry.ts"), "export const incidental = true;\n");
 let count = 0;
-function project(main, runtimeFiles, env, runtimeSources = [], runtimeJs = [], readOnly = false) {
+function project(main, runtimeFiles, env, runtimeSources = [], runtimeJs = [], readOnly = false, paramFile = false) {
   const config = join(temp, `config-${count++}.json`);
   const out = config + ".out.json";
   const original = JSON.stringify({ name: "runtime-entry", main, env });
   writeFileSync(config, original);
   if (readOnly) chmodSync(config, 0o444);
-  const result = spawnSync(
-    process.execPath,
-    [
-      patcher,
-      "--config",
-      config,
-      "--config-path",
-      "../fixture/worker/wrangler.json",
-      "--out",
-      out,
-      "--node-modules",
-      resolve(nodeModules),
-      ...runtimeFiles.flatMap((pair) => ["--runtime-file", JSON.stringify(pair)]),
-      ...runtimeSources.flatMap((path) => ["--runtime-source", path]),
-      ...runtimeJs.flatMap((path) => ["--runtime-js", path]),
-    ],
-    { encoding: "utf8" },
-  );
+  const flags = [
+    "--config",
+    config,
+    "--config-path",
+    "../fixture/worker/wrangler.json",
+    "--out",
+    out,
+    "--node-modules",
+    resolve(nodeModules),
+    ...runtimeFiles.flatMap((pair) => ["--runtime-file", JSON.stringify(pair)]),
+    ...runtimeSources.flatMap((path) => ["--runtime-source", path]),
+    ...runtimeJs.flatMap((path) => ["--runtime-js", path]),
+  ];
+  const params = config + ".params";
+  if (paramFile) writeFileSync(params, flags.map((flag) => flag + "\n").join(""));
+  const result = spawnSync(process.execPath, [patcher, ...(paramFile ? ["@" + params] : flags)], {
+    encoding: "utf8",
+  });
   assert.equal(readFileSync(config, "utf8"), original);
   return {
     ...result,
@@ -109,6 +109,21 @@ assert.equal(environment.config?.main, "worker/entry.js");
 assert.equal(environment.config?.env.test.main, "worker/env.ts");
 assert.equal(environment.config?.env.test.vars.GREETING, "from-env-test");
 assert.equal(environment.config?.env.unavailable.main, "missing.ts");
+// A Workers test with tens of thousands of runtime files gets its flags in a param file (E2BIG on remote execution).
+const paramFile = project(
+  "entry.ts",
+  [
+    ["../fixture/worker/entry.ts", "../fixture/worker/worker/entry.js"],
+    ["../fixture/worker/env.ts", "../fixture/worker/worker/env.ts"],
+  ],
+  { test: { main: "./env.ts" } },
+  [],
+  [],
+  false,
+  true,
+);
+assert.equal(paramFile.config?.main, "worker/entry.js");
+assert.equal(paramFile.config?.env.test.main, "worker/env.ts");
 const legacySource = "../fixture/worker/entry.ts";
 const legacyJs = "../fixture/worker/entry.js";
 const legacyEmitted = project(
