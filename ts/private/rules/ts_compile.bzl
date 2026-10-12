@@ -71,7 +71,9 @@ load(
     "label_text",
     "runtime_links",
     "runtime_mappings",
+    "runtime_scope_ancestors",
     "runtime_scope_destinations",
+    "runtime_scope_index",
 )
 load("//ts/private:runtime.bzl", "JS_TOOL_TOOLCHAIN_TYPE")
 load(
@@ -164,14 +166,25 @@ def _runtime_file(ctx, src, rel, relocate, copies = None):
         ctx.actions.symlink(output = staged, target_file = src)
     return staged
 
-def _runtime_scope_targets(scope, destination, module_pairs):
-    targets = []
-    source_prefix = scope.short_path[:-len(scope.basename)]
-    runtime_prefix = destination[:-len(scope.basename)]
+def _runtime_scope_targets(destinations, module_pairs):
+    index = runtime_scope_index([scope for scope, _destination in destinations])
+    targets = {}
     for source, runtime in module_pairs:
         placed = runtime.path
-        if runtime_scope_destinations([scope], source, placed).get(scope) == destination:
-            targets.append({"source": "./" + source.short_path[len(source_prefix):], "runtime": "./" + placed[len(runtime_prefix):]})
+        directory = source.short_path.rpartition("/")[0]
+        source_depth = directory.count("/") + 1 if directory else 0
+        runtime_dir = placed.split("/")[:-1]
+        for depth, scopes in runtime_scope_ancestors(index, source.owner.workspace_root, directory):
+            distance = source_depth - depth
+            if distance > len(runtime_dir):
+                continue
+            for scope in scopes:
+                destination = "/".join(runtime_dir[:len(runtime_dir) - distance] + [scope.basename])
+                if (scope, destination) not in destinations:
+                    continue
+                source_prefix = scope.short_path[:-len(scope.basename)]
+                runtime_prefix = destination[:-len(scope.basename)]
+                targets.setdefault((scope, destination), []).append({"source": "./" + source.short_path[len(source_prefix):], "runtime": "./" + placed[len(runtime_prefix):]})
     return targets
 
 def _runtime_scope_data(ctx, scopes, module_scopes, direct_data, dependency_data, data_sources, incoming_scopes, module_pairs, preserve_sources, canonical_links):
@@ -190,18 +203,19 @@ def _runtime_scope_data(ctx, scopes, module_scopes, direct_data, dependency_data
     checks = []
     replaced = {}
     output_prefix = _bin_dir(ctx, ctx.label) + "/"
-    candidates = list(scopes) + module_scopes
+    candidates = runtime_scope_index(list(scopes) + module_scopes)
     destinations = {}
     for source, runtime in module_pairs:
         for scope, destination in runtime_scope_destinations(candidates, source, runtime.path).items():
             if preserve_sources and runtime == source and destination not in available:
-                destination = runtime_scope_destinations([scope], source, _logical_path(runtime)).get(scope)
+                destination = runtime_scope_destinations(runtime_scope_index([scope]), source, _logical_path(runtime)).get(scope)
             if destination != None:
                 destinations[(scope, destination)] = True
     placed_scopes = {scope: True for scope, _destination in destinations}
     for scope in scopes:
         if scope not in placed_scopes and scope.owner.package == ctx.label.package and scope.owner.workspace_root == ctx.label.workspace_root:
             destinations[(scope, output_prefix + _package_relative_path(scope, ctx.label.package))] = True
+    scope_targets = _runtime_scope_targets(destinations, module_pairs)
     for scope, destination in destinations:
         placed = available.get(destination)
         origins = provenance.get(placed, {})
@@ -216,7 +230,7 @@ def _runtime_scope_data(ctx, scopes, module_scopes, direct_data, dependency_data
                 destination,
                 occupant,
             ))
-        targets = _runtime_scope_targets(scope, destination, module_pairs)
+        targets = scope_targets.get((scope, destination), [])
         if placed == None:
             if scope not in scopes or not destination.startswith(output_prefix):
                 continue

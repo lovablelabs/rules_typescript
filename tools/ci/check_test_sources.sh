@@ -49,6 +49,9 @@ tests/workers_nested/test/data_shadow.test.ts
 # `bazel run //tests/vitest/reads_report:reads_report_test -- --reads` names;
 # reads_declared_test makes it with data set.
 tests/vitest/reads_report/reads_report.test.ts
+# Analysis-only fixture: the action_lines tests inspect scoped_test's program and
+# native view; running it adds nothing they assert.
+tests/compile_layout/nested_scope/a/b/c/z.test.ts
 # Runs under ts_test_spawns_tool_test, which transitions it onto the test-only
 # runtime tools toolchain; untransitioned it has no tool to spawn.
 tests/runtime_tools/spawn.test.ts
