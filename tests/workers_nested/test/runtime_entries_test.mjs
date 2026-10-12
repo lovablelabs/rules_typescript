@@ -109,7 +109,7 @@ assert.equal(environment.config?.main, "worker/entry.js");
 assert.equal(environment.config?.env.test.main, "worker/env.ts");
 assert.equal(environment.config?.env.test.vars.GREETING, "from-env-test");
 assert.equal(environment.config?.env.unavailable.main, "missing.ts");
-// A Workers test with tens of thousands of runtime files gets its flags in a param file (proxy-worker2, E2BIG on remote execution).
+// A Workers test with tens of thousands of runtime files gets its flags in a param file (E2BIG on remote execution).
 const paramFile = project(
   "entry.ts",
   [
