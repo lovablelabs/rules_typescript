@@ -630,3 +630,4 @@ none; a framework's Vite plugin runs in the dev server through `vite_config`,
 and nothing runs a framework's own build.
 
 **Effort estimate:** Sub-project 2 HMR (ibazel protocol, React Fast Refresh, <500ms latency) is another 1-2 months. Full feature parity with the JavaScript ecosystem is a multi-year effort.
+
