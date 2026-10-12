@@ -8,9 +8,42 @@ on:
   # `pull_request` fires no run at all for one -- not a skipped check, nothing.
   pull_request:
 
+# A push to a pull request supersedes the checks still running on its previous
+# head. Every other run gets a group of its own, so nothing cancels or queues
+# behind a run on main.
+concurrency:
+  group: >-
+    ci-${{ github.event_name == 'pull_request' &&
+    format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The Bazel jobs below all set up their caches the same way:
+#
+# - `cache-version` is a namespace per job (and per matrix leg where the legs
+#   build different things). setup-bazel puts it in front of every key and every
+#   restore-key, so a job restores only what that job built: the e2e leg no
+#   longer downloads the unit-test job's multi-GB disk cache, and one job missing
+#   its cache does not take another's away.
+# - The disk cache key hashes every BUILD file, and the step that writes the
+#   commit into .git/BUILD.bazel makes it unique per commit; the restore-key
+#   prefix finds the newest. A pull request saves its own entries, so its second
+#   push starts where its first one stopped rather than where main is. A
+#   superseded entry is never restored again, so it is the least recently used
+#   and the first the cache evicts.
+# - The repository cache is keyed on the module and lock files. Under Bazel 9
+#   it also holds the repo contents cache, so a hit skips the repository rules,
+#   not just the downloads: LLVM, Rust, Go, V8 and the npm tarballs.
+# - Saving needs the repository's Actions cache to hold all of them at once;
+#   docs/CI_CD.md § Caches lists the sizes.
+#
+# Heavy jobs run on `vars.CI_LARGE_RUNNER` (and the macOS unit leg on
+# `vars.CI_LARGE_MACOS_RUNNER`) when those repository variables name a
+# larger-runner label this repository may use, and on the standard runners
+# otherwise.
+
 jobs:
   test:
-    name: Unit Tests & Type Checking
+    name: Unit Tests & Type Checking (${{ matrix.os }})
     strategy:
       # As in `examples` and `integration-tests`: each leg is its own runner and
       # neither is evidence about the other, so one going red must not cancel
@@ -18,20 +51,14 @@ jobs:
       # in the ubuntu-only gate below took the macOS leg down with it.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
-            repository-cache: |
-              - "**/MODULE.bazel"
-              - "**/pnpm-lock.yaml"
-              - "**/Cargo.lock"
-              - .bazelversion
-          # Both OS repository caches with both disk caches exceed GitHub's 10 GB.
+            runner: ${{ vars.CI_LARGE_RUNNER || 'ubuntu-latest' }}
           - os: macos-latest
-            repository-cache: false
-    runs-on: ${{ matrix.os }}
-    # A cold Ubuntu build (Rust, protobuf, the C++ toolchain) runs past 60 min, and a cancelled run saves no cache.
-    timeout-minutes: 75
+            runner: ${{ vars.CI_LARGE_MACOS_RUNNER || 'macos-latest' }}
+    runs-on: ${{ matrix.runner }}
+    # A cold build (Rust, protobuf, the C++ toolchain) runs past 60 min on Ubuntu and 75 on macOS, and a cancelled run saves no cache.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 120 || 75 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,12 +72,14 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          repository-cache: ${{ matrix.repository-cache }}
-          # Only the source-test lane saves this OS cache; smaller consumers
-          # must not reserve its immutable key before the native build finishes.
-          disk-cache: shared-ci
-          # PRs restore main's caches; saving per PR evicts them under the 10 GB cap.
-          cache-save: ${{ github.event_name == 'push' }}
+          cache-version: 2-test
+          repository-cache: |
+            - "**/MODULE.bazel"
+            - "**/pnpm-lock.yaml"
+            - "**/Cargo.lock"
+            - .bazelversion
+          disk-cache: true
+          cache-save: true
 
       # `bazel test //...` and a byte-identical Gazelle rerun are both satisfied
       # by a Gazelle run that deletes a test target, so neither notices a
@@ -182,13 +211,14 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
+          cache-version: 2-e2e
           repository-cache: |
             - "**/MODULE.bazel"
             - "**/pnpm-lock.yaml"
             - "**/Cargo.lock"
             - .bazelversion
-          disk-cache: shared-ci
-          cache-save: false
+          disk-cache: true
+          cache-save: true
 
       - name: e2e/basic's BUILD files are what Gazelle writes
         run: |
@@ -226,13 +256,14 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
+          cache-version: 2-examples-${{ matrix.example }}
           repository-cache: |
             - "**/MODULE.bazel"
             - "**/pnpm-lock.yaml"
             - "**/Cargo.lock"
             - .bazelversion
-          disk-cache: shared-ci
-          cache-save: false
+          disk-cache: true
+          cache-save: true
 
       - name: The BUILD files of examples/${{ matrix.example }} are Gazelle's
         run: |
@@ -260,7 +291,9 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          cache-save: false
+          # No disk cache: the check builds from two empty output bases on purpose.
+          cache-version: 2-determinism
+          cache-save: true
           repository-cache: |
             - "**/MODULE.bazel"
             - "**/pnpm-lock.yaml"
@@ -287,7 +320,7 @@ jobs:
     # which is what kept the lane on the critical path. These legs spread it
     # over two runners.
     name: Integration Tests (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 150
     strategy:
       # As in `examples`: one leg going red must not cancel the others, or a
@@ -312,13 +345,14 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
+          cache-version: 2-integration-${{ matrix.shard }}
           repository-cache: |
             - "**/MODULE.bazel"
             - "**/pnpm-lock.yaml"
             - "**/Cargo.lock"
             - .bazelversion
-          disk-cache: shared-ci
-          cache-save: false
+          disk-cache: true
+          cache-save: true
 
       # Each nested Bazel keeps its own output base and together they need tens
       # of GB. /mnt is no longer a separate ephemeral disk on this image -- it
@@ -429,10 +463,9 @@ jobs:
 
       # A timed-out cold build still produces valid content-addressed outputs;
       # saving them prevents the next run from repeating the same cold timeout.
-      # PRs restore main's: a GB-sized copy per PR would evict it under the 10 GB cap (#252).
       - uses: actions/cache/save@v6
         if: >-
-          ${{ !cancelled() && github.event_name == 'push' &&
+          ${{ !cancelled() &&
               steps.nested-cache.outcome == 'success' &&
               steps.nested-cache.outputs.cache-hit != 'true' }}
         with:
