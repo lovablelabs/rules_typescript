@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -305,40 +306,139 @@ func (s *programStore) reportUnlisted() {
 		total, plural(total, "s"), dirs, plural(dirs, "ies", "y"))
 }
 
-// Fails the run on a visited .tsx no program lists beside a same-named .ts a
-// program roots: tsgo's include expansion keeps one file per extensionless path,
-// .ts over .tsx, so the .tsx would silently drop out of every target.
+// Fails the run on a .tsx beside a same-named .ts, in a directory this run
+// generates, that one tsconfig program compiles with it: both compile to the
+// same outputs. When the program's include matches both, tsgo keeps one file per
+// path without its extension, .ts over .tsx, and the .tsx silently drops out.
 func (s *programStore) reportStemCollisions() {
 	if s.skipped {
 		return
 	}
-	listed, rootedBy := map[string]bool{}, map[string]string{}
+	listedBy := map[string][]*program{}
 	for _, dir := range slices.Sorted(maps.Keys(s.programs)) {
-		for _, f := range s.programs[dir].Files {
-			listed[f] = true
-		}
-		for _, f := range s.programs[dir].Roots {
-			if rootedBy[f] == "" {
-				rootedBy[f] = s.configPath(dir)
+		if p := s.programs[dir]; !p.manifest {
+			for _, f := range p.Files {
+				listedBy[f] = append(listedBy[f], p)
 			}
 		}
 	}
 	n := 0
 	for _, dir := range slices.Sorted(maps.Keys(s.visited)) {
-		for _, f := range slices.Sorted(slices.Values(s.visited[dir])) {
-			stem, ok := strings.CutSuffix(f, ".tsx")
-			if !ok || listed[f] || rootedBy[stem+".ts"] == "" {
+		if !s.walked[dir] || s.foreign[dir] != "" {
+			continue
+		}
+		for _, tsx := range slices.Sorted(slices.Values(s.visited[dir])) {
+			stem, ok := strings.CutSuffix(tsx, ".tsx")
+			if !ok {
 				continue
 			}
-			n++
-			log.Printf("typescript: %s: in no program: %s lists %s.ts, the same module path, "+
-				"and the two would emit the same %s.js", f, rootedBy[stem+".ts"], stem, path.Base(stem))
+			ts := stem + ".ts"
+			for _, p := range listedBy[ts] {
+				var why string
+				switch {
+				case slices.Contains(p.Files, tsx):
+					why = p.config + " lists it and " + ts
+				case len(listedBy[tsx]) == 0 && s.included(p, ts) && s.included(p, tsx):
+					why = "in no program: " + p.config + " includes it and " + ts +
+						", and tsgo's include expansion keeps only the .ts of a same-named pair"
+				default:
+					continue
+				}
+				n++
+				log.Printf("typescript: %s: %s; the two compile to the same %s outputs", tsx, why, path.Base(stem))
+				break
+			}
 		}
 	}
 	if n > 0 {
-		log.Fatalf("typescript: %d .tsx file%s dropped for a same-named .ts; rename one file of each pair, "+
-			"or exclude the .tsx with # gazelle:exclude", n, plural(n, "s"))
+		log.Fatalf("typescript: %d .tsx file%s collide%s with a same-named .ts; rename one file of each pair, "+
+			"or exclude the .tsx with # gazelle:exclude", n, plural(n, "s"), plural(n, "", "s"))
 	}
+}
+
+// included reports whether p's tsconfig include matches file and its exclude
+// does not: whether tsgo's wildcard expansion would list it.
+func (s *programStore) included(p *program, file string) bool {
+	root := s.repoConfig.RepoRoot
+	r, err := tsconfig.Resolve(filepath.Join(root, filepath.FromSlash(p.config)))
+	if err != nil {
+		return false
+	}
+	rel := func(dir string) string {
+		d, err := filepath.Rel(root, dir)
+		if err != nil || d == "." {
+			return ""
+		}
+		return filepath.ToSlash(d)
+	}
+	includes, includeDir := []string{"**/*"}, parentDir(p.config)
+	switch {
+	case r.Include != nil:
+		includes, includeDir = *r.Include, rel(r.IncludeDir)
+	case r.Files != nil:
+		return false
+	}
+	matched := false
+	for _, spec := range includes {
+		spec = path.Join(includeDir, spec)
+		last := path.Base(spec)
+		if last == "**" {
+			continue
+		}
+		if !strings.ContainsAny(last, ".*?") {
+			spec += "/**/*"
+		}
+		if tsWildcard(spec, false).MatchString(file) {
+			matched = true
+			break
+		}
+	}
+	if !matched || r.Exclude == nil {
+		return matched
+	}
+	for _, spec := range *r.Exclude {
+		if tsWildcard(path.Join(rel(r.ExcludeDir), spec), true).MatchString(file) {
+			return false
+		}
+	}
+	return true
+}
+
+// tsWildcard is a tsconfig include or exclude spec over repository paths: **
+// spans directories, * and ? stay within one; an exclude also covers what a
+// matched directory holds.
+func tsWildcard(spec string, exclude bool) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	segments := strings.Split(spec, "/")
+	for i, segment := range segments {
+		switch {
+		case segment == "**" && i == len(segments)-1:
+			b.WriteString(".*")
+			continue
+		case segment == "**":
+			b.WriteString("(?:[^/]+/)*")
+			continue
+		}
+		for _, r := range segment {
+			switch r {
+			case '*':
+				b.WriteString("[^/]*")
+			case '?':
+				b.WriteString("[^/]")
+			default:
+				b.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		if i < len(segments)-1 {
+			b.WriteString("/")
+		}
+	}
+	if exclude {
+		b.WriteString("(?:/.*)?")
+	}
+	b.WriteString("$")
+	return regexp.MustCompile(b.String())
 }
 
 func plural(n int, many string, one ...string) string {

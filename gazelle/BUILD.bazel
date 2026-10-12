@@ -121,9 +121,9 @@ gazelle_binary(
 # expected{Stderr,ExitCode}.txt after. `UPDATE_SNAPSHOTS=true bazel run` rewrites them.
 gazelle_generation_test(
     name = "gazelle_golden_test",
-    size = "small",
+    size = "medium",
     gazelle_binary = ":gazelle_typescript",
-    gazelle_timeout_seconds = 60,
+    gazelle_timeout_seconds = 30,
     test_data = glob(["testdata/**"]),
 )
 

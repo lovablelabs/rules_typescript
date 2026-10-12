@@ -336,18 +336,22 @@ a wrong dep is a wrong resolution or a wrong label for the right file:
 4. `# keep` above a rule, or on a `deps` entry, holds what you wrote
    ([`# keep`](../gazelle/directives.md#keep)).
 
-## Gazelle: .tsx file dropped for a same-named .ts
+## Gazelle: .tsx file collides with a same-named .ts
 
 ```
-typescript: lib/a.test.tsx: in no program: lib/tsconfig.json lists lib/a.test.ts, the same module path, and the two would emit the same a.test.js
+typescript: lib/a.test.tsx: in no program: lib/tsconfig.json includes it and lib/a.test.ts, and tsgo's include expansion keeps only the .ts of a same-named pair; the two compile to the same a.test outputs
 ```
 
 TypeScript expands `include` into one file per path without its extension and
 keeps `.ts` over `.tsx`, so `a.test.tsx` beside `a.test.ts` is in no program and
-in no target, and the two would compile to the same `a.test.js`. Gazelle fails
-the run rather than leave the `.tsx` out. Rename one file of the pair
-(`a.view.test.tsx`), or, when the `.tsx` is meant to stay out of every program,
-exclude it with `# gazelle:exclude a.test.tsx` in its directory's BUILD file.
+in no target. Gazelle fails the run rather than leave the `.tsx` out. The other
+form, `lib/tsconfig.json lists it and lib/a.test.ts`, is a `files` list naming
+both, which would put two files that compile to the same outputs in one target.
+
+Rename one file of the pair (`a.view.test.tsx`). When the `.tsx` is meant to stay
+out of every program, exclude it with `# gazelle:exclude a.test.tsx` in its
+directory's BUILD file, or leave it out with the tsconfig's own `include` or
+`exclude`.
 
 ## ts_dev_server: has no node_modules attr
 

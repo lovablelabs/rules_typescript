@@ -1,2 +1,2 @@
-gazelle: typescript: lib/a.test.tsx: in no program: lib/tsconfig.json lists lib/a.test.ts, the same module path, and the two would emit the same a.test.js
-gazelle: typescript: 1 .tsx file dropped for a same-named .ts; rename one file of each pair, or exclude the .tsx with # gazelle:exclude
+gazelle: typescript: lib/a.test.tsx: in no program: lib/tsconfig.json includes it and lib/a.test.ts, and tsgo's include expansion keeps only the .ts of a same-named pair; the two compile to the same a.test outputs
+gazelle: typescript: 1 .tsx file collides with a same-named .ts; rename one file of each pair, or exclude the .tsx with # gazelle:exclude

@@ -1,0 +1,2 @@
+gazelle: typescript: lib/a.test.ts: under lib, where TypeScript rules are not being generated; listed by lib/tsconfig.json
+gazelle: typescript: lib/a.ts: under lib, where TypeScript rules are not being generated; listed by lib/tsconfig.json
