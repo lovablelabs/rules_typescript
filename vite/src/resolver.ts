@@ -53,6 +53,21 @@ export interface ResolvedFile {
 
 type DeclaredFile = NonNullable<ResolverOptions['declaredFiles']>[string];
 
+/** Declared entries by realpath, each realpath mapped to its first entry in declaration order. */
+interface RealPaths {
+  readonly entries: Map<string, number>;
+  /** Entries whose realpath failed when indexed; these resolve again on every lookup. */
+  readonly unresolved: number[];
+}
+
+interface RealPathIndex {
+  /** The bazel-bin and workspace realpaths it was built under. */
+  readonly rootsKey: string;
+  /** Apart, because a non-canonical query consults declared directories only. */
+  directories?: RealPaths;
+  all?: RealPaths;
+}
+
 /** Where an import specifier landed, and who is expected to transform it. */
 export interface Resolution {
   /** Absolute path of the file Vite should load. */
@@ -122,6 +137,9 @@ export class BazelResolver {
   private readonly realWorkspaceRoot: string;
   private readonly declaredFiles: NonNullable<ResolverOptions['declaredFiles']>;
   private readonly selectedFiles = new Map<string, string>();
+  private readonly selectedEntries: (readonly [string, string])[];
+  private readonly directoryEntries: number[] = [];
+  private realPaths: RealPathIndex | undefined;
 
   constructor(options: ResolverOptions) {
     this.workspaceRoot = options.workspaceRoot;
@@ -134,6 +152,10 @@ export class BazelResolver {
     this.declaredFiles = this.mode === 'serve' ? options.declaredFiles ?? {} : {};
     for (const [logical, file] of Object.entries(this.declaredFiles)) {
       this.selectedFiles.set(file.path, logical);
+    }
+    this.selectedEntries = [...this.selectedFiles];
+    for (const [entry, [, logical]] of this.selectedEntries.entries()) {
+      if (this.declaredFiles[logical]!.directory) this.directoryEntries.push(entry);
     }
   }
 
@@ -322,8 +344,9 @@ export class BazelResolver {
     if (selected !== undefined) return selected;
     if (this.selectedFiles.size === 0) return undefined;
 
-    for (const root of [this.bazelBin, this.workspaceRoot]) {
-      const realRoot = this.currentRealPath(root);
+    const realRoots = [this.currentRealPath(this.bazelBin), this.currentRealPath(this.workspaceRoot)];
+    for (const [index, root] of [this.bazelBin, this.workspaceRoot].entries()) {
+      const realRoot = realRoots[index];
       if (realRoot === undefined) continue;
       const relative = path.relative(realRoot, clean);
       if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) continue;
@@ -341,16 +364,60 @@ export class BazelResolver {
       const code = (error as NodeJS.ErrnoException).code;
       canonicalQuery = code !== 'ENOENT' && code !== 'ENOTDIR';
     }
-    for (const [declaredPath, logical] of this.selectedFiles) {
-      if (!canonicalQuery && !this.declaredFiles[logical]!.directory) continue;
-      const realPath = this.currentRealPath(declaredPath);
-      if (realPath === clean) return logical;
-      if (realPath !== undefined && this.declaredFiles[logical]!.directory
-        && clean.startsWith(realPath + path.sep)) {
-        return path.posix.join(logical, path.relative(realPath, clean).split(path.sep).join('/'));
-      }
+    const rootsKey = realRoots.join('\0');
+    for (let retry = false; ; retry = true) {
+      if (retry || this.realPaths?.rootsKey !== rootsKey) this.realPaths = { rootsKey };
+      const found = this.indexedCoordinate(this.realPaths, clean, canonicalQuery);
+      // False: the indexed entry has moved since, so index again.
+      if (found !== false) return found;
+      if (retry) return undefined;
+    }
+  }
+
+  /** Drops the declared paths' cached realpaths; the next lookup resolves them again. */
+  invalidateRealPaths(): void {
+    this.realPaths = undefined;
+  }
+
+  private indexedCoordinate(index: RealPathIndex, clean: string, canonicalQuery: boolean): string | undefined | false {
+    const directories = index.directories ??= this.indexRealPaths(this.directoryEntries);
+    const candidates = canonicalQuery ? index.all ??= this.indexRealPaths(this.selectedEntries.keys()) : directories;
+    let best = candidates.entries.get(clean);
+    for (let ancestor = path.dirname(clean); path.dirname(ancestor) !== ancestor; ancestor = path.dirname(ancestor)) {
+      const entry = directories.entries.get(ancestor);
+      if (entry !== undefined && (best === undefined || entry < best)) best = entry;
+    }
+    for (const entry of candidates.unresolved) {
+      if (best !== undefined && entry > best) break;
+      const match = this.realPathMatch(entry, clean, canonicalQuery);
+      if (match !== undefined) return match;
+    }
+    return best === undefined ? undefined : this.realPathMatch(best, clean, canonicalQuery) ?? false;
+  }
+
+  private realPathMatch(entry: number, clean: string, canonicalQuery: boolean): string | undefined {
+    const [declaredPath, logical] = this.selectedEntries[entry]!;
+    const directory = this.declaredFiles[logical]!.directory;
+    if (!canonicalQuery && !directory) return undefined;
+    const realPath = this.currentRealPath(declaredPath);
+    if (realPath === clean) return logical;
+    if (realPath !== undefined && directory && clean.startsWith(realPath + path.sep)) {
+      return path.posix.join(logical, path.relative(realPath, clean).split(path.sep).join('/'));
     }
     return undefined;
+  }
+
+  private indexRealPaths(entries: Iterable<number>): RealPaths {
+    const index: RealPaths = { entries: new Map(), unresolved: [] };
+    for (const entry of entries) {
+      try {
+        const realPath = fs.realpathSync(this.selectedEntries[entry]![0]);
+        if (!index.entries.has(realPath)) index.entries.set(realPath, entry);
+      } catch {
+        index.unresolved.push(entry);
+      }
+    }
+    return index;
   }
 
   private selectedLogicalPath(file: string): string | undefined {

@@ -55,6 +55,16 @@ export class BazelWatcher {
   private readonly declaredFiles: NonNullable<ResolverOptions['declaredFiles']>;
   private readonly debounceMs: number;
   private readonly recursive: boolean;
+  private readonly roots: readonly string[];
+  private readonly rootSet: ReadonlySet<string>;
+  private readonly declaredDirectories: readonly string[];
+  /** Declared outputs under bazel-bin, at their bazel-bin path, and every directory above them. */
+  private declaredBinPaths = new Set<string>();
+  private declaredBinTrees = new Set<string>();
+  /** Directories left unwatched at start, by device and inode. */
+  private readonly skipped = new Map<string, string>();
+  private realBin: string | null = null;
+  private readonly loadedDirectories = new Map<string, string | null>();
 
   private readonly onFileEvent = (filePath: string): void => {
     this.handleFileEvent(filePath);
@@ -73,6 +83,11 @@ export class BazelWatcher {
     this.source = options.source ?? null;
     this.debounceMs = options.debounceMs ?? 50;
     this.recursive = options.recursiveWatch ?? (process.platform === 'darwin' && !('Deno' in globalThis));
+    const outputs = Object.values(this.declaredFiles).filter((file) => !file.isSource);
+    const outside = outputs.filter((file) => bazelPathToModuleId(file.path, this.bazelBin) === null);
+    this.roots = [this.bazelBin, ...outside.map((file) => path.dirname(file.path))];
+    this.rootSet = new Set(this.roots);
+    this.declaredDirectories = outputs.filter((file) => file.directory).map((file) => file.path);
   }
 
   async start(): Promise<void> {
@@ -85,7 +100,7 @@ export class BazelWatcher {
     }
 
     if (this.source !== null) {
-      for (const root of this.watchRoots()) this.source.add(root);
+      for (const root of this.roots) this.source.add(root);
       this.source.on('add', this.onFileEvent);
       this.source.on('change', this.onFileEvent);
       this.attached = this.source;
@@ -94,7 +109,9 @@ export class BazelWatcher {
 
     try {
       const realBin = fs.realpathSync(this.bazelBin);
-      for (const root of this.watchRoots()) {
+      this.realBin = realBin;
+      this.indexDeclaredBinPaths(realBin);
+      for (const root of this.roots) {
         if (root !== this.bazelBin &&
           (root === realBin || bazelPathToModuleId(root, realBin) !== null)) continue;
         this.watchEntry(root, false);
@@ -115,19 +132,81 @@ export class BazelWatcher {
     if (this.attached !== null) {
       this.attached.off?.('add', this.onFileEvent);
       this.attached.off?.('change', this.onFileEvent);
-      for (const root of this.watchRoots()) this.attached.unwatch?.(root);
+      for (const root of this.roots) this.attached.unwatch?.(root);
       this.attached = null;
     }
     for (const resource of this.watches.values()) resource.watcher?.close();
     this.watches.clear();
+    this.skipped.clear();
     this.pendingChanges.clear();
   }
 
-  private *watchRoots(): Iterable<string> {
-    yield this.bazelBin;
+  private indexDeclaredBinPaths(realBin: string): void {
+    this.declaredBinPaths = new Set([this.bazelBin]);
+    this.declaredBinTrees = new Set();
     for (const file of Object.values(this.declaredFiles)) {
-      if (!file.isSource && bazelPathToModuleId(file.path, this.bazelBin) === null) yield path.dirname(file.path);
+      if (file.isSource) continue;
+      const moduleId = bazelPathToModuleId(file.path, this.bazelBin) ?? bazelPathToModuleId(file.path, realBin);
+      if (moduleId === null) continue;
+      const binPath = path.join(this.bazelBin, moduleId);
+      if (file.directory) this.declaredBinTrees.add(binPath);
+      for (let ancestor = binPath; !this.declaredBinPaths.has(ancestor); ancestor = path.dirname(ancestor)) {
+        this.declaredBinPaths.add(ancestor);
+      }
     }
+  }
+
+  /**
+   * With outputs declared under bazel-bin, a directory there that leads to none of them is not watched at start:
+   * on a large application that was most of bazel-bin. One that appears or is replaced later still is.
+   */
+  private skips(directory: string, stat: fs.Stats, notify: boolean): boolean {
+    const identity = `${stat.dev}:${stat.ino}`;
+    if (notify) return this.skipped.get(directory) === identity;
+    if (this.declaredBinPaths.size <= 1 || this.declaredBinPaths.has(directory)) return false;
+    if (bazelPathToModuleId(directory, this.bazelBin) === null) return false;
+    for (let ancestor = directory; ancestor.length > this.bazelBin.length; ancestor = path.dirname(ancestor)) {
+      if (this.declaredBinTrees.has(ancestor)) return false;
+    }
+    this.skipped.set(directory, identity);
+    return true;
+  }
+
+  /** Watches the directories of a file the server loaded from under bazel-bin, if start skipped them. */
+  watchLoaded(file: string): void {
+    if (this.skipped.size === 0 || this.realBin === null) return;
+    const directory = path.dirname(file);
+    let binDirectory = this.loadedDirectories.get(directory);
+    if (binDirectory === undefined) {
+      binDirectory = this.binPath(directory, this.realBin);
+      this.loadedDirectories.set(directory, binDirectory);
+    }
+    if (binDirectory === null) return;
+    let skippedAncestor: string | undefined;
+    for (let ancestor = binDirectory; !this.declaredBinPaths.has(ancestor);) {
+      this.declaredBinPaths.add(ancestor);
+      if (this.skipped.delete(ancestor)) skippedAncestor = ancestor;
+      ancestor = path.dirname(ancestor);
+    }
+    if (skippedAncestor === undefined) return;
+    try {
+      this.watchEntry(skippedAncestor, false);
+    } catch {
+      // A watch that cannot attach costs this file its HMR, not its load.
+    }
+  }
+
+  /** A directory's path under the bazel-bin link, or null when it does not resolve under bazel-bin. */
+  private binPath(directory: string, realBin: string): string | null {
+    let moduleId = bazelPathToModuleId(directory, this.bazelBin) ?? bazelPathToModuleId(directory, realBin);
+    if (moduleId === null) {
+      try {
+        moduleId = bazelPathToModuleId(fs.realpathSync(directory), realBin);
+      } catch {
+        return null;
+      }
+    }
+    return moduleId === null ? null : path.join(this.bazelBin, moduleId);
   }
 
   private isWatchPath(filePath: string): boolean {
@@ -136,17 +215,14 @@ export class BazelWatcher {
   }
 
   private canFollowDirectorySymlink(filePath: string): boolean {
-    for (const root of this.watchRoots()) {
-      if (filePath === root) return true;
-    }
+    if (this.rootSet.has(filePath)) return true;
     const realPath = fs.realpathSync(filePath);
-    return Object.values(this.declaredFiles).some((file) => {
-      if (file.isSource || !file.directory) return false;
+    return this.declaredDirectories.some((directory) => {
       try {
-        const root = fs.realpathSync(file.path);
+        const root = fs.realpathSync(directory);
         return realPath === root || realPath.startsWith(root + path.sep);
       } catch (err) {
-        if (!this.isUnavailableChild(file.path, err)) throw err;
+        if (!this.isUnavailableChild(directory, err)) throw err;
         return false;
       }
     });
@@ -171,7 +247,8 @@ export class BazelWatcher {
       const directory =
         stat?.isDirectory() === true &&
         !this.hasWatchedAncestor(filePath, stat) &&
-        (!entry?.isSymbolicLink() || filePath === this.bazelBin || this.canFollowDirectorySymlink(filePath));
+        (!entry?.isSymbolicLink() || filePath === this.bazelBin || this.canFollowDirectorySymlink(filePath)) &&
+        !this.skips(filePath, stat, notify);
       const needsWatch = stat !== undefined && (directory || (entry?.isSymbolicLink() && stat.isFile()));
       if (
         previous &&
