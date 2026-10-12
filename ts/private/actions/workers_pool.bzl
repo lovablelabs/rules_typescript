@@ -92,8 +92,10 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset
         patched = ctx.actions.declare_file(
             "_{}_wrangler.{}".format(ctx.label.name, src.extension),
         )
+        # One --runtime-file per runtime file overflows a remote executor's argv.
         args = ctx.actions.args()
-        args.add(ctx.file._wrangler_patch)
+        args.use_param_file("@%s", use_always = False)
+        args.set_param_file_format("multiline")
         args.add("--config", src)
         args.add("--out", patched)
         args.add("--config-path", src.short_path)
@@ -111,7 +113,7 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset
             ),
             outputs = [patched],
             executable = js_tool.runtime_binary,
-            arguments = js_tool.args_prefix + [args],
+            arguments = js_tool.args_prefix + [ctx.file._wrangler_patch.path, args],
             mnemonic = "WranglerTestConfig",
             progress_message = "WranglerTestConfig %{label}",
         )
