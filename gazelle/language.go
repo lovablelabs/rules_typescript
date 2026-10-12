@@ -21,7 +21,6 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
-	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
@@ -49,6 +48,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 	fs.StringVar(&tc.protos.graphPath, "ts_proto_graph", "", "declared native external protobuf graph artifact")
 	fs.StringVar(&listingCacheDir, "ts_listing_cache", "",
 		"a directory that keeps tsgo listings across runs, each reused while everything it read is unchanged")
+	fs.StringVar(&runRecordMode, "ts_run_record", "on",
+		"with -ts_listing_cache on a full fix or diff run: on exits at once when every input matches the last run that changed nothing; "+
+			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
 	l.programs = tc.programs
 	c.Exts[languageName] = tc
 }
@@ -100,7 +102,7 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 			return fmt.Errorf("-ts_tsgo: %w", err)
 		}
 	}
-	return nil
+	return gateOnRunRecord(fs, c, getConfig(c).programs.fullWalk)
 }
 
 func (l *tsLang) KnownDirectives() []string {
@@ -110,13 +112,13 @@ func (l *tsLang) KnownDirectives() []string {
 func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	getConfig(c).programs.ruleListsMayChange()
 	getConfig(c).programs.touchPackage(rel)
-	configureTsConfig(c, rel, f, walk.GetDirInfo)
+	configureTsConfig(c, rel, f, recordedDirInfo)
 	l.programs = getConfig(c).programs
-	l.programs.observeBuild(rel, walk.GetDirInfo)
+	l.programs.observeBuild(rel, recordedDirInfo)
 	if len(c.Langs) > 0 && !slices.Contains(c.Langs, languageName) {
 		l.programs.walked[rel] = false
 	}
-	info, err := walk.GetDirInfo(rel)
+	info, err := recordedDirInfo(rel)
 	if err != nil {
 		log.Fatalf("typescript: %s: %v", rel, err)
 	}
@@ -125,7 +127,7 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 		l.observeSources([]string{tsconfigIn(base)})
 	}
 	if p := l.programs.programs[rel]; p != nil {
-		p = l.programs.withKeptSources(c, p, rel, walk.GetDirInfo)
+		p = l.programs.withKeptSources(c, p, rel, recordedDirInfo)
 		l.programs.record(p)
 		l.observeProgram(p)
 	}
@@ -151,7 +153,7 @@ func (l *tsLang) observeSources(files []string) {
 		observed[dir] = true
 		dirs = append(dirs, dir)
 	}
-	l.programs.observeBuilds(dirs, walk.GetDirInfo)
+	l.programs.observeBuilds(dirs, recordedDirInfo)
 }
 
 func (l *tsLang) Kinds() map[string]rule.KindInfo {
@@ -373,7 +375,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 		case *protoRuleImports:
 			owner = imps.identity.owner
 		}
-		if p := l.programs.compilerProgram(args.Config, selected, owner, walk.GetDirInfo); p != nil {
+		if p := l.programs.compilerProgram(args.Config, selected, owner, recordedDirInfo); p != nil {
 			l.observeProgram(p)
 		}
 	}
@@ -400,7 +402,7 @@ func (l *tsLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve
 		g.setRule(emissionLabel(c.RepoName, f.Pkg, ":"+r.Name()), r)
 	}
 	if l.programs != nil {
-		return importsForRule(c, r, f, walk.GetDirInfo)
+		return importsForRule(c, r, f, recordedDirInfo)
 	}
 	return importsForRule(c, r, f)
 }

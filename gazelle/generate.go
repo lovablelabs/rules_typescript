@@ -845,7 +845,7 @@ func selectedVitestConfig(args language.GenerateArgs, tc *tsConfig, selectedRule
 			key := emissionLabel(args.Config.RepoName, lbl.Pkg, ":"+lbl.Name)
 			target = tc.programs.semanticRule(key)
 			if target == nil {
-				tc.programs.observeBuild(lbl.Pkg, walk.GetDirInfo)
+				tc.programs.observeBuild(lbl.Pkg, recordedDirInfo)
 				target = tc.programs.semanticRule(key)
 			}
 		}

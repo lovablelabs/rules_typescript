@@ -5,7 +5,6 @@ package typescript
 
 import (
 	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -171,7 +170,7 @@ func derivableValue(args language.GenerateArgs, value string) bool {
 }
 
 func pathExists(base, rel string) bool {
-	_, err := os.Stat(filepath.Join(base, filepath.FromSlash(rel)))
+	_, err := statInput(filepath.Join(base, filepath.FromSlash(rel)))
 	return err == nil
 }
 

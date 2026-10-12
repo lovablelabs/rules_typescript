@@ -93,6 +93,23 @@ it listed or why it was not, its diagnostics, how many are packages, and the
 `.ts`/`.tsx`/`.mts`/`.cts` files no program lists, per directory and in total:
 `bazel run //:gazelle -- -ts_verbose`.
 
+`-ts_listing_cache=<dir>` keeps each listing across runs, reused while every
+file, probe, config and include directory it read is unchanged. A full,
+recursive `fix` or `diff` run of a binary whose only language is TypeScript
+(`gazelle_typescript`) also keeps a run record there. It holds everything the
+last run that changed nothing read (each walked directory's entries, BUILD
+files by content, the listings' reads, the files the extension opened,
+`node_modules/.modules.yaml` and `.pnpm/lock.yaml`, and the Gazelle binary),
+keyed by the arguments, with that run's exit status and log. A run whose
+inputs all match it writes that log back and exits at once, leaving the tree
+as the full run would; `-ts_verbose` adds a line saying so. Like the listings,
+the record judges a file by its stat (size, mtime, ctime, inode). A run whose
+inputs moved while it read them, or changed within two seconds of its start,
+or that wrote a BUILD file, records nothing. `-ts_run_record=verify` runs a
+full pass without either cache in `-mode=diff` when the record matches, and
+fails and drops the record unless that pass changes nothing and exits and logs
+as the record does; `-ts_run_record=off` always runs in full.
+
 ## The Package Model
 
 A directory is a package when its `tsconfig.json` lists a first-party file: a

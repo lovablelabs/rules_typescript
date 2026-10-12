@@ -121,7 +121,7 @@ func (s *programStore) regularFile(file string) bool {
 	if regular, ok := s.regularFiles[file]; ok {
 		return regular
 	}
-	info, err := os.Stat(file)
+	info, err := statInput(file)
 	regular := err == nil && info.Mode().IsRegular()
 	if s.regularFiles == nil {
 		s.regularFiles = map[string]bool{}
@@ -227,7 +227,7 @@ func (s *programStore) packageScope(c *config.Config, dir string) string {
 }
 
 func readManifest(repoRoot, dir string) *manifest {
-	data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(dir),
+	data, err := readInput(filepath.Join(repoRoot, filepath.FromSlash(dir),
 		"package.json"))
 	if err != nil {
 		return nil
@@ -252,7 +252,7 @@ func readManifest(repoRoot, dir string) *manifest {
 }
 
 func manifestProgramRoots(repoRoot, dir string) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(dir), "package.json"))
+	data, err := readInput(filepath.Join(repoRoot, filepath.FromSlash(dir), "package.json"))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -275,7 +275,7 @@ func manifestProgramRoots(repoRoot, dir string) ([]string, error) {
 				return fmt.Errorf("%s/package.json: source export %q needs an explicit tsconfig.json program; did you mean to declare the package's compiler inputs there?", dir, v)
 			}
 			file := path.Join(dir, v)
-			if _, err := os.Stat(filepath.Join(repoRoot, filepath.FromSlash(file))); os.IsNotExist(err) {
+			if _, err := statInput(filepath.Join(repoRoot, filepath.FromSlash(file))); os.IsNotExist(err) {
 				return nil
 			} else if err != nil {
 				return err

@@ -248,7 +248,7 @@ const generatedTsConfigMarker = "bazel run //:refresh_tsconfig"
 // A tsconfig.json this ruleset writes is built out of the very targets that
 // would name it, so it is never a program and never a ts_config's src.
 func isGeneratedTsConfig(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readInput(path)
 	if err != nil {
 		return false
 	}
@@ -265,7 +265,7 @@ func isGeneratedTsConfig(path string) bool {
 // tsconfig.json, or "" when it has none or the one it has is generated.
 func handWrittenTsConfigIn(dir, repoRoot string) string {
 	candidate := filepath.Join(dir, "tsconfig.json")
-	if st, err := os.Stat(candidate); err != nil || st.IsDir() {
+	if st, err := statInput(candidate); err != nil || st.IsDir() {
 		return ""
 	}
 	if isGeneratedTsConfig(candidate) {
@@ -384,7 +384,7 @@ func typesEntryFiles(resolved *tsconfig.Resolved, rel string) []string {
 
 func (s *programStore) hasAuthoredConfig(root, rel string) bool {
 	file := filepath.Join(root, filepath.FromSlash(s.configPath(rel)))
-	info, err := os.Stat(file)
+	info, err := statInput(file)
 	return err == nil && !info.IsDir() && !isGeneratedTsConfig(file)
 }
 
@@ -424,7 +424,7 @@ func (s *programStore) readSelectedConfig(c *config.Config, rel string) bool {
 	}
 	for _, name := range c.ValidBuildFileNames {
 		filename := filepath.Join(root, filepath.FromSlash(rel), name)
-		if _, err := os.Stat(filename); os.IsNotExist(err) {
+		if _, err := statInput(filename); os.IsNotExist(err) {
 			continue
 		}
 		file, err := rule.LoadFile(filename, rel)

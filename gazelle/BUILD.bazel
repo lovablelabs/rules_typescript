@@ -11,6 +11,9 @@ go_library(
     name = "typescript",
     srcs = [
         "config.go",
+        "ctime_darwin.go",
+        "ctime_linux.go",
+        "ctime_other.go",
         "emission.go",
         "generate.go",
         "keep.go",
@@ -30,6 +33,7 @@ go_library(
         "proto_graph.go",
         "resolution_trace.go",
         "resolve.go",
+        "run_record.go",
         "tsconfig.go",
         "workers_pool.go",
     ],
@@ -82,11 +86,13 @@ go_test(
         "proto_test.go",
         "resolution_trace_test.go",
         "resolve_test.go",
+        "run_record_test.go",
         "tsconfig_extends_test.go",
         "workers_pool_test.go",
     ],
     data = [
         ":gazelle_proto_test",
+        ":gazelle_typescript",
         "//:docs_pages",
         "//tests/integration:gazelle_roundtrip/configured/vitest.config.mts",
         "//tests/npm:pnpm-lock.yaml",
@@ -94,7 +100,10 @@ go_test(
         "//ts/tools/explainfiles:testdata/workers_download_test.listing.txt",
     ],
     embed = [":typescript"],
-    env = {"PROTO_GAZELLE": "$(rlocationpath :gazelle_proto_test)"},
+    env = {
+        "PROTO_GAZELLE": "$(rlocationpath :gazelle_proto_test)",
+        "TS_GAZELLE": "$(rlocationpath :gazelle_typescript)",
+    },
     # The fixtures run Gazelle end to end; one shard alone approaches the medium timeout.
     shard_count = 8,
     deps = [

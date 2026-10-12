@@ -41,7 +41,7 @@ func scanSpecs(abs string) (cachedSource, bool) {
 		src, ok := v.(cachedSource)
 		return src, ok
 	}
-	data, err := os.ReadFile(abs)
+	data, err := readInput(abs)
 	var src cachedSource
 	if err == nil {
 		src.Specs, src.Rest, err = incremental.Specifiers(abs, data)

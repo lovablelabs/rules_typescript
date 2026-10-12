@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -352,7 +351,7 @@ func (s *programStore) recordEmissionConsumers(c *config.Config, pkg string) {
 	if s.metadataIdentity(c, path.Join(pkg, "package.json")) != authoredInput {
 		return
 	}
-	raw, err := os.ReadFile(filepath.Join(c.RepoRoot, filepath.FromSlash(pkg), "package.json"))
+	raw, err := readInput(filepath.Join(c.RepoRoot, filepath.FromSlash(pkg), "package.json"))
 	if err != nil {
 		return
 	}
@@ -386,7 +385,10 @@ func (s *programStore) recordEmissionConsumers(c *config.Config, pkg string) {
 }
 
 func (l *tsLang) AfterResolvingDeps(_ context.Context) {
-	defer logListingCache()
+	defer func() {
+		logListingCache()
+		writeRunCandidate()
+	}()
 	if l.programs == nil || l.programs.emission == nil {
 		return
 	}
