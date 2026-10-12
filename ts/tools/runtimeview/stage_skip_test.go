@@ -88,6 +88,21 @@ func TestPlaceNpmContextsWithoutSkippingStillLinksEveryFreeDestination(t *testin
 	requireSelects(t, root, "_main/app/node_modules/pkg", "_main/store/pkg")
 }
 
+func TestPlaceNpmContextsSkippingResolvedWalksPastNodeModulesWithoutTheName(t *testing.T) {
+	modules := []string{"_main/app/sub/deep/main.js"}
+	root := walkUpRoot(t, modules...)
+	for _, dir := range []string{"_main/app/node_modules/unrelated", "_main/app/sub/node_modules"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contexts := []NpmContext{{Module: modules[0], Source: "a.ts", Bindings: map[string]string{"pkg": "_main/store/pkg"}}}
+	if err := PlaceNpmContextsSkippingResolved(root, contexts, modules); err != nil {
+		t.Fatal(err)
+	}
+	requireNoLink(t, root, "_main/app/sub/deep/node_modules/pkg")
+}
+
 func TestPlaceNpmContextsSkippingResolvedLinksBelowANodeModulesSegment(t *testing.T) {
 	// ESM and vite do not skip node_modules segments on their walk, CJS does.
 	modules := []string{"_main/app/node_modules/x/main.js"}
