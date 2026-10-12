@@ -303,10 +303,11 @@ func placeNpmContexts(root string, contexts []NpmContext, modules []string, skip
 				if err := relativeLink(filepath.Join(root, filepath.FromSlash(destination)), demand.store); err != nil {
 					return err
 				}
-				// The new link can surface through a directory alias at another cached path.
-				clear(lstatCache)
-				clear(statCache)
-				clear(listings)
+				// A new link can surface through a directory alias at another cached path. Fresh
+				// maps, since clear() costs a map's peak capacity on every placement.
+				lstatCache = map[string]pathState{}
+				statCache = map[string]os.FileInfo{}
+				listings = map[string]map[string]bool{}
 				continue
 			}
 			matched, err := nearestSelects(directory, name, expected)
