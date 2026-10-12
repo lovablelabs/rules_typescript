@@ -27,9 +27,15 @@ _BASE_TAGS = [
     "external",
 ]
 
-# The core CI filter includes every test without a named shard.
+# The core CI filter includes every test without a named shard. The
+# roundtrip-<n> legs split the gazelle_roundtrip groups, balanced by measured
+# nested-Bazel time, so no single runner carries them all.
 SHARDS = [
     "npm",
+    "roundtrip-1",
+    "roundtrip-2",
+    "roundtrip-3",
+    "roundtrip-4",
 ]
 
 def nested_bazel_tags(shard = None, cpus = 2):

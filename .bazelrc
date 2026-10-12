@@ -67,10 +67,20 @@ build:ci-integration --verbose_failures
 # matrix leg; tools/ci/check_integration_shards.sh fails on exactly that.
 test:ci-integration-npm --config=ci-integration
 test:ci-integration-npm --test_tag_filters=shard-npm
-test:ci-integration-core --config=ci-integration
-test:ci-integration-core --test_tag_filters=-shard-npm
-# Each roundtrip group runs nested Bazel builds; four at once on a 4-core runner pushes them past 900 s.
-test:ci-integration-core --local_test_jobs=2
+# Each roundtrip group runs nested Bazel builds; four at once on a 4-core runner
+# pushes them past 900 s. `paired` sets no filter, so it is not a leg.
+test:ci-integration-paired --config=ci-integration
+test:ci-integration-paired --local_test_jobs=2
+test:ci-integration-roundtrip-1 --config=ci-integration-paired
+test:ci-integration-roundtrip-1 --test_tag_filters=shard-roundtrip-1
+test:ci-integration-roundtrip-2 --config=ci-integration-paired
+test:ci-integration-roundtrip-2 --test_tag_filters=shard-roundtrip-2
+test:ci-integration-roundtrip-3 --config=ci-integration-paired
+test:ci-integration-roundtrip-3 --test_tag_filters=shard-roundtrip-3
+test:ci-integration-roundtrip-4 --config=ci-integration-paired
+test:ci-integration-roundtrip-4 --test_tag_filters=shard-roundtrip-4
+test:ci-integration-core --config=ci-integration-paired
+test:ci-integration-core --test_tag_filters=-shard-npm,-shard-roundtrip-1,-shard-roundtrip-2,-shard-roundtrip-3,-shard-roundtrip-4
 
 build:determinism --experimental_convenience_symlinks=ignore
 
