@@ -92,6 +92,7 @@ def workers_pool_environment(ctx, chain, runtime_data_sets, runtime_files, asset
         patched = ctx.actions.declare_file(
             "_{}_wrangler.{}".format(ctx.label.name, src.extension),
         )
+
         # One --runtime-file per runtime file overflows a remote executor's argv.
         args = ctx.actions.args()
         args.use_param_file("@%s", use_always = False)
