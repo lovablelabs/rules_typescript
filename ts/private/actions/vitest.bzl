@@ -81,21 +81,28 @@ const moduleReferences = MODULE_REFERENCES.map(([logical, source, runtime, selec
 const runtimeModulePaths = new Map();
 const exactModuleReferences = new Map();
 const moduleLookups = new Map();
+const placeLookup = (target, candidate) => {
+  const previous = moduleLookups.get(target);
+  moduleLookups.set(target, previous !== undefined && previous !== candidate ? null : candidate);
+};
+// Placing a target twice with one candidate is a no-op, so each directory pair walks its ancestors once.
+const placedDirectories = new Set();
 for (const entry of moduleReferences) {
   for (const path of [entry.runtime, entry.selected]) {
     const previous = runtimeModulePaths.get(path);
     runtimeModulePaths.set(path, previous !== undefined && previous !== entry ? null : entry);
   }
+  const runtimeDirectory = dirname(entry.runtime);
   for (const [source, sourceRoot] of [[entry.logical, WORKSPACE_DIR], [entry.source, entry.sourceRoot]]) {
     exactModuleReferences.set(source, entry.runtime);
-    const place = (target) => {
-      const candidate = resolve(dirname(entry.runtime), relative(dirname(source), target));
-      const previous = moduleLookups.get(target);
-      moduleLookups.set(target, previous !== undefined && previous !== candidate ? null : candidate);
-    };
-    place(source.slice(0, -entry.extension.length));
-    for (let directory = dirname(source); directory.startsWith(sourceRoot + '/') || directory === sourceRoot; directory = dirname(directory)) {
-      place(directory);
+    const sourceDirectory = dirname(source);
+    const stem = source.slice(0, -entry.extension.length);
+    placeLookup(stem, resolve(runtimeDirectory, relative(sourceDirectory, stem)));
+    const pair = sourceDirectory + '\\0' + runtimeDirectory + '\\0' + sourceRoot;
+    if (placedDirectories.has(pair)) continue;
+    placedDirectories.add(pair);
+    for (let directory = sourceDirectory, candidate = runtimeDirectory; directory.startsWith(sourceRoot + '/') || directory === sourceRoot; directory = dirname(directory), candidate = dirname(candidate)) {
+      placeLookup(directory, candidate);
       if (directory === sourceRoot) break;
     }
   }

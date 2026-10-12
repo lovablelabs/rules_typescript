@@ -49,8 +49,14 @@ compile_parity_test(
 go_test(
     name = "config_layers_test",
     size = "small",
-    srcs = ["config_layers_test.go"],
-    data = [":attrs_test_config"],
+    srcs = [
+        "config_layers_test.go",
+        "module_lookups_test.go",
+    ],
+    data = [
+        ":attrs_test_config",
+        "//ts/toolchain:node_resolved",
+    ],
     deps = ["//tests/verify"],
 )
 
