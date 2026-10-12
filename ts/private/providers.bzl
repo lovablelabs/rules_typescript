@@ -378,25 +378,48 @@ Mode 2 — Generated config (use_generated_config = True):
     },
 )
 
-def runtime_scope_destinations(scopes, source, runtime_path):
-    source_dir = source.short_path.split("/")[:-1]
-    runtime_dir = runtime_path.split("/")[:-1]
-    nearest = {}
-    depth = -1
+def runtime_scope_index(scopes):
+    by_directory = {}
     for scope in scopes:
-        if source.owner.workspace_root != scope.owner.workspace_root:
-            continue
-        scope_dir = scope.short_path.split("/")[:-1]
-        if source_dir[:len(scope_dir)] != scope_dir:
-            continue
-        scope_depth = len(scope_dir)
-        if scope_depth > depth:
-            nearest = {}
-            depth = scope_depth
-        if scope_depth == depth:
-            distance = len(source_dir) - scope_depth
-            nearest[scope] = "/".join(runtime_dir[:len(runtime_dir) - distance] + [scope.basename]) if distance <= len(runtime_dir) else None
-    return nearest
+        by_directory.setdefault((scope.owner.workspace_root, scope.short_path.rpartition("/")[0]), {})[scope] = True
+    return struct(scopes = by_directory, ancestors = {})
+
+def runtime_scope_ancestors(index, workspace_root, directory):
+    """(directory depth, scopes) for each scope directory at or above directory, nearest first."""
+    found = index.ancestors.get((workspace_root, directory))
+    if found != None:
+        return found
+    pending = []
+    found = []
+    current = directory
+    for _ in range(directory.count("/") + 2):
+        key = (workspace_root, current)
+        if key in index.ancestors:
+            found = index.ancestors[key]
+            break
+        pending.append((key, current))
+        if not current:
+            break
+        current = current.rpartition("/")[0]
+    for key, path in reversed(pending):
+        scopes = index.scopes.get(key)
+        if scopes:
+            found = [(path.count("/") + 1 if path else 0, scopes)] + found
+        index.ancestors[key] = found
+    return found
+
+def runtime_scope_destinations(index, source, runtime_path):
+    directory = source.short_path.rpartition("/")[0]
+    ancestors = runtime_scope_ancestors(index, source.owner.workspace_root, directory)
+    if not ancestors:
+        return {}
+    depth, scopes = ancestors[0]
+    distance = (directory.count("/") + 1 if directory else 0) - depth
+    runtime_dir = runtime_path.split("/")[:-1]
+    return {
+        scope: "/".join(runtime_dir[:len(runtime_dir) - distance] + [scope.basename]) if distance <= len(runtime_dir) else None
+        for scope in scopes
+    }
 
 def is_javascript(file):
     return not file.is_directory and file.extension in ["js", "mjs", "cjs"]
@@ -471,9 +494,10 @@ def require_runtime_scopes(consumer, info, requirement, runtime_path = None, run
         for source, runtime in getattr(owner, "runtime_scopes", ()):
             scopes[source] = True
             provenance.setdefault(runtime, {})[source] = True
+    index = runtime_scope_index(scopes)
     for source, runtime, path in selected:
         runtime_dir = path.split("/")[:-1]
-        destinations = runtime_scope_destinations(scopes, source, path)
+        destinations = runtime_scope_destinations(index, source, path)
         nearest = None
         for depth in range(len(runtime_dir), -1, -1):
             parent = "/".join(runtime_dir[:depth])

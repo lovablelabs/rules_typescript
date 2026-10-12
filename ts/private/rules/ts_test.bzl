@@ -26,7 +26,7 @@ load(
     "validate_runfiles_modules",
 )
 load("//ts/private:node_modules.bzl", "own_package_name", "runfiles_dir", "runtime_npm_contexts")
-load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations")
+load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations", "runtime_scope_index")
 load(
     "//ts/private:runtime.bzl",
     "JS_RUNTIME_TOOLCHAIN_TYPE",
@@ -236,10 +236,11 @@ def _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules):
     workspace = ctx.workspace_name + "/"
     namespace = workspace + (ctx.label.package + "/" if ctx.label.package else "")
     placed = {}
+    index = runtime_scope_index(scopes)
     for (path, runtime), sources in scoped_modules.items():
         module_dir = path.split("/")[:-1]
         for source in sources:
-            for scope, destination in runtime_scope_destinations(scopes.keys(), source, path).items():
+            for scope, destination in runtime_scope_destinations(index, source, path).items():
                 runtimes = published.get(scope, {}).keys()
                 if destination == None or len(runtimes) != 1 or not destination.startswith(workspace):
                     continue

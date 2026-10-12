@@ -1,6 +1,9 @@
 load(":helpers_tests.bzl", "helpers_test_suite")
+load(":runtime_scope_tests.bzl", "runtime_scope_test_suite")
 
 # Starlark-level tests for the npm repository-generation helpers: naming,
 # snapshot identity, version comparison and cycle breaking. The lockfile-text
 # parsers are covered separately by //tests/npm:parser_tests.
 helpers_test_suite(name = "helpers_tests")
+
+runtime_scope_test_suite(name = "runtime_scope_tests")

@@ -2,6 +2,7 @@ load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
 load("@rules_typescript//ts:defs.bzl", "ts_binary", "ts_codegen", "ts_compile", "ts_dev_server")
+load("//tests:action_lines_tests.bzl", "action_lines_test")
 load("//tests/npm:direct_version_tests.bzl", "direct_npm_identity_test")
 load(":configuration_fixture.bzl", "configuration_source", "transitioned_source")
 
@@ -273,6 +274,122 @@ direct_npm_identity_test(
         "the app's link is what a bare specifier reaches",
     ],
     target_under_test = ":dev_member_shadowed",
+)
+
+write_file(
+    name = "scoped_neighbor_ts",
+    out = "scoped/neighbor.ts",
+    content = [
+        'import { z } from "zod";',
+        "export const neighbor = z.string();",
+    ],
+)
+
+# A second owner's source under source_contexts' scoped/package.json: that scope
+# gets one npm lookup per owner.
+# keep
+ts_compile(
+    name = "scope_neighbor",
+    srcs = [":scoped_neighbor_ts"],
+    emit = False,
+    node_modules = ":node_modules",
+    tags = ["manual"],  # Reached only through dev_scope_pair.
+    deps = ["@npm//:zod"],
+)
+
+# keep
+ts_compile(
+    name = "scope_pair",
+    srcs = [],
+    emit = False,
+    node_modules = ":node_modules",
+    tags = ["manual"],  # Reached only through dev_scope_pair.
+    deps = [
+        ":scope_neighbor",
+        ":source_contexts",
+    ],
+)
+
+# keep
+ts_dev_server(
+    name = "dev_scope_pair",
+    entry_point = ":scope_pair",
+    node_modules = ":node_modules",
+    tags = ["manual"],  # Only its generated config is analyzed below.
+)
+
+action_lines_test(
+    name = "dev_member_npm_npm_config_test",
+    expected = [
+        "FileWrite tests/dev_server/dev_member_npm_dev/vite.config.mjs const declaredFiles = {[\"tests/dev_server/member/value.ts\"]: { path: path.resolve(workspaceRoot, \"tests/dev_server/member/value.ts\"), context: \"source\", isSource: true }};",
+        "FileWrite tests/dev_server/dev_member_npm_dev/vite.config.mjs const npmBindingSets = [{\"member-only\":0}];",
+        "FileWrite tests/dev_server/dev_member_npm_dev/vite.config.mjs const npmContexts = [[\"tests/dev_server/member/value.ts\", 0]];",
+        "FileWrite tests/dev_server/dev_member_npm_dev/vite.config.mjs const npmViews = [\"members/part/_main/part/tests/part/dev_server/part/member/part/node_modules\"].map(view => path.join(path.dirname(nodeModulesPath), view));",
+    ],
+    output_suffix = "vite.config.mjs",
+    prefixes = [
+        "const declaredFiles",
+        "const npmBindingSets",
+        "const npmContexts",
+        "const npmViews",
+    ],
+    separator = ", [",
+    target_under_test = ":dev_member_npm",
+)
+
+action_lines_test(
+    name = "dev_scope_pair_npm_config_test",
+    expected = [
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/generated-helper.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/generated-helper.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/scoped/generated-helper.ts\"), context: \"source\", isSource: false, scope: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\"), importer: path.resolve(path.dirname(path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\")), \"generated-helper.ts\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/generated.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/generated.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/scoped/generated.ts\"), context: \"source\", isSource: false, scope: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\"), importer: path.resolve(path.dirname(path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\")), \"generated.ts\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/helper.mjs\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/helper.mjs\"]: { path: path.resolve(workspaceRoot, \"tests/dev_server/scoped/helper.mjs\"), context: \"source\", isSource: true, scope: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/neighbor.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/neighbor.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/scoped/neighbor.ts\"), context: \"source\", isSource: false, scope: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\"), importer: path.resolve(path.dirname(path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\")), \"neighbor.ts\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/package.json\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/package.json\"]: { path: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\"), context: \"source\", isSource: true, scope: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/self-helper.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/scoped/self-helper.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/scoped/self-helper.ts\"), context: \"source\", isSource: false, scope: path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\"), importer: path.resolve(path.dirname(path.resolve(workspaceRoot, \"tests/dev_server/scoped/package.json\")), \"self-helper.ts\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/helper.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/helper.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/helper.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/imports.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/imports.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/imports.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/package.json\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/package.json\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/scoped-helper.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/scoped-helper.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/scoped-helper.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/self.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/self.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/self.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/value.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/a/value.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/value.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/a/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/helper.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/helper.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/helper.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/imports.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/imports.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/imports.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/package.json\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/package.json\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/scoped-helper.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/scoped-helper.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/scoped-helper.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/self.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/self.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/self.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\") }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/value.ts\", 0]];",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs \"tests/dev_server/shared_scalars/b/value.ts\"]: { path: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/value.ts\"), context: \"source\", isSource: false, scope: path.resolve(fs.realpathSync(bazelBin), \"tests/dev_server/shared_scalars/b/package.json\") }};",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs const declaredFiles = {[\"tests/dev_server/npm_context/value.ts\"]: { path: path.resolve(workspaceRoot, \"tests/dev_server/npm_context/value.ts\"), context: \"source\", isSource: true }",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs const npmBindingSets = [{\"zod\":null}];",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs const npmContexts = [[\"tests/dev_server/npm_context/value.ts\", 0]",
+        "FileWrite tests/dev_server/dev_scope_pair_dev/vite.config.mjs const npmViews = [].map(view => path.join(path.dirname(nodeModulesPath), view));",
+    ],
+    output_suffix = "vite.config.mjs",
+    prefixes = [
+        "const declaredFiles",
+        "const npmBindingSets",
+        "const npmContexts",
+        "const npmViews",
+    ],
+    separator = ", [",
+    target_under_test = ":dev_scope_pair",
 )
 
 configuration_source(name = "configuration_source")

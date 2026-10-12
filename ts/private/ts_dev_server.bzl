@@ -7,7 +7,7 @@ load(
     "rlocation_path",
 )
 load("//ts/private:node_modules.bzl", "check_dev_server_npm_contexts", "npm_closure_names")
-load("//ts/private:providers.bzl", "DevServerInfo", "NodeModulesInfo", "TsInfo", "canonical_runtime_file", "runtime_links", "runtime_scope_destinations")
+load("//ts/private:providers.bzl", "DevServerInfo", "NodeModulesInfo", "TsInfo", "canonical_runtime_file", "runtime_links", "runtime_scope_destinations", "runtime_scope_index")
 load("//ts/private:runtime.bzl", "JS_RUNTIME_TOOLCHAIN_TYPE", "get_js_runtime")
 load("//ts/private:runtime_tools.bzl", "program_runtime_tools")
 load("//ts/private:vite_config.bzl", "LOAD_USER_CONFIG_JS", "VITE_CONFIG_EXTENSIONS", "VITE_CONFIG_SRCS_DOC", "stage_vite_config")
@@ -108,7 +108,7 @@ def _generate_dev_config(
     Returns:
         The generated vite.config.mjs File.
     """
-    scopes = [original for original, _selected, context in declared_files.values() if context == "source" and original.basename == "package.json"]
+    scopes = runtime_scope_index([original for original, _selected, context in declared_files.values() if context == "source" and original.basename == "package.json"])
     declared_paths = []
     for logical, (original, selected, context) in sorted(declared_files.items()):
         source_scope = ""

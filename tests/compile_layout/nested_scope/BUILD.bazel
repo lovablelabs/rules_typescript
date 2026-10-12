@@ -1,0 +1,105 @@
+# gazelle:ignore
+
+load("//npm:defs.bzl", "node_modules")
+load("//tests:action_lines_tests.bzl", "action_lines_test")
+load("//ts:defs.bzl", "ts_compile", "ts_test")
+
+_SRCS = [
+    "a/x.ts",
+    "a/b/y.ts",
+    "a/b/c/z.ts",
+]
+
+_SCOPES = [
+    "a/package.json",
+    "a/b/package.json",
+]
+
+node_modules(
+    name = "node_modules",
+    hoist = "//tests/npm:node_modules/.pnpm/node_modules",
+    deps = ["@npm//:zod"],
+)
+
+# The common root is a/, so the modules and both scopes move.
+ts_compile(
+    name = "emitted",
+    srcs = _SRCS,
+    emit = True,
+    node_modules = ":node_modules",
+    package_scopes = _SCOPES,
+    deps = ["@npm//:zod"],
+)
+
+# top.ts keeps the root at the package, so each scope is checked where it is.
+ts_compile(
+    name = "preserved",
+    srcs = ["top.ts"] + _SRCS,
+    emit = False,
+    node_modules = ":node_modules",
+    package_scopes = _SCOPES,
+    deps = ["@npm//:zod"],
+)
+
+ts_test(
+    name = "scoped_test",
+    srcs = ["a/b/c/z.test.ts"],
+    emit = True,
+    node_modules = ":node_modules",
+    runner = "//ts/runners:node_test",
+    tags = ["manual"],  # Only its program and native view are analyzed below.
+    deps = [":emitted"],
+)
+
+action_lines_test(
+    name = "emitted_scope_targets_test",
+    expected = [
+        "TsManifest tests/compile_layout/nested_scope/a/b/package.json -runtime_targets=[{\"runtime\":\"./y.js\",\"source\":\"./y.ts\"},{\"runtime\":\"./c/z.js\",\"source\":\"./c/z.ts\"}]",
+        "TsManifest tests/compile_layout/nested_scope/a/package.json -runtime_targets=[{\"runtime\":\"./x.js\",\"source\":\"./x.ts\"},{\"runtime\":\"./b/y.js\",\"source\":\"./b/y.ts\"},{\"runtime\":\"./b/c/z.js\",\"source\":\"./b/c/z.ts\"}]",
+    ],
+    prefixes = [
+        "-runtime_scope=",
+        "-runtime_targets=",
+    ],
+    target_under_test = ":emitted",
+)
+
+action_lines_test(
+    name = "preserved_scope_checks_test",
+    expected = [
+        "TsgoCheck tests/compile_layout/nested_scope/preserved.tscheck -runtime_scope={\"runtime\":\"tests/compile_layout/nested_scope/a/b/package.json\",\"source\":\"tests/compile_layout/nested_scope/a/b/package.json\",\"targets\":[{\"runtime\":\"./y.ts\",\"source\":\"./y.ts\"},{\"runtime\":\"./c/z.ts\",\"source\":\"./c/z.ts\"}]}",
+        "TsgoCheck tests/compile_layout/nested_scope/preserved.tscheck -runtime_scope={\"runtime\":\"tests/compile_layout/nested_scope/a/package.json\",\"source\":\"tests/compile_layout/nested_scope/a/package.json\",\"targets\":[{\"runtime\":\"./x.ts\",\"source\":\"./x.ts\"},{\"runtime\":\"./b/y.ts\",\"source\":\"./b/y.ts\"},{\"runtime\":\"./b/c/z.ts\",\"source\":\"./b/c/z.ts\"}]}",
+    ],
+    prefixes = [
+        "-runtime_scope=",
+        "-runtime_targets=",
+    ],
+    target_under_test = ":preserved",
+)
+
+action_lines_test(
+    name = "scoped_test_npm_contexts_test",
+    expected = [
+        "FileWrite tests/compile_layout/nested_scope/scoped_test__native_program_test_launcher.runtime.json npm_binding_sets=[{\"zod\":\"_main/tests/npm/node_modules/.pnpm/zod@3.24.2/node_modules/zod\"},{\"zod\":\"_main/tests/npm/node_modules/.pnpm/zod@3.24.2/node_modules/zod\"},{\"zod\":\"_main/tests/npm/node_modules/.pnpm/zod@3.24.2/node_modules/zod\"},{},{}]",
+        "FileWrite tests/compile_layout/nested_scope/scoped_test__native_program_test_launcher.runtime.json npm_contexts=[{\"bindings_set\":0,\"module\":\"_main/tests/compile_layout/nested_scope/a/x.js\",\"package_scope\":{\"bindings_set\":0,\"manifest\":\"_main/tests/compile_layout/nested_scope/a/package.json\"},\"source\":\"tests/compile_layout/nested_scope/a/x.ts\"},{\"bindings_set\":1,\"module\":\"_main/tests/compile_layout/nested_scope/a/b/y.js\",\"package_scope\":{\"bindings_set\":1,\"manifest\":\"_main/tests/compile_layout/nested_scope/a/b/package.json\"},\"source\":\"tests/compile_layout/nested_scope/a/b/y.ts\"},{\"bindings_set\":2,\"module\":\"_main/tests/compile_layout/nested_scope/a/b/c/z.js\",\"package_scope\":{\"bindings_set\":1,\"manifest\":\"_main/tests/compile_layout/nested_scope/a/b/package.json\"},\"source\":\"tests/compile_layout/nested_scope/a/b/c/z.ts\"}]",
+    ],
+    json_keys = [
+        "npm_binding_sets",
+        "npm_contexts",
+    ],
+    output_suffix = ".json",
+    target_under_test = ":scoped_test",
+)
+
+action_lines_test(
+    name = "scoped_test_scope_targets_test",
+    expected = [
+        "TsEmit tests/compile_layout/nested_scope/a/b/c/z.test.js -runtime_scope={\"runtime\":\"$(BINDIR)/tests/compile_layout/nested_scope/a/b/package.json\",\"source\":\"tests/compile_layout/nested_scope/a/b/package.json\",\"targets\":[{\"runtime\":\"./c/z.test.js\",\"source\":\"./c/z.test.ts\"},{\"runtime\":\"./y.js\",\"source\":\"./y.ts\"},{\"runtime\":\"./c/z.js\",\"source\":\"./c/z.ts\"}]}",
+        "TsEmit tests/compile_layout/nested_scope/a/b/c/z.test.js -runtime_scope={\"runtime\":\"$(BINDIR)/tests/compile_layout/nested_scope/a/package.json\",\"source\":\"tests/compile_layout/nested_scope/a/package.json\",\"targets\":[{\"runtime\":\"./b/c/z.test.js\",\"source\":\"./b/c/z.test.ts\"},{\"runtime\":\"./x.js\",\"source\":\"./x.ts\"},{\"runtime\":\"./b/y.js\",\"source\":\"./b/y.ts\"},{\"runtime\":\"./b/c/z.js\",\"source\":\"./b/c/z.ts\"}]}",
+    ],
+    prefixes = [
+        "-runtime_scope=",
+        "-runtime_targets=",
+    ],
+    target_under_test = ":scoped_test",
+)
