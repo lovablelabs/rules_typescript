@@ -387,6 +387,13 @@ func rootsHelpersChecks(it *harness.IT, _ string) {
 // CI runs this group before the suite: PR caches restore main's, which lack this
 // tree's runtime actions, and a group that built them cold overran its timeout.
 func warmupChecks(it *harness.IT, _ string) {
+	// The round trip's //... and Gazelle are what each group's first commands
+	// build; a failure here is the round trip's to report, so it only warms.
+	if err := it.Bazel("build", "//...", "//:gazelle"); err != nil {
+		it.Pass("//... did not build (%v); the groups build what is missing", err)
+	} else {
+		it.Pass("//... and //:gazelle build")
+	}
 	targets := testTargets(it)
 	for _, runfiles := range []string{"--enable_runfiles", "--noenable_runfiles"} {
 		it.MustBazel(append([]string{"build", runfiles}, targets...)...)

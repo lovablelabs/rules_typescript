@@ -10,7 +10,7 @@ consumer workspace, which this repository's CI does not run.
 pull request, whichever branch it targets. It has six jobs.
 
 The five jobs that run Bazel set it up with `bazel-contrib/setup-bazel@0.18.0`,
-each with caches of its own (see [Caches](#caches)).
+sharing one set of caches (see [Caches](#caches)).
 
 ### Workflow Jobs
 
@@ -46,7 +46,7 @@ each with caches of its own (see [Caches](#caches)).
      `react-app`), each a separate Bazel invocation, `fail-fast: false`. Every
      leg checks `bazel run //:gazelle -- -mode=diff` prints nothing (after an
      install where a root `pnpm-lock.yaml` is), then builds `//...`
-   - Each leg has its own caches, `cache-version: 2-examples-<name>`
+   - No disk cache: see [Caches](#caches)
 
 4. **Build Determinism Check** (`determinism`)
    - `tools/ci/check_determinism.sh /mnt/rules_ts_det`: `//tests/smoke:hello`
@@ -113,11 +113,11 @@ each with caches of its own (see [Caches](#caches)).
    - `/mnt` is recreated every run, so an `actions/cache@v6` step restores
      `/mnt/rules_ts_it/disk_cache`, `/mnt/rules_ts_it/bazelisk` and
      `/mnt/rules_ts_it/pnpm` under the key
-     `nested-bazel-<runner.os>-<shard>-<commit>`, with
-     `nested-bazel-<runner.os>-<shard>-` as the restore-key prefix. Each leg
-     saves its own. `/mnt/rules_ts_it/repository_cache` is a link to
-     setup-bazel's repository cache, which the leg's `cache-version` keeps
-     apart from the other jobs'. Cold, the concurrent servers all miss the
+     `nested-bazel-<runner.os>-<shard>-<hash of the module, lock and BUILD
+     files>`, with `nested-bazel-<runner.os>-<shard>-` as the restore-key
+     prefix. Each leg saves its own, on main only, after trimming
+     `disk_cache` to `NESTED_DISK_CACHE_MAX_BYTES`. `/mnt/rules_ts_it/repository_cache` is a link to
+     the shared repository cache, which this job restores and does not save. Cold, the concurrent servers all miss the
      shared cache at once and fetch the same artifacts, a measured ~4GB
      (`tests/integration/tags.bzl`). The cache is content-addressed, so a stale
      restore is a miss, never a wrong answer
@@ -145,28 +145,61 @@ each with caches of its own (see [Caches](#caches)).
 
 ### Caches
 
-Every Bazel job passes setup-bazel a `cache-version` of its own (`2-test`,
-`2-e2e`, `2-examples-<name>`, `2-determinism`, `2-integration-<shard>`).
-setup-bazel puts it in front of every key and restore-key, followed by the OS
-and architecture, so a job restores only what it built, and one job missing
-its cache leaves the others theirs. Within a job:
+All Bazel jobs pass setup-bazel the same `cache-version`, so on one OS they
+restore the same entries; setup-bazel adds the OS and architecture to every
+key. Pull requests only restore. Only the `test` legs save setup-bazel's
+caches, and only on `main`, so a pull request never evicts main's entries and
+no smaller job reserves an immutable key with a partial cache first.
 
-- The repository cache is keyed on every `MODULE.bazel`, `pnpm-lock.yaml` and
-  `Cargo.lock` plus `.bazelversion`; the repository has no `MODULE.bazel.lock`.
-  Under Bazel 9 the repository cache holds the repo contents cache too, so a hit
-  skips the repository rules as well as the downloads
-- The disk cache (all but `determinism`) is keyed on those files and every
-  BUILD file; the job writes the commit into `.git/BUILD.bazel` first, which
-  makes the key unique per commit, and the restore-key prefix finds the newest
-- Pull requests save as well as pushes, into their own ref, so a pull
-  request's second run starts from its first. A superseded entry is never
-  restored again, so it is the least recently used, the first the cache evicts
+- **Repository cache**, Linux only: keyed on every `MODULE.bazel`,
+  `pnpm-lock.yaml` and `Cargo.lock` plus `.bazelversion` (the repository has
+  no `MODULE.bazel.lock`), restored by every Linux job, the nested-Bazel
+  workspaces through `/mnt/rules_ts_it/repository_cache`. Under Bazel 9 it
+  holds the repo contents cache too, so a hit skips the repository rules as
+  well as the downloads. Repositories only e2e/ or examples/ fetch are not in
+  it. The macOS leg fetches, as a second ~3 GB entry does not fit
+- **Disk cache**, namespace `main` per OS: keyed on the root module files and
+  every BUILD file, so a commit that changes neither reuses the key, and the
+  restore-key prefix finds the newest otherwise. The `test` legs and the
+  integration job's outer Bazel build this workspace's graph in one
+  configuration and share it; the integration job only restores. An exact hit
+  is not saved again, so the entry is refreshed when a BUILD or module file
+  changes on `main`. Before saving, `tools/ci/trim_disk_cache.sh` deletes the
+  least recently used entries down to `DISK_CACHE_MAX_BYTES_LINUX` /
+  `_MACOS`; Bazel's own collector runs only after the server idles, which a
+  CI job never does
+- **No disk cache** for e2e/, examples/ and `determinism`. e2e/ and examples/
+  are separate workspaces, where this ruleset is an external repository, so
+  no action key matches `main`'s, and four more namespaces do not fit;
+  `determinism` builds from empty output bases on purpose
+- **Nested-Bazel caches** (`integration-tests`), one per leg, see job 5
+- **Download retries** in every CI invocation, the nested ones through the
+  harness's rc: `--http_connector_attempts=10` with backoff capped at
+  `--http_connector_retry_max_timeout=60s` (5xx and 429 answers),
+  `--experimental_repository_downloader_retries=8` (dropped connections),
+  `--http_timeout_scaling=2`
+- **Saved on failure too**: setup-bazel's post step and the nested save run
+  unless the job is cancelled, and a job that reaches its own `timeout-minutes`
+  is cancelled. The long steps (`Run all tests` 100 min of the job's 120, the
+  warmup 45 and the integration suite 120 of the job's 180) carry shorter
+  timeouts, so a cold run that overruns fails and main still keeps what it
+  built
 
-Measured entry sizes: the Linux unit-test disk cache ~3.7 GB, the macOS one
-~2.6 GB, the Linux repository cache ~2.9 GB, a nested-Bazel cache ~2.5 GB
-(`core`) or ~0.3 GB (`npm`). One set per job and leg on `main`, plus the open
-pull requests' sets, is several times the 10 GB an Actions cache holds by
-default: the repository's limit has to be raised for the caches to survive.
+The budget, compressed sizes as the Actions cache stores them (the disk bounds
+are uncompressed; measured entries compress about fivefold):
+
+| Entry | Size |
+| --- | --- |
+| Linux repository cache | ~2.9 GB |
+| Linux disk cache `main` (bound 8 GiB) | ~1.6-2 GB |
+| macOS disk cache `main` (bound 6 GiB) | ~1.2-1.5 GB |
+| Nested `core` (bound 12 GiB; 13 GB measured unbounded) | ~2.3 GB |
+| Nested `npm` | ~0.3 GB |
+| bazelisk, Linux and macOS | ~0.1 GB |
+| Total | ~8.4-9.1 GB of 10 GB |
+
+A refresh briefly holds two entries of one namespace; the superseded one was
+last read before the others of its run, so it is the first the cache evicts.
 
 ### Test Source Coverage
 

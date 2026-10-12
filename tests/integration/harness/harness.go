@@ -195,9 +195,15 @@ func (it *IT) shareRepositoryCache() error {
 		}
 	}
 	// A disk cache is a remote cache to Bazel, so without this a cache hit leaves outputs the tests read back unmaterialized.
+	// The nested Bazels read no user rc, so CI's download retries go here too:
+	// a cold fetch of a GitHub archive meets the occasional 500.
 	lines := "common --repository_cache=" + repo + "\n" +
 		"common --disk_cache=" + disk + "\n" +
-		"common --remote_download_outputs=all\n"
+		"common --remote_download_outputs=all\n" +
+		"common --http_connector_attempts=10\n" +
+		"common --http_connector_retry_max_timeout=60s\n" +
+		"common --http_timeout_scaling=2\n" +
+		"common --experimental_repository_downloader_retries=8\n"
 	if it.staged == "" {
 		// The checkout keeps its .bazelrc and the outer build's bazel-* links.
 		it.bazelrc = filepath.Join(it.scratchDir, "bazelrc")
