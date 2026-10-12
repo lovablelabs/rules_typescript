@@ -929,6 +929,105 @@ test('native watches retain nested declared tree updates across symlink replacem
   }
 });
 
+test('bazel-bin directories that lead to no declared output get no watch at start, until replaced', async () => {
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const realBin = newBazelBin();
+  const bin = realBin + '-link';
+  fs.symlinkSync(realBin, bin, 'dir');
+  for (let i = 0; i < 50; i++) {
+    fs.mkdirSync(path.join(realBin, `other/pkg${i}/lib`), { recursive: true });
+    fs.writeFileSync(path.join(realBin, `other/pkg${i}/lib/index.js`), 'export {};');
+  }
+  fs.mkdirSync(path.join(realBin, 'app/compiled'), { recursive: true });
+  fs.mkdirSync(path.join(realBin, 'gen/tree/nested'), { recursive: true });
+  const output = path.join(bin, 'app/out.js');
+  fs.writeFileSync(output, 'export {};');
+  const batches = [];
+  const watcher = new BazelWatcher({
+    bazelBin: bin,
+    debounceMs: 20,
+    recursiveWatch: false,
+    declaredFiles: {
+      'app/out.js': { path: path.join(realBin, 'app/out.js'), context: 'source' },
+      'gen/tree': { path: path.join(realBin, 'gen/tree'), context: 'source', directory: true },
+    },
+    onRebuild: (changed) => batches.push([...changed]),
+  });
+  const nativeWatch = fs.watch;
+  const opened = [];
+  fs.watch = (file, ...args) => {
+    opened.push(file);
+    return nativeWatch(file, ...args);
+  };
+  const reported = async (file) => {
+    batches.length = 0;
+    fs.writeFileSync(file, `export const value = ${Math.random()};`);
+    await waitUntil(`the ${file} update`, () => batches.some((batch) => batch.includes(file)));
+  };
+  try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    assert.deepEqual(opened.filter((file) => file.includes(`${path.sep}other`) || file.endsWith('compiled')), []);
+    for (const directory of ['', 'app', 'gen', 'gen/tree', 'gen/tree/nested']) {
+      assert(opened.includes(path.join(bin, directory)), `${directory || 'bazel-bin'} lost its watch`);
+    }
+    await reported(output);
+    await reported(path.join(bin, 'gen/tree/nested/leaf.js'));
+
+    const compiled = path.join(bin, 'app/compiled');
+    fs.utimesSync(compiled, new Date(), new Date());
+    fs.writeFileSync(path.join(compiled, 'page.js'), 'export {};');
+    await reported(output);
+    assert(!batches.flat().includes(path.join(compiled, 'page.js')), 'a skipped directory reported a file');
+
+    const staged = path.join(realBin, 'app/compiled-next');
+    fs.mkdirSync(staged);
+    fs.writeFileSync(path.join(staged, 'page.js'), 'export {};');
+    fs.rmSync(path.join(realBin, 'app/compiled'), { recursive: true });
+    batches.length = 0;
+    fs.renameSync(staged, path.join(realBin, 'app/compiled'));
+    await waitUntil('the replaced directory', () =>
+      batches.some((batch) => batch.includes(path.join(compiled, 'page.js'))));
+    await reported(path.join(compiled, 'page.js'));
+  } finally {
+    await watcher.stop();
+    fs.watch = nativeWatch;
+  }
+});
+
+test('a file the server loads from a directory skipped at start still gets HMR', async () => {
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const realBin = newBazelBin();
+  const bin = realBin + '-link';
+  fs.symlinkSync(realBin, bin, 'dir');
+  fs.mkdirSync(path.join(realBin, 'app'));
+  fs.mkdirSync(path.join(realBin, 'generated/routes'), { recursive: true });
+  const output = path.join(bin, 'app/out.js');
+  const routes = path.join(bin, 'generated/routes/routes.ts');
+  fs.writeFileSync(output, 'export {};');
+  fs.writeFileSync(routes, 'export const routes = [];');
+  const server = fakeDevServer(fakeViteWatcher());
+  const plugin = bazelPlugin({
+    bazelBin: bin, hmrDebounceMs: 20, mode: 'serve',
+    declaredFiles: { 'app/out.js': { path: path.join(realBin, 'app/out.js'), context: 'source' } },
+  });
+  const updated = (file) => server.sent.some((event) =>
+    event.type === 'update' && event.updates.some((update) => update.path === '/@fs' + file));
+  plugin.configResolved(server.config);
+  try {
+    await startArmed(() => installPlugin(plugin, server), bin, server.sent, 20);
+    fs.writeFileSync(routes, 'export const routes = ["unloaded"];');
+    fs.writeFileSync(output, 'export const value = 1;');
+    await waitUntil('the declared output update', () => updated(output));
+    assert(!updated(routes), 'a file in a directory skipped at start was reported before the server loaded it');
+
+    assert.equal(plugin.load(fs.realpathSync(routes)), null);
+    fs.writeFileSync(routes, 'export const routes = ["loaded"];');
+    await waitUntil('the loaded file update', () => updated(routes));
+  } finally {
+    plugin.closeBundle();
+  }
+});
+
 let failed = 0;
 let skipped = 0;
 for (const [name, fn] of tests) {

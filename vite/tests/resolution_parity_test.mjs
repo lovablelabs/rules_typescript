@@ -248,6 +248,60 @@ test('a watcher event under a linked bazel-bin does not realpath every declared 
   assert.equal(resolver.isDeclaredFile(fs.realpathSync(path.join(linkedBin, 'events/gen7.ts'))), true);
 });
 
+test('a canonical lookup does not realpath every declared file again, and still sees moved declarations', () => {
+  const store = path.join(root, 'miss-store');
+  const linked = path.join(root, 'miss-linked');
+  const treeTargets = ['first', 'next'].map((name) => path.join(root, `miss-tree-${name}`));
+  const tree = path.join(root, 'miss-tree');
+  fs.symlinkSync(store, linked, 'dir');
+  fs.symlinkSync(treeTargets[0], tree, 'dir');
+  for (const target of treeTargets) write(path.join(target, 'nested/leaf.js'), 'export {};\n');
+  const declaredFiles = { 'gen/tree': { path: tree, context: 'source', directory: true } };
+  for (let i = 0; i < 200; i++) {
+    write(path.join(store, `gen${i}.js`), 'export {};\n');
+    declaredFiles[`gen/file${i}.js`] = { path: path.join(linked, `gen${i}.js`), context: 'source' };
+  }
+  write(path.join(store, 'undeclared.js'), 'export {};\n');
+  const resolver = new BazelResolver({ workspaceRoot, bazelBin, mode: 'serve', declaredFiles });
+  const realpathSync = fs.realpathSync;
+  let calls = 0;
+  const counted = (query) => {
+    calls = 0;
+    fs.realpathSync = (...args) => {
+      calls++;
+      return realpathSync(...args);
+    };
+    try {
+      return query();
+    } finally {
+      fs.realpathSync = realpathSync;
+    }
+  };
+  assert.equal(counted(() => resolver.isDeclaredFile(path.join(store, 'undeclared.js'))), false);
+  for (const query of [path.join(store, 'undeclared.js'), path.join(store, 'gen7.js')]) {
+    counted(() => resolver.isDeclaredFile(query));
+    assert.ok(calls < 20, `a repeated lookup of ${query} resolved ${calls} paths`);
+  }
+  assert.equal(resolver.resolveId(path.join(store, 'gen7.js'))?.filePath, path.join(linked, 'gen7.js'));
+  assert.equal(resolver.declaredDirectory(path.join(treeTargets[0], 'nested/leaf.js')), tree);
+
+  fs.symlinkSync(treeTargets[1], tree + '.next', 'dir');
+  fs.renameSync(tree + '.next', tree);
+  assert.equal(resolver.isDeclaredFile(path.join(treeTargets[0], 'nested/leaf.js')), false);
+  assert.equal(resolver.declaredDirectory(path.join(treeTargets[1], 'nested/leaf.js')), tree);
+  const nextStore = path.join(root, 'miss-store-next');
+  write(path.join(nextStore, 'gen7.js'), 'export {};\n');
+  fs.symlinkSync(nextStore, linked + '.next', 'dir');
+  fs.renameSync(linked + '.next', linked);
+  assert.equal(resolver.isDeclaredFile(path.join(store, 'gen7.js')), false,
+    'a retargeted declaration kept its old realpath');
+  assert.equal(resolver.resolveId(path.join(nextStore, 'gen7.js'))?.filePath, path.join(linked, 'gen7.js'));
+  fs.renameSync(path.join(nextStore, 'gen7.js'), path.join(nextStore, 'moved.js'));
+  fs.symlinkSync('moved.js', path.join(nextStore, 'gen7.js'));
+  resolver.invalidateRealPaths();
+  assert.equal(resolver.resolveId(path.join(nextStore, 'moved.js'))?.filePath, path.join(linked, 'gen7.js'));
+});
+
 test('a moved package asset keeps its exact source authority without a source alias', () => {
   for (const [name, original] of [
     ['generated', path.join(bazelBin, 'assets/generated.css')],

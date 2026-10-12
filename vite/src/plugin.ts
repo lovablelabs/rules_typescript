@@ -312,6 +312,7 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
 
     // ── load ──────────────────────────────────────────────────────────────
     load(id: string): { code: string; map?: string | null } | null {
+      watcher?.watchLoaded(id.replace(/[?#].*$/, ''));
       if (/[?#]/.test(id)) return null;
       const declared = resolver.isDeclaredFile(id);
       if (!id.endsWith('.js') || !resolver.isBazelOutput(id)) {
@@ -363,6 +364,7 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
           resolver.isDeclaredOutput(file) || (server.moduleGraph.getModulesByFile(file)?.size ?? 0) > 0,
         declaredFiles: options.declaredFiles,
         onRebuild: (changedAbsolutePaths: Set<string>) => {
+          resolver.invalidateRealPaths();
           handleRebuild(server, changedAbsolutePaths).catch((err: unknown) => {
             server.ws.send({
               type: 'error',
