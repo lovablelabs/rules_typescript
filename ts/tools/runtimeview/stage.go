@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -136,6 +137,7 @@ func placeNpmContexts(root string, contexts []NpmContext, modules []string, skip
 		bindings  uintptr
 	}
 	seen := map[lookupKey]struct{}{}
+	validNames := map[string]bool{}
 	for _, context := range contexts {
 		if _, admitted := moduleSet[context.Module]; root == "" || !admitted {
 			return fmt.Errorf("ts_launcher: npm context module %q has no admitted runtime module", context.Module)
@@ -164,8 +166,12 @@ func placeNpmContexts(root string, contexts []NpmContext, modules []string, skip
 			}
 			for name, store := range lookup.bindings {
 				destination := directory + "/node_modules/" + name
-				if _, err := nativeContextPath(root, destination); err != nil {
-					return err
+				// The anchor check covers directory unless it is ".", so a valid name stays valid in any other directory.
+				if directory == "." || !validNames[name] {
+					if _, err := nativeContextPath(root, destination); err != nil {
+						return err
+					}
+					validNames[name] = true
 				}
 				resolved, err := resolveStore(store, context.Module)
 				if err != nil {
@@ -230,47 +236,85 @@ func placeNpmContexts(root string, contexts []NpmContext, modules []string, skip
 		}
 		return false, nil
 	}
-	listings := map[string]map[string]bool{}
-	listing := func(relative string) (map[string]bool, error) {
-		if names, ok := listings[relative]; ok {
-			return names, nil
+	type nodeModules struct {
+		names map[string]bool
+		// shadows holds each <base> a <base>.js, .json or .node entry
+		// shadows, which CJS tries before the <base> directory.
+		shadows map[string]bool
+	}
+	listings := map[string]nodeModules{}
+	listing := func(relative string) (nodeModules, error) {
+		if listed, ok := listings[relative]; ok {
+			return listed, nil
 		}
 		entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(relative)))
 		if err != nil && !os.IsNotExist(err) {
-			return nil, err
+			return nodeModules{}, err
 		}
-		names := make(map[string]bool, len(entries))
+		listed := nodeModules{names: make(map[string]bool, len(entries)), shadows: map[string]bool{}}
 		for _, entry := range entries {
-			names[entry.Name()] = true
+			listed.names[entry.Name()] = true
+			for _, extension := range []string{".js", ".json", ".node"} {
+				if base, ok := strings.CutSuffix(entry.Name(), extension); ok {
+					listed.shadows[base] = true
+				}
+			}
 		}
-		listings[relative] = names
-		return names, nil
+		listings[relative] = listed
+		return listed, nil
+	}
+	type walkStop struct {
+		directory string
+		listed    nodeModules
+		err       error
+	}
+	type walkKey struct{ directory, scope string }
+	walkStops := map[walkKey]*walkStop{}
+	// nextStop is the nearest directory at or above directory whose
+	// node_modules<scope> lists anything, or nil: an empty one never decides a walk.
+	var nextStop func(directory, scope string) *walkStop
+	nextStop = func(directory, scope string) *walkStop {
+		key := walkKey{directory, scope}
+		if stop, ok := walkStops[key]; ok {
+			return stop
+		}
+		listed, err := listing(directory + "/node_modules" + scope)
+		stop := &walkStop{directory: directory, listed: listed, err: err}
+		if err == nil && len(listed.names) == 0 {
+			stop = nil
+			if i := strings.LastIndex(directory, "/"); i >= 0 {
+				stop = nextStop(directory[:i], scope)
+			}
+		}
+		walkStops[key] = stop
+		return stop
 	}
 	// resolvedAbove reports whether node's CJS and ESM walks and vite's all
 	// reach the expected store for name from directory without a link there.
 	resolvedAbove := func(directory, name string, expected os.FileInfo) (bool, error) {
-		parts := strings.Split(directory, "/")
 		// Only CJS skips node_modules segments on its walk, so the walks differ below one.
-		if slices.Contains(parts, "node_modules") {
+		if strings.Contains("/"+directory+"/", "/node_modules/") {
 			return false, nil
 		}
 		scope, base := "", name
 		if i := strings.LastIndex(name, "/"); i >= 0 {
 			scope, base = "/"+name[:i], name[i+1:]
 		}
-		for depth := len(parts); depth > 0; depth-- {
-			parent := strings.Join(parts[:depth], "/") + "/node_modules" + scope
-			names, err := listing(parent)
-			if err != nil {
-				return false, err
+		for stop := nextStop(directory, scope); stop != nil; {
+			if stop.err != nil {
+				return false, stop.err
 			}
-			// CJS tries <name>.js, .json and .node before the <name> directory.
-			if names[base+".js"] || names[base+".json"] || names[base+".node"] {
+			if stop.listed.shadows[base] {
 				return false, nil
 			}
-			if names[base] {
-				return selects(parent+"/"+base, expected), nil
+			if stop.listed.names[base] {
+				return selects(stop.directory+"/node_modules"+scope+"/"+base, expected), nil
 			}
+			i := strings.LastIndex(stop.directory, "/")
+			if i < 0 {
+				break
+			}
+			stop = nextStop(stop.directory[:i], scope)
 		}
 		return false, nil
 	}
@@ -279,13 +323,13 @@ func placeNpmContexts(root string, contexts []NpmContext, modules []string, skip
 	for _, directory := range slices.Sorted(maps.Keys(byDirectory)) {
 		for _, name := range slices.Sorted(maps.Keys(byDirectory[directory])) {
 			demand := byDirectory[directory][name]
-			destination := directory + "/node_modules/" + name
 			expected := storeCache[demand.binding].info
 			if skipResolved {
 				if matched, err := resolvedAbove(directory, name, expected); err == nil && matched {
 					continue
 				}
 			}
+			destination := directory + "/node_modules/" + name
 			occupied := ""
 			parts := strings.Split(destination, "/")
 			for depth := 1; depth <= len(parts); depth++ {
@@ -307,7 +351,8 @@ func placeNpmContexts(root string, contexts []NpmContext, modules []string, skip
 				// maps, since clear() costs a map's peak capacity on every placement.
 				lstatCache = map[string]pathState{}
 				statCache = map[string]os.FileInfo{}
-				listings = map[string]map[string]bool{}
+				listings = map[string]nodeModules{}
+				walkStops = map[walkKey]*walkStop{}
 				continue
 			}
 			matched, err := nearestSelects(directory, name, expected)
@@ -347,6 +392,16 @@ func StageManifest(root, manifest string, include func(string) bool, modules []s
 
 func Stage(root string, entries map[string]string, modules []string) error {
 	paths := slices.SortedFunc(maps.Keys(entries), func(a, b string) int { return cmp.Compare(a+"/", b+"/") })
+	fresh := isEmptyDir(root)
+	// A module with an absolute target is copied straight to its path instead
+	// of being linked and then replaced.
+	direct := map[string]bool{}
+	if !resolvesThroughTree(entries, paths) {
+		for _, module := range modules {
+			direct[module] = filepath.IsAbs(filepath.FromSlash(entries[module]))
+		}
+	}
+	created := map[string]bool{}
 	parent := ""
 	for _, rlocation := range paths {
 		// Never write an exact child entry through a directory alias.
@@ -354,11 +409,20 @@ func Stage(root string, entries map[string]string, modules []string) error {
 			continue
 		}
 		link := filepath.Join(root, filepath.FromSlash(rlocation))
-		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
-			return err
+		if dir := filepath.Dir(link); !created[dir] {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+			created[dir] = true
 		}
-		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-			return err
+		if !fresh {
+			if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		parent = rlocation + "/"
+		if direct[rlocation] {
+			continue
 		}
 		if target := entries[rlocation]; target != "" {
 			if err := os.Symlink(filepath.FromSlash(target), link); err != nil {
@@ -367,7 +431,6 @@ func Stage(root string, entries map[string]string, modules []string) error {
 		} else if err := os.WriteFile(link, nil, 0o644); err != nil {
 			return err
 		}
-		parent = rlocation + "/"
 	}
 	materialized, err := validateEntries(root, entries, modules, paths)
 	if err != nil {
@@ -376,14 +439,54 @@ func Stage(root string, entries map[string]string, modules []string) error {
 	if err := linkCanonicalModules(root, entries, paths, materialized); err != nil {
 		return err
 	}
+	// A linked module's relative target can reach another module's path, so
+	// every directly copied module is in place before the linked ones.
 	for _, rlocation := range paths {
-		if materialized[rlocation] {
+		if materialized[rlocation] && direct[rlocation] {
+			if err := copyRegular(filepath.FromSlash(entries[rlocation]), filepath.Join(root, filepath.FromSlash(rlocation))); err != nil {
+				return err
+			}
+		}
+	}
+	for _, rlocation := range paths {
+		if materialized[rlocation] && !direct[rlocation] && entries[rlocation] != "" {
 			if err := materializeModule(filepath.Join(root, filepath.FromSlash(rlocation))); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func isEmptyDir(path string) bool {
+	dir, err := os.Open(path)
+	if err != nil {
+		return os.IsNotExist(err)
+	}
+	defer dir.Close()
+	names, err := dir.Readdirnames(1)
+	return len(names) == 0 && err == io.EOF
+}
+
+// resolvesThroughTree reports whether validateEntries stats a path through
+// the staged tree: an entry beneath a directory entry, either with a relative
+// target.
+func resolvesThroughTree(entries map[string]string, paths []string) bool {
+	relative := func(name string) bool {
+		target := filepath.FromSlash(entries[name])
+		return target != "" && !filepath.IsAbs(target)
+	}
+	parent := ""
+	for _, name := range paths {
+		if parent == "" || !strings.HasPrefix(name, parent+"/") {
+			parent = name
+			continue
+		}
+		if relative(parent) || relative(name) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateEntries(root string, entries map[string]string, modules, paths []string) (map[string]bool, error) {
