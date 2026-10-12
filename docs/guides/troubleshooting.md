@@ -339,19 +339,24 @@ a wrong dep is a wrong resolution or a wrong label for the right file:
 ## Gazelle: .tsx file collides with a same-named .ts
 
 ```
-typescript: lib/a.test.tsx: in no program: lib/tsconfig.json includes it and lib/a.test.ts, and tsgo's include expansion keeps only the .ts of a same-named pair; the two compile to the same a.test outputs
+typescript: lib/a.test.tsx: in no program: lib/tsconfig.json includes it and lib/a.test.ts, which write the same a.test outputs, and tsgo's include expansion keeps only the .ts; # gazelle:exclude it to leave it out
 ```
 
 TypeScript expands `include` into one file per path without its extension and
 keeps `.ts` over `.tsx`, so `a.test.tsx` beside `a.test.ts` is in no program and
-in no target. Gazelle fails the run rather than leave the `.tsx` out. The other
-form, `lib/tsconfig.json lists it and lib/a.test.ts`, is a `files` list naming
-both, which would put two files that compile to the same outputs in one target.
+in no target. Gazelle fails the run rather than leave the `.tsx` out. Rename one
+file of the pair (`a.view.test.tsx`). When the `.tsx` is meant to stay out of
+every program, exclude it with `# gazelle:exclude a.test.tsx` in its directory's
+BUILD file, or leave it out with the tsconfig's own `include` or `exclude`.
 
-Rename one file of the pair (`a.view.test.tsx`). When the `.tsx` is meant to stay
-out of every program, exclude it with `# gazelle:exclude a.test.tsx` in its
-directory's BUILD file, or leave it out with the tsconfig's own `include` or
-`exclude`.
+The other form, `lib/tsconfig.json compiles it and lib/a.test.ts`, is a program
+that lists both, through its `files` or an import of the `.tsx`. The two would
+write the same outputs from one target; rename one, or take one out of the
+`files` list or the imports.
+
+Gazelle reads `include` and `exclude` but not the `outDir` tsc leaves out when
+`exclude` is unset, so a pair under `outDir` whose `.ts` is imported fails too.
+Set `exclude` to name the `outDir`.
 
 ## ts_dev_server: has no node_modules attr
 

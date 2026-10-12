@@ -337,22 +337,24 @@ func (s *programStore) reportStemCollisions() {
 				var why string
 				switch {
 				case slices.Contains(p.Files, tsx):
-					why = p.config + " lists it and " + ts
+					why = fmt.Sprintf("%s compiles it and %s, which write the same %s outputs; "+
+						"take one out of its files or imports", p.config, ts, path.Base(stem))
 				case len(listedBy[tsx]) == 0 && s.included(p, ts) && s.included(p, tsx):
-					why = "in no program: " + p.config + " includes it and " + ts +
-						", and tsgo's include expansion keeps only the .ts of a same-named pair"
+					why = fmt.Sprintf("in no program: %s includes it and %s, which write the same %s outputs, "+
+						"and tsgo's include expansion keeps only the .ts; # gazelle:exclude it to leave it out",
+						p.config, ts, path.Base(stem))
 				default:
 					continue
 				}
 				n++
-				log.Printf("typescript: %s: %s; the two compile to the same %s outputs", tsx, why, path.Base(stem))
+				log.Printf("typescript: %s: %s", tsx, why)
 				break
 			}
 		}
 	}
 	if n > 0 {
-		log.Fatalf("typescript: %d .tsx file%s collide%s with a same-named .ts; rename one file of each pair, "+
-			"or exclude the .tsx with # gazelle:exclude", n, plural(n, "s"), plural(n, "", "s"))
+		log.Fatalf("typescript: %d .tsx file%s collide%s with a same-named .ts; rename one file of each pair",
+			n, plural(n, "s"), plural(n, "", "s"))
 	}
 }
 
@@ -371,16 +373,24 @@ func (s *programStore) included(p *program, file string) bool {
 		}
 		return filepath.ToSlash(d)
 	}
-	includes, includeDir := []string{"**/*"}, parentDir(p.config)
+	// A spec is relative to the config that set it; ${configDir} is the leaf's.
+	rebase := func(dir, spec string) string {
+		spec = strings.ReplaceAll(spec, "${configDir}", filepath.Join(root, filepath.FromSlash(parentDir(p.config))))
+		if filepath.IsAbs(spec) {
+			return rel(spec)
+		}
+		return path.Join(rel(dir), spec)
+	}
+	includes, includeDir := []string{"**/*"}, filepath.Join(root, filepath.FromSlash(parentDir(p.config)))
 	switch {
 	case r.Include != nil:
-		includes, includeDir = *r.Include, rel(r.IncludeDir)
+		includes, includeDir = *r.Include, r.IncludeDir
 	case r.Files != nil:
 		return false
 	}
 	matched := false
 	for _, spec := range includes {
-		spec = path.Join(includeDir, spec)
+		spec = rebase(includeDir, spec)
 		last := path.Base(spec)
 		if last == "**" {
 			continue
@@ -397,7 +407,7 @@ func (s *programStore) included(p *program, file string) bool {
 		return matched
 	}
 	for _, spec := range *r.Exclude {
-		if tsWildcard(path.Join(rel(r.ExcludeDir), spec), true).MatchString(file) {
+		if tsWildcard(rebase(r.ExcludeDir, spec), true).MatchString(file) {
 			return false
 		}
 	}
@@ -405,8 +415,9 @@ func (s *programStore) included(p *program, file string) bool {
 }
 
 // tsWildcard is a tsconfig include or exclude spec over repository paths: **
-// spans directories, * and ? stay within one; an exclude also covers what a
-// matched directory holds.
+// spans directories, * and ? stay within one; an include's wildcards never
+// match a segment's leading dot, and an exclude covers what a matched directory
+// holds.
 func tsWildcard(spec string, exclude bool) *regexp.Regexp {
 	var b strings.Builder
 	b.WriteString("^")
@@ -416,15 +427,22 @@ func tsWildcard(spec string, exclude bool) *regexp.Regexp {
 		case segment == "**" && i == len(segments)-1:
 			b.WriteString(".*")
 			continue
-		case segment == "**":
+		case segment == "**" && exclude:
 			b.WriteString("(?:[^/]+/)*")
 			continue
+		case segment == "**":
+			b.WriteString("(?:[^./][^/]*/)*")
+			continue
 		}
-		for _, r := range segment {
-			switch r {
-			case '*':
+		for j, r := range segment {
+			switch {
+			case r == '*' && j == 0 && !exclude:
+				b.WriteString("(?:[^./][^/]*)?")
+			case r == '*':
 				b.WriteString("[^/]*")
-			case '?':
+			case r == '?' && j == 0 && !exclude:
+				b.WriteString("[^./]")
+			case r == '?':
 				b.WriteString("[^/]")
 			default:
 				b.WriteString(regexp.QuoteMeta(string(r)))

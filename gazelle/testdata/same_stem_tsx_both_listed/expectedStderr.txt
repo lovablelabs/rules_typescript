@@ -1,2 +1,2 @@
-gazelle: typescript: lib/a.test.tsx: lib/tsconfig.json lists it and lib/a.test.ts; the two compile to the same a.test outputs
-gazelle: typescript: 1 .tsx file collides with a same-named .ts; rename one file of each pair, or exclude the .tsx with # gazelle:exclude
+gazelle: typescript: lib/a.test.tsx: lib/tsconfig.json compiles it and lib/a.test.ts, which write the same a.test outputs; take one out of its files or imports
+gazelle: typescript: 1 .tsx file collides with a same-named .ts; rename one file of each pair
