@@ -35,7 +35,8 @@ go_binary(
 
 go_test(
     name = "tsaction_test",
-    size = "small",
+    # Its editor tests run the real tsgo: a shard takes close to a minute on a 4-core runner.
+    size = "medium",
     srcs = [
         "check_test.go",
         "config_compiler_test.go",

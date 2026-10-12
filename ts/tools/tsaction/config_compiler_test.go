@@ -106,7 +106,7 @@ func TestCompilerGeneratedRootLosesDeclaredPackageImportScope(t *testing.T) {
 					t.Fatal(err)
 				}
 				for logical, original := range map[string]string{"pkg/config.ts": generated, helperFile: helperFile, "pkg/package.json": "pkg/package.json"} {
-					if actual := throughRoot(filepath.Join(root, programRoot), root, root, logical); actual != original {
+					if actual := newRootPaths(filepath.Join(root, programRoot), root, root).through(logical); actual != original {
 						t.Fatalf("%s changed File identity: got %s, want %s", logical, actual, original)
 					}
 				}
@@ -263,6 +263,7 @@ func compilerConfigFixture(t *testing.T, ambient, roots string, hasTypes, hasRoo
 	if err != nil {
 		t.Fatal(err)
 	}
+	bazelExecroot(t, root)
 	for _, project := range []string{"pkg/tsconfig.json", "pkg/nested/tsconfig.json"} {
 		args := []string{"-root=" + programRoot, "-discover-tsconfig=" + out}
 		for _, source := range sources {

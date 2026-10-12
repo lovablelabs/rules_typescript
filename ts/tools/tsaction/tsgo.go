@@ -88,7 +88,7 @@ func runTsgo(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(*root)
+	defer removeUndeclared(*root, sources)
 
 	// Node resolves config imports from the real file, not its source symlink.
 	for _, file := range copies {
@@ -246,7 +246,7 @@ func checkedRun(dir string, cmdline []string, own *ownership,
 	if err != nil {
 		return err
 	}
-	rootAbs := filepath.Join(execroot, dir)
+	paths := newRootPaths(filepath.Join(execroot, dir), execroot, canonicalExecroot)
 	if chain != nil && chain.Exclude != nil {
 		logicalOwn := make(map[string]bool, len(own.own))
 		originals := make(map[string]string, len(own.own))
@@ -256,7 +256,7 @@ func checkedRun(dir string, cmdline []string, own *ownership,
 		}
 		logicalFiles := make([]string, len(listing.Files))
 		for i, file := range listing.Files {
-			logicalFiles[i] = compilerPath(throughRoot(rootAbs, execroot, canonicalExecroot, file))
+			logicalFiles[i] = compilerPath(paths.through(file))
 		}
 		logicalChain := *chain
 		logicalChain.ExcludeDir = compilerPath(chain.ExcludeDir)
@@ -268,40 +268,8 @@ func checkedRun(dir string, cmdline []string, own *ownership,
 			return errors.New(own.reportExcluded(project, hits))
 		}
 	}
-	var npmInputs []npmInput
-edges:
-	for i, e := range listing.Edges {
-		e.From = throughRoot(rootAbs, execroot, canonicalExecroot, e.From)
-		listing.Edges[i].From = e.From
-		if !own.own[e.From] {
-			continue
-		}
-		at := filepath.FromSlash(e.To)
-		if !filepath.IsAbs(at) {
-			at = filepath.Join(rootAbs, at)
-		}
-		for _, base := range []string{execroot, canonicalExecroot} {
-			if rel, ok := below(base, at); ok {
-				if _, held := own.files[npmPackageRoot(rel)]; held {
-					listing.Edges[i].To = rel
-					continue edges
-				}
-			}
-		}
-		to := throughRoot(rootAbs, execroot, canonicalExecroot, e.To)
-		if filepath.IsAbs(to) {
-			if npmInputs == nil {
-				npmInputs, err = declaredNpmInputs(execroot, own.files)
-				if err != nil {
-					return err
-				}
-			}
-			to, err = throughNpmInputs(npmInputs, to)
-			if err != nil {
-				return err
-			}
-		}
-		listing.Edges[i].To = to
+	if err := resolveEdges(listing, own, paths); err != nil {
+		return err
 	}
 	findings, err := own.check(listing)
 	if err != nil {
@@ -309,6 +277,53 @@ edges:
 	}
 	if len(findings) > 0 {
 		return &undeclaredDeps{own.report(findings)}
+	}
+	return nil
+}
+
+// resolveEdges rewrites each own file's edge to the declared input it reaches.
+func resolveEdges(listing *explainfiles.Listing, own *ownership, paths *rootPaths) error {
+	var npmInputs []npmInput
+	target := func(listed string) (string, error) {
+		at := filepath.FromSlash(listed)
+		if !filepath.IsAbs(at) {
+			at = filepath.Join(paths.rootAbs, at)
+		}
+		for _, base := range []string{paths.execroot, paths.canonicalExecroot} {
+			if rel, ok := below(base, at); ok {
+				if _, held := own.files[npmPackageRoot(rel)]; held {
+					return rel, nil
+				}
+			}
+		}
+		to := paths.through(listed)
+		if !filepath.IsAbs(to) {
+			return to, nil
+		}
+		if npmInputs == nil {
+			var err error
+			if npmInputs, err = declaredNpmInputs(paths.execroot, own.files); err != nil {
+				return "", err
+			}
+		}
+		return throughNpmInputs(npmInputs, to)
+	}
+	targets := map[string]string{}
+	for i, e := range listing.Edges {
+		from := paths.through(e.From)
+		listing.Edges[i].From = from
+		if !own.own[from] {
+			continue
+		}
+		to, ok := targets[e.To]
+		if !ok {
+			var err error
+			if to, err = target(e.To); err != nil {
+				return err
+			}
+			targets[e.To] = to
+		}
+		listing.Edges[i].To = to
 	}
 	return nil
 }
@@ -338,6 +353,7 @@ func declaredNpmInputs(execroot string, files map[string][]fileOwner) ([]npmInpu
 func throughNpmInputs(inputs []npmInput, listed string) (string, error) {
 	at := filepath.Clean(filepath.FromSlash(listed))
 	packageRoot := npmPackageRoot(filepath.ToSlash(at))
+	listedFile, listedErr := os.Stat(at)
 	var matched string
 	for _, input := range inputs {
 		member, ok := below(input.physical, at)
@@ -347,7 +363,14 @@ func throughNpmInputs(inputs []npmInput, listed string) (string, error) {
 			}
 			member = strings.TrimPrefix(filepath.ToSlash(at)[len(packageRoot):], "/")
 		}
-		physical, err := filepath.EvalSymlinks(filepath.Join(input.physical, filepath.FromSlash(member)))
+		file := filepath.Join(input.physical, filepath.FromSlash(member))
+		// One stat rules out another file; EvalSymlinks walks every component.
+		if listedErr == nil {
+			if info, err := os.Stat(file); err == nil && !os.SameFile(info, listedFile) {
+				continue
+			}
+		}
+		physical, err := filepath.EvalSymlinks(file)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -369,21 +392,62 @@ func throughNpmInputs(inputs []npmInput, listed string) (string, error) {
 	return matched, nil
 }
 
-// throughRoot is the exec-root path of a listed file the root links, or the
+// rootPaths resolves the paths a finished tsgo listed, each path and symlink
+// once: an app's listing names the same files across thousands of edges.
+type rootPaths struct {
+	rootAbs, execroot, canonicalExecroot string
+	listed                               map[string]string
+	symlinks                             map[string]resolvedPath
+}
+
+type resolvedPath struct {
+	path string
+	err  error
+}
+
+func newRootPaths(rootAbs, execroot, canonicalExecroot string) *rootPaths {
+	return &rootPaths{
+		rootAbs:           rootAbs,
+		execroot:          execroot,
+		canonicalExecroot: canonicalExecroot,
+		listed:            map[string]string{},
+		symlinks:          map[string]resolvedPath{},
+	}
+}
+
+func (r *rootPaths) evalSymlinks(p string) (string, error) {
+	resolved, ok := r.symlinks[p]
+	if !ok {
+		resolved.path, resolved.err = filepath.EvalSymlinks(p)
+		r.symlinks[p] = resolved
+	}
+	return resolved.path, resolved.err
+}
+
+// through is the exec-root path of a listed file the root links, or the
 // store path of a file under a chain link, which tsgo lists at the link.
-func throughRoot(rootAbs, execroot, canonicalExecroot, listed string) string {
+func (r *rootPaths) through(listed string) string {
+	through, ok := r.listed[listed]
+	if !ok {
+		through = r.throughRoot(listed)
+		r.listed[listed] = through
+	}
+	return through
+}
+
+func (r *rootPaths) throughRoot(listed string) string {
 	at := filepath.FromSlash(listed)
 	if !filepath.IsAbs(at) {
-		at = filepath.Join(rootAbs, at)
+		at = filepath.Join(r.rootAbs, at)
 	}
 	// Type-package resolution can realpath a source link before listing it.
-	if _, staged := belowLinkedRoot(rootAbs, at); !staged {
-		if rel, ok := belowLinkedRoot(execroot, at); ok {
+	if _, staged := r.belowLinkedRoot(r.rootAbs, at); !staged {
+		if rel, ok := r.belowLinkedRoot(r.execroot, at); ok {
 			listed = rel
 		}
 	}
 	if root := npmPackageRoot(filepath.ToSlash(at)); root != "" {
-		parent, err := filepath.EvalSymlinks(filepath.Dir(root))
+		parent, err := r.evalSymlinks(filepath.Dir(root))
 		if err != nil {
 			return listed
 		}
@@ -394,7 +458,7 @@ func throughRoot(rootAbs, execroot, canonicalExecroot, listed string) string {
 		}
 		member := strings.TrimPrefix(filepath.ToSlash(at)[len(root):], "/")
 		target := filepath.Join(packagePath, filepath.FromSlash(member))
-		if rel, ok := below(canonicalExecroot, target); ok {
+		if rel, ok := below(r.canonicalExecroot, target); ok {
 			return rel
 		}
 		return filepath.ToSlash(target)
@@ -406,18 +470,18 @@ func throughRoot(rootAbs, execroot, canonicalExecroot, listed string) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(at), target)
 	}
-	if rel, ok := belowLinkedRoot(execroot, target); ok {
+	if rel, ok := r.belowLinkedRoot(r.execroot, target); ok {
 		return rel
 	}
 	return listed
 }
 
 // Compiler paths can bypass a symlinked checkout while source links retain it.
-func belowLinkedRoot(root, target string) (string, bool) {
+func (r *rootPaths) belowLinkedRoot(root, target string) (string, bool) {
 	if relative, ok := below(root, target); ok {
 		return relative, true
 	}
-	canonical, err := filepath.EvalSymlinks(root)
+	canonical, err := r.evalSymlinks(root)
 	if err != nil {
 		return "", false
 	}
@@ -471,6 +535,28 @@ func compilerPath(file string) string {
 		return binRelative(file)
 	}
 	return file
+}
+
+// removeUndeclared removes a tree laid out beside the outputs only in Bazel's
+// own exec root, where it outlives the action and an enclosing package's overlay
+// walk would enter it. That exec root links each top-level source directory into
+// the workspace; a sandbox or remote executor makes real ones and discards them.
+func removeUndeclared(dir string, sources []string) {
+	for _, source := range sources {
+		top, rest, nested := strings.Cut(source, "/")
+		if top == "external" {
+			repo, member, ok := strings.Cut(rest, "/")
+			top, nested = top+"/"+repo, ok && member != ""
+		}
+		if !nested || top == outputTree || top == ".." {
+			continue
+		}
+		if info, err := os.Lstat(top); err == nil && info.IsDir() {
+			return
+		}
+		break
+	}
+	os.RemoveAll(dir)
 }
 
 // Generated roots need the original package scope beside their logical compiler path.

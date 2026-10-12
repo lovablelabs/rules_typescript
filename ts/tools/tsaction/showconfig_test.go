@@ -90,7 +90,7 @@ const isolatedLeaf = `{
 
 const binDir = "bazel-out/k8-fastbuild/bin"
 
-func writeFile(t *testing.T, path, body string) {
+func writeFile(t testing.TB, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)

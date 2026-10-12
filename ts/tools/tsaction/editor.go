@@ -83,12 +83,13 @@ func editorRun(root string, command []string, action actionConfig, output string
 	}
 	a.compilerOptions = compiled.CompilerOptions
 	rootAbs := a.root
+	paths := newRootPaths(rootAbs, cwd, canonicalCwd)
 	workspacePath := func(file string) string {
 		if !filepath.IsAbs(file) {
 			file = filepath.Join(rootAbs, file)
 		}
 		file = filepath.Clean(file)
-		if rel, ok := belowLinkedRoot(rootAbs, file); ok {
+		if rel, ok := paths.belowLinkedRoot(rootAbs, file); ok {
 			return rel
 		}
 		return file
@@ -102,7 +103,7 @@ func editorRun(root string, command []string, action actionConfig, output string
 		if source := sources[file]; source != "" {
 			return source
 		}
-		return throughRoot(rootAbs, cwd, canonicalCwd, file)
+		return paths.through(file)
 	}
 	for _, listed := range listing.Files {
 		file := path.Clean(listedPath(listed))
