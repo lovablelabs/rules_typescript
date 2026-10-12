@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 )
@@ -59,6 +60,11 @@ type npmDemand struct {
 	store   string
 }
 
+type npmStore struct {
+	canonical string
+	info      os.FileInfo
+}
+
 type npmLookup struct {
 	anchor   string
 	bindings map[string]string
@@ -86,8 +92,40 @@ func PlaceNpmContexts(root string, contexts []NpmContext, modules []string) erro
 		root = resolved
 	}
 	byDirectory := map[string]map[string]npmDemand{}
+	storeCache := map[string]npmStore{}
+	resolveStore := func(store, module string) (npmStore, error) {
+		if resolved, ok := storeCache[store]; ok {
+			return resolved, nil
+		}
+		path, err := nativeContextPath(root, store)
+		if err != nil {
+			return npmStore{}, err
+		}
+		canonical, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return npmStore{}, fmt.Errorf("ts_launcher: npm store %q for %q: %w", store, module, err)
+		}
+		info, err := os.Stat(canonical)
+		if err != nil || !info.IsDir() {
+			return npmStore{}, fmt.Errorf("ts_launcher: npm store %q for %q is not a directory", store, module)
+		}
+		resolved := npmStore{canonical: canonical, info: info}
+		storeCache[store] = resolved
+		return resolved, nil
+	}
+	moduleSet := make(map[string]struct{}, len(modules))
+	for _, module := range modules {
+		moduleSet[module] = struct{}{}
+	}
+	// ResolveNpmBindings hands every context of one npm_binding_sets entry the
+	// same map, so a repeated (directory, map) pair would rewrite the same demands.
+	type lookupKey struct {
+		directory string
+		bindings  uintptr
+	}
+	seen := map[lookupKey]struct{}{}
 	for _, context := range contexts {
-		if root == "" || !slices.Contains(modules, context.Module) {
+		if _, admitted := moduleSet[context.Module]; root == "" || !admitted {
 			return fmt.Errorf("ts_launcher: npm context module %q has no admitted runtime module", context.Module)
 		}
 		lookups := []npmLookup{{anchor: context.Module, bindings: context.Bindings}}
@@ -98,35 +136,36 @@ func PlaceNpmContexts(root string, contexts []NpmContext, modules []string) erro
 			if _, err := nativeContextPath(root, lookup.anchor); err != nil {
 				return err
 			}
+			if len(lookup.bindings) == 0 {
+				continue
+			}
+			directory := filepath.ToSlash(filepath.Dir(lookup.anchor))
+			key := lookupKey{directory: directory, bindings: reflect.ValueOf(lookup.bindings).Pointer()}
+			if _, done := seen[key]; done {
+				continue
+			}
+			seen[key] = struct{}{}
+			placed := byDirectory[directory]
+			if placed == nil {
+				placed = map[string]npmDemand{}
+				byDirectory[directory] = placed
+			}
 			for name, store := range lookup.bindings {
-				directory := filepath.ToSlash(filepath.Dir(lookup.anchor))
 				destination := directory + "/node_modules/" + name
 				if _, err := nativeContextPath(root, destination); err != nil {
 					return err
 				}
-				path, err := nativeContextPath(root, store)
+				resolved, err := resolveStore(store, context.Module)
 				if err != nil {
 					return err
 				}
-				canonical, err := filepath.EvalSymlinks(path)
-				if err != nil {
-					return fmt.Errorf("ts_launcher: npm store %q for %q: %w", store, context.Module, err)
-				}
-				info, err := os.Stat(canonical)
-				if err != nil || !info.IsDir() {
-					return fmt.Errorf("ts_launcher: npm store %q for %q is not a directory", store, context.Module)
-				}
-				demand := npmDemand{context: context, name: name, binding: store, store: canonical}
-				if byDirectory[directory] == nil {
-					byDirectory[directory] = map[string]npmDemand{}
-				}
-				if previous, exists := byDirectory[directory][name]; exists {
-					previousInfo, err := os.Stat(previous.store)
-					if err != nil || !os.SameFile(previousInfo, info) {
+				demand := npmDemand{context: context, name: name, binding: store, store: resolved.canonical}
+				if previous, exists := placed[name]; exists && previous.binding != store {
+					if previous.store != resolved.canonical && !os.SameFile(storeCache[previous.binding].info, resolved.info) {
 						return npmContextConflict(demand, destination, fmt.Sprintf("source %q selecting store %q", previous.context.Source, previous.binding))
 					}
 				}
-				byDirectory[directory][name] = demand
+				placed[name] = demand
 			}
 		}
 	}
