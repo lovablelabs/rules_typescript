@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 	"github.com/mikn/rules_typescript/ts/tools/tsconfig"
 )
 
@@ -61,8 +63,30 @@ func newTsgoExecroot(t *testing.T, script string) (root, argv string) {
 		t.Fatal(err)
 	}
 	_, argv = fakeTool(t, filepath.Join(root, "external/tsgo"), "tsc", script)
+	bazelExecroot(t, root)
 	t.Chdir(root)
 	return root, argv
+}
+
+// bazelExecroot links dir's top-level source directories in from a workspace,
+// as in Bazel's own exec root, where undeclared files outlive the action.
+func bazelExecroot(t testing.TB, dir string) {
+	t.Helper()
+	workspace := t.TempDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); entry.IsDir() && name != outputTree && name != "external" {
+			if err := os.Rename(filepath.Join(dir, name), filepath.Join(workspace, name)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(workspace, name), filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }
 
 func linkedDir(t *testing.T) string {
@@ -142,6 +166,32 @@ func TestTsgoStep_RunsFromAProgramRootOfTheSourcesNamed(t *testing.T) {
 	}
 }
 
+// A sandbox or remote executor discards the root with its exec root; a stale
+// root from an earlier run in the same place is still replaced.
+func TestTsgoStep_RootOutsideBazelsExecrootIsLeftAndAStaleOneReplaced(t *testing.T) {
+	root, argv := newTsgoExecroot(t, "test -e stale || echo stale-absent >> \"$0.argv\"\n")
+	workspace, err := os.Readlink(filepath.Join(root, "pkg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(workspace, filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(programRoot, "stale"), "")
+	if err := runTsgo(tsgoArgs("--", "external/tsgo/tsc")); err != nil {
+		t.Fatalf("runTsgo: %v", err)
+	}
+	if got := recordedArgs(t, argv); !slices.Contains(got, "stale-absent") {
+		t.Errorf("tsgo saw the earlier run's root: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(programRoot, "pkg/a.ts")); err != nil {
+		t.Errorf("the root was removed although its exec root is discarded: %v", err)
+	}
+}
+
 func TestTsgoStep_ASourceWithoutALogicalCoordinateCannotWriteThroughTheOutputTree(t *testing.T) {
 	_, argv := newTsgoExecroot(t, "echo ran\n")
 
@@ -172,7 +222,7 @@ func TestProgramRoot_GeneratedSourcesKeepDeclaredIdentityAndRejectDuplicateCoord
 	}
 	for _, file := range sources {
 		logical := strings.TrimPrefix(file, binDir+"/")
-		if actual := throughRoot(filepath.Join(root, programRoot), root, root, logical); actual != file {
+		if actual := newRootPaths(filepath.Join(root, programRoot), root, root).through(logical); actual != file {
 			t.Fatalf("%s resolves to %s, want declared File %s", logical, actual, file)
 		}
 		body, err := os.ReadFile(filepath.Join(programRoot, logical))
@@ -349,7 +399,7 @@ func TestProgramRoot_OverlayOriginDoesNotDependOnOutputFilename(t *testing.T) {
 				if err != nil || actual != filepath.Join(root, selected) {
 					t.Fatalf("overlay origin selected %q, %v; want exact output %q", actual, err, selected)
 				}
-				if resolved := throughRoot(filepath.Join(root, programRoot), root, root, logical); resolved != selected {
+				if resolved := newRootPaths(filepath.Join(root, programRoot), root, root).through(logical); resolved != selected {
 					t.Fatalf("overlay ownership = %q, want exact artifact %q", resolved, selected)
 				}
 			})
@@ -1139,4 +1189,94 @@ func overlayArg(t *testing.T, physical, logical string) string {
 		t.Fatal(err)
 	}
 	return "-overlay=" + string(data)
+}
+
+// sandboxedProgram lays out a locally sandboxed exec root: each store file is
+// a link into the real exec root, whose path tsgo lists for an npm edge.
+type sandboxedProgram struct {
+	own                       *ownership
+	edges                     []explainfiles.Edge
+	want                      []string
+	rootAbs, execroot, stores string
+}
+
+func newSandboxedProgram(tb testing.TB, packages, targets, ownFiles, npmEdges, ownEdges int) *sandboxedProgram {
+	tb.Helper()
+	tmp, err := filepath.EvalSymlinks(tb.TempDir())
+	if err != nil {
+		tb.Fatal(err)
+	}
+	real, execroot := filepath.Join(tmp, "real"), filepath.Join(tmp, "sandbox")
+	p := &sandboxedProgram{rootAbs: filepath.Join(execroot, binDir, "app/app.program"), execroot: execroot}
+	link := func(target, at string) {
+		if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+			tb.Fatal(err)
+		}
+		if err := os.Symlink(target, at); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	var manifest strings.Builder
+	manifest.WriteString("label\t//app:app\n")
+	for i := range packages {
+		name := fmt.Sprintf("pkg%d", i)
+		tree := binDir + "/node_modules/.pnpm/" + name + "@1.0.0/node_modules/" + name
+		for _, file := range []string{"index.d.ts", "sub.d.ts", "package.json"} {
+			writeFile(tb, filepath.Join(real, tree, file), "export {};\n")
+			link(filepath.Join(real, tree, file), filepath.Join(execroot, tree, file))
+		}
+		fmt.Fprintf(&manifest, "npm-direct\t%s\t%s\n", name, tree)
+	}
+	target := func(i int) (listed, want string) {
+		file := []string{"index.d.ts", "sub.d.ts"}[i/packages%2]
+		tree := fmt.Sprintf("%s/node_modules/.pnpm/pkg%d@1.0.0/node_modules/pkg%d", binDir, i%packages, i%packages)
+		return filepath.Join(real, tree, file), tree + "/" + file
+	}
+	source := func(i int) string { return fmt.Sprintf("app/f%d.ts", i) }
+	for i := range ownFiles {
+		writeFile(tb, filepath.Join(execroot, source(i)), "export {};\n")
+		link(filepath.Join(execroot, source(i)), filepath.Join(p.rootAbs, source(i)))
+		fmt.Fprintf(&manifest, "own\t%s\n", source(i))
+	}
+	for i := range npmEdges {
+		listed, want := target(i % targets)
+		p.edges = append(p.edges, explainfiles.Edge{From: source(i % ownFiles), To: listed})
+		p.want = append(p.want, want)
+	}
+	for i := range ownEdges {
+		p.edges = append(p.edges, explainfiles.Edge{From: source(i % ownFiles), To: source((i + 1) % ownFiles)})
+		p.want = append(p.want, source((i+1)%ownFiles))
+	}
+	if p.own, err = parseOwnership(manifest.String()); err != nil {
+		tb.Fatal(err)
+	}
+	return p
+}
+
+func (p *sandboxedProgram) resolve(tb testing.TB) []explainfiles.Edge {
+	tb.Helper()
+	listing := &explainfiles.Listing{Edges: slices.Clone(p.edges)}
+	if err := resolveEdges(listing, p.own, newRootPaths(p.rootAbs, p.execroot, p.execroot)); err != nil {
+		tb.Fatal(err)
+	}
+	return listing.Edges
+}
+
+func TestResolveEdges_RepeatedSandboxedStoreFilesEachKeepTheirOwnInput(t *testing.T) {
+	p := newSandboxedProgram(t, 3, 6, 4, 18, 4)
+	for i, edge := range p.resolve(t) {
+		if edge.To != p.want[i] {
+			t.Errorf("edge %d %s -> %s resolved to %s, want %s", i, edge.From, p.edges[i].To, edge.To, p.want[i])
+		}
+	}
+}
+
+// The edge counts of a large app's program listing: 27,013 own files, 30,237
+// edges onto 274 npm files of 412 declared stores, 110,080 between own files.
+func BenchmarkResolveEdgesLocalSandbox(b *testing.B) {
+	p := newSandboxedProgram(b, 412, 274, 27013, 30237, 110080)
+	b.ResetTimer()
+	for range b.N {
+		p.resolve(b)
+	}
 }

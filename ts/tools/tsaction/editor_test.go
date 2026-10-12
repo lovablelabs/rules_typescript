@@ -474,7 +474,7 @@ func TestEditorPackageGeneratedTargetsPreserveOutputAuthority(t *testing.T) {
 				selected := ""
 				for _, edge := range listing.Edges {
 					if edge.Kind.ModuleSpecifier() && edge.Specifier == test.specifier {
-						selected = throughRoot(filepath.Join(cwd, root), cwd, canonicalDir(cwd), edge.To)
+						selected = newRootPaths(filepath.Join(cwd, root), cwd, canonicalDir(cwd)).through(edge.To)
 					}
 				}
 				want := canonical
@@ -637,7 +637,7 @@ func TestEditorPackageGeneratedTargetsPreserveOutputAuthority(t *testing.T) {
 			checkPackageChild := func(listing *explainfiles.Listing) {
 				t.Helper()
 				for _, edge := range listing.Edges {
-					if edge.Specifier == specifier && throughRoot(filepath.Join(cwd, root), cwd, canonicalDir(cwd), edge.To) == selected {
+					if edge.Specifier == specifier && newRootPaths(filepath.Join(cwd, root), cwd, canonicalDir(cwd)).through(edge.To) == selected {
 						return
 					}
 				}
@@ -760,7 +760,7 @@ func TestEditorConfigInputsCannotBecomeAuthoredPackageMembers(t *testing.T) {
 			t.Chdir(cwd)
 			generated, authored := false, false
 			for _, file := range ordinary.Files {
-				selected := throughRoot(filepath.Join(cwd, root), cwd, canonicalDir(cwd), file)
+				selected := newRootPaths(filepath.Join(cwd, root), cwd, canonicalDir(cwd)).through(file)
 				generated = generated || selected == binDir+"/"+value
 				authored = authored || selected == test.extra
 				if test.extra != "" && !test.loaded && selected == test.extra {
@@ -2478,8 +2478,8 @@ func TestEditorRejectsRelativeEdgesNeedingTheOutputOverlay(t *testing.T) {
 				t.Chdir(cwd)
 				if !slices.ContainsFunc(listing.Edges, func(edge explainfiles.Edge) bool {
 					return edge.Kind.ModuleSpecifier() && edge.Specifier == test.specifier &&
-						throughRoot(filepath.Join(cwd, root), cwd, canonicalDir(cwd), edge.From) == test.from &&
-						throughRoot(filepath.Join(cwd, root), cwd, canonicalDir(cwd), edge.To) == test.to
+						newRootPaths(filepath.Join(cwd, root), cwd, canonicalDir(cwd)).through(edge.From) == test.from &&
+						newRootPaths(filepath.Join(cwd, root), cwd, canonicalDir(cwd)).through(edge.To) == test.to
 				}) {
 					t.Fatalf("ordinary compiler did not select the crossing: %v", listing.Edges)
 				}

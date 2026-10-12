@@ -60,6 +60,7 @@ EOF
 	e := &emitRoot{}
 	e.oxc, e.oxcArgv = fakeTool(t, root, "oxc-bazel", "")
 	e.tsgo, e.tsgoArgv = fakeTool(t, root, "tsgo", tsgoScript)
+	bazelExecroot(t, root)
 	t.Chdir(root)
 	return e
 }

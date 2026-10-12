@@ -191,7 +191,7 @@ func (e *emitConfig) tsgoEmit(groups map[string][]string, o oxcOptions) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(e.scratch)
+	defer removeUndeclared(e.scratch, e.sources)
 
 	tsgo, err := filepath.Abs(e.tsgo)
 	if err != nil {
