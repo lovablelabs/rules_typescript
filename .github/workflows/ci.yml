@@ -8,9 +8,45 @@ on:
   # `pull_request` fires no run at all for one -- not a skipped check, nothing.
   pull_request:
 
+# A push to a pull request supersedes the checks still running on its previous
+# head. Every other run gets a group of its own, so nothing cancels or queues
+# behind a run on main.
+concurrency:
+  group: >-
+    ci-${{ github.event_name == 'pull_request' &&
+    format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The Bazel jobs below all set up their caches the same way:
+#
+# - `cache-version` is a namespace per job (and per matrix leg where the legs
+#   build different things). setup-bazel puts it in front of every key and every
+#   restore-key, so a job restores only the disk and bazelisk caches it built: the e2e leg no
+#   longer downloads the unit-test job's multi-GB disk cache, and one job missing
+#   its cache does not take another's away.
+# - The disk cache key hashes every BUILD file, and the step that writes the
+#   commit into .git/BUILD.bazel makes it unique per commit; the restore-key
+#   prefix finds the newest. A pull request saves its own entries, so its second
+#   push starts where its first one stopped rather than where main is. A
+#   superseded entry is never restored again, so it is the least recently used
+#   and the first the cache evicts.
+# - The repository cache is the exception: one per OS and architecture, keyed
+#   on the module and lock files, restored by every job and workspace and saved
+#   only by `repository-cache`, so the jobs never race to save it and a job's
+#   own cold key never sends every tarball back to the network. Under Bazel 9
+#   it also holds the repo contents cache, so a hit skips the repository rules,
+#   not just the downloads: LLVM, Rust, Go, V8 and the npm tarballs.
+# - Saving needs the repository's Actions cache to hold all of them at once;
+#   docs/CI_CD.md § Caches lists the sizes.
+#
+# Heavy jobs run on `vars.CI_LARGE_RUNNER` (and the macOS unit leg on
+# `vars.CI_LARGE_MACOS_RUNNER`) when those repository variables name a
+# larger-runner label this repository may use, and on the standard runners
+# otherwise.
+
 jobs:
   test:
-    name: Unit Tests & Type Checking
+    name: Unit Tests & Type Checking (${{ matrix.os }})
     strategy:
       # As in `examples` and `integration-tests`: each leg is its own runner and
       # neither is evidence about the other, so one going red must not cancel
@@ -18,20 +54,14 @@ jobs:
       # in the ubuntu-only gate below took the macOS leg down with it.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
-            repository-cache: |
-              - "**/MODULE.bazel"
-              - "**/pnpm-lock.yaml"
-              - "**/Cargo.lock"
-              - .bazelversion
-          # Both OS repository caches with both disk caches exceed GitHub's 10 GB.
+            runner: ${{ vars.CI_LARGE_RUNNER || 'ubuntu-latest' }}
           - os: macos-latest
-            repository-cache: false
-    runs-on: ${{ matrix.os }}
-    # A cold Ubuntu build (Rust, protobuf, the C++ toolchain) runs past 60 min, and a cancelled run saves no cache.
-    timeout-minutes: 75
+            runner: ${{ vars.CI_LARGE_MACOS_RUNNER || 'macos-latest' }}
+    runs-on: ${{ matrix.runner }}
+    # A cold build (Rust, protobuf, the C++ toolchain) runs past 60 min on Ubuntu and 75 on macOS, and a cancelled run saves no cache.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 120 || 75 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,12 +75,24 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          repository-cache: ${{ matrix.repository-cache }}
-          # Only the source-test lane saves this OS cache; smaller consumers
-          # must not reserve its immutable key before the native build finishes.
-          disk-cache: shared-ci
-          # PRs restore main's caches; saving per PR evicts them under the 10 GB cap.
-          cache-save: ${{ github.event_name == 'push' }}
+          cache-version: 2-test
+          # The shared repository cache below, and download retries: a cold
+          # fetch of a GitHub archive meets the occasional 500.
+          bazelrc: |
+            common --repository_cache=~/.cache/bazel-repo
+            common --http_connector_attempts=10
+            common --http_connector_retry_max_timeout=60s
+            common --http_timeout_scaling=2
+            common --experimental_repository_downloader_retries=8
+          disk-cache: true
+          cache-save: true
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/bazel-repo
+          key: bazel-repository-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion') }}
+          restore-keys: |
+            bazel-repository-${{ runner.os }}-${{ runner.arch }}-
 
       # `bazel test //...` and a byte-identical Gazelle rerun are both satisfied
       # by a Gazelle run that deletes a test target, so neither notices a
@@ -182,13 +224,24 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          repository-cache: |
-            - "**/MODULE.bazel"
-            - "**/pnpm-lock.yaml"
-            - "**/Cargo.lock"
-            - .bazelversion
-          disk-cache: shared-ci
-          cache-save: false
+          cache-version: 2-e2e
+          # The shared repository cache below, and download retries: a cold
+          # fetch of a GitHub archive meets the occasional 500.
+          bazelrc: |
+            common --repository_cache=~/.cache/bazel-repo
+            common --http_connector_attempts=10
+            common --http_connector_retry_max_timeout=60s
+            common --http_timeout_scaling=2
+            common --experimental_repository_downloader_retries=8
+          disk-cache: true
+          cache-save: true
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/bazel-repo
+          key: bazel-repository-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion') }}
+          restore-keys: |
+            bazel-repository-${{ runner.os }}-${{ runner.arch }}-
 
       - name: e2e/basic's BUILD files are what Gazelle writes
         run: |
@@ -226,23 +279,48 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          repository-cache: |
-            - "**/MODULE.bazel"
-            - "**/pnpm-lock.yaml"
-            - "**/Cargo.lock"
-            - .bazelversion
-          disk-cache: shared-ci
-          cache-save: false
+          cache-version: 2-examples-${{ matrix.example }}
+          # The shared repository cache below, and download retries: a cold
+          # fetch of a GitHub archive meets the occasional 500.
+          bazelrc: |
+            common --repository_cache=~/.cache/bazel-repo
+            common --http_connector_attempts=10
+            common --http_connector_retry_max_timeout=60s
+            common --http_timeout_scaling=2
+            common --experimental_repository_downloader_retries=8
+          disk-cache: true
+          cache-save: true
 
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/bazel-repo
+          key: bazel-repository-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion') }}
+          restore-keys: |
+            bazel-repository-${{ runner.os }}-${{ runner.arch }}-
+
+      # Each invocation writes its build events; their `fetch` events are the
+      # downloads that went to the network, which the last step counts.
       - name: The BUILD files of examples/${{ matrix.example }} are Gazelle's
         run: |
           cd examples/${{ matrix.example }}
           [ ! -f pnpm-lock.yaml ] || \
-            bazel run //:pnpm -- install --frozen-lockfile
-          bazel run //:gazelle -- -mode=diff
+            bazel run --build_event_json_file="$RUNNER_TEMP/bep-pnpm.json" \
+              //:pnpm -- install --frozen-lockfile
+          bazel run --build_event_json_file="$RUNNER_TEMP/bep-gazelle.json" \
+            //:gazelle -- -mode=diff
 
       - name: Build examples/${{ matrix.example }}
-        run: cd examples/${{ matrix.example }} && bazel build //...
+        run: |
+          cd examples/${{ matrix.example }}
+          bazel build --build_event_json_file="$RUNNER_TEMP/bep-build.json" //...
+
+      - name: Repository downloads that hit the network
+        if: ${{ !cancelled() }}
+        run: |
+          cat "$RUNNER_TEMP"/bep-*.json 2>/dev/null \
+            | jq -r 'select(.id.fetch) | .id.fetch.url' | sort -u > "$RUNNER_TEMP/fetched"
+          echo "network fetches: $(wc -l < "$RUNNER_TEMP/fetched")"
+          cat "$RUNNER_TEMP/fetched"
 
   determinism:
     name: Build Determinism Check
@@ -260,12 +338,24 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          cache-save: false
-          repository-cache: |
-            - "**/MODULE.bazel"
-            - "**/pnpm-lock.yaml"
-            - "**/Cargo.lock"
-            - .bazelversion
+          # No disk cache: the check builds from two empty output bases on purpose.
+          cache-version: 2-determinism
+          cache-save: true
+          # The shared repository cache below, and download retries: a cold
+          # fetch of a GitHub archive meets the occasional 500.
+          bazelrc: |
+            common --repository_cache=~/.cache/bazel-repo
+            common --http_connector_attempts=10
+            common --http_connector_retry_max_timeout=60s
+            common --http_timeout_scaling=2
+            common --experimental_repository_downloader_retries=8
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/bazel-repo
+          key: bazel-repository-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion') }}
+          restore-keys: |
+            bazel-repository-${{ runner.os }}-${{ runner.arch }}-
 
       # Two output bases are two full toolchain trees. /mnt is not a separate
       # ephemeral disk on this image -- it is a directory on the root filesystem,
@@ -287,7 +377,7 @@ jobs:
     # which is what kept the lane on the critical path. These legs spread it
     # over two runners.
     name: Integration Tests (${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 150
     strategy:
       # As in `examples`: one leg going red must not cancel the others, or a
@@ -312,13 +402,24 @@ jobs:
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
-          repository-cache: |
-            - "**/MODULE.bazel"
-            - "**/pnpm-lock.yaml"
-            - "**/Cargo.lock"
-            - .bazelversion
-          disk-cache: shared-ci
-          cache-save: false
+          cache-version: 2-integration-${{ matrix.shard }}
+          # The shared repository cache below, and download retries: a cold
+          # fetch of a GitHub archive meets the occasional 500.
+          bazelrc: |
+            common --repository_cache=~/.cache/bazel-repo
+            common --http_connector_attempts=10
+            common --http_connector_retry_max_timeout=60s
+            common --http_timeout_scaling=2
+            common --experimental_repository_downloader_retries=8
+          disk-cache: true
+          cache-save: true
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/bazel-repo
+          key: bazel-repository-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion') }}
+          restore-keys: |
+            bazel-repository-${{ runner.os }}-${{ runner.arch }}-
 
       # Each nested Bazel keeps its own output base and together they need tens
       # of GB. /mnt is no longer a separate ephemeral disk on this image -- it
@@ -429,10 +530,9 @@ jobs:
 
       # A timed-out cold build still produces valid content-addressed outputs;
       # saving them prevents the next run from repeating the same cold timeout.
-      # PRs restore main's: a GB-sized copy per PR would evict it under the 10 GB cap (#252).
       - uses: actions/cache/save@v6
         if: >-
-          ${{ !cancelled() && github.event_name == 'push' &&
+          ${{ !cancelled() &&
               steps.nested-cache.outcome == 'success' &&
               steps.nested-cache.outputs.cache-hit != 'true' }}
         with:
@@ -499,3 +599,70 @@ jobs:
         run: |
           pip install mkdocs-material
           mkdocs build --strict --site-dir "$RUNNER_TEMP/site"
+
+  repository-cache:
+    # The one job that saves the shared repository cache. It loads and analyses
+    # every workspace the other jobs build on its OS, which is every repository
+    # they fetch outside the nested integration workspaces, and saves even when
+    # a fetch failed, so the next run retries only what is still missing.
+    name: Repository cache (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            workspaces: . e2e/basic examples/basic examples/app examples/react-app
+          - os: macos-latest
+            workspaces: . e2e/basic
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-version: 1.x
+          bazelisk-cache: true
+          cache-version: 2-repository-cache
+          bazelrc: |
+            common --repository_cache=~/.cache/bazel-repo
+            common --http_connector_attempts=10
+            common --http_connector_retry_max_timeout=60s
+            common --http_timeout_scaling=2
+            common --experimental_repository_downloader_retries=8
+          cache-save: true
+
+      - uses: actions/cache/restore@v6
+        id: repository-cache
+        with:
+          path: ~/.cache/bazel-repo
+          key: bazel-repository-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion') }}
+          restore-keys: |
+            bazel-repository-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Fetch what analysis of every workspace needs
+        if: steps.repository-cache.outputs.cache-hit != 'true'
+        env:
+          WORKSPACES: ${{ matrix.workspaces }}
+        run: |
+          status=0
+          for ws in $WORKSPACES; do
+            echo "::group::$ws"
+            (
+              cd "$ws"
+              [ ! -f pnpm-lock.yaml ] || [ "$ws" = . ] || \
+                bazel run //:pnpm -- install --frozen-lockfile
+              bazel build --nobuild //...
+            ) || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+      - uses: actions/cache/save@v6
+        if: >-
+          ${{ !cancelled() &&
+              steps.repository-cache.outcome == 'success' &&
+              steps.repository-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: ~/.cache/bazel-repo
+          key: ${{ steps.repository-cache.outputs.cache-primary-key }}

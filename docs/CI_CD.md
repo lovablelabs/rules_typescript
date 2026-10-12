@@ -7,11 +7,10 @@ consumer workspace, which this repository's CI does not run.
 ## GitHub Actions CI
 
 `.github/workflows/ci.yml` runs on every push to `main`/`develop` and on every
-pull request, whichever branch it targets. It has six jobs.
+pull request, whichever branch it targets. It has seven jobs.
 
-The five jobs that run Bazel set it up with `bazel-contrib/setup-bazel@0.18.0`:
-bazelisk and repository caches in all of them, the external cache in all but
-`examples`, and a disk cache where the job wants one.
+The six jobs that run Bazel set it up with `bazel-contrib/setup-bazel@0.18.0`,
+each with caches of its own (see [Caches](#caches)).
 
 ### Workflow Jobs
 
@@ -33,7 +32,8 @@ bazelisk and repository caches in all of them, the external cache in all but
      ubuntu only, `tools/ci/check_coverage_report.sh`: the fixture under
      `bazel coverage`, its report's `SF:` lines against what the filter selects
      (see [below](#coverage-report))
-   - Matrix: `ubuntu-latest` and `macos-latest`
+   - Matrix: `ubuntu-latest` and `macos-latest`, on `vars.CI_LARGE_RUNNER` and
+     `vars.CI_LARGE_MACOS_RUNNER` when those repository variables are set
 
 2. **E2E Tests** (`e2e`)
    - `bazel run //:gazelle -- -mode=diff` in `e2e/basic`, a separate
@@ -46,9 +46,7 @@ bazelisk and repository caches in all of them, the external cache in all but
      `react-app`), each a separate Bazel invocation, `fail-fast: false`. Every
      leg checks `bazel run //:gazelle -- -mode=diff` prints nothing (after an
      install where a root `pnpm-lock.yaml` is), then builds `//...`
-   - All three legs share one disk cache key (`disk-cache: examples`). Most of
-     each example's actions are the same oxc/Rust and toolchain prefix, and
-     three keys would not fit GitHub's 10 GB cache limit
+   - Each leg has its own caches, `cache-version: 2-examples-<name>`
 
 4. **Build Determinism Check** (`determinism`)
    - `tools/ci/check_determinism.sh /mnt/rules_ts_det`: `//tests/smoke:hello`
@@ -64,7 +62,8 @@ bazelisk and repository caches in all of them, the external cache in all but
      visible to `df`
 
 5. **Integration Tests (nested Bazel)** (`integration-tests`)
-   - Two legs, one per shard (`npm`, `core`), each running
+   - Two legs, one per shard (`npm`, `core`), on `vars.CI_LARGE_RUNNER` when it
+     is set, each running
      `bazelisk test --config=ci-integration-<shard> //tests/integration/... --test_env=RULES_TS_IT_SCRATCH=/mnt/rules_ts_it`.
      Each config in `.bazelrc` selects tests by the `shard-<name>` tag
      `nested_bazel_tags(shard = ...)` in `tests/integration/tags.bzl` adds;
@@ -112,23 +111,27 @@ bazelisk and repository caches in all of them, the external cache in all but
      output base is overwritten by that test's next run instead of leaking
      under a name nothing finds again
    - `/mnt` is recreated every run, so an `actions/cache@v6` step restores
-     `/mnt/rules_ts_it/repository_cache`, `/mnt/rules_ts_it/disk_cache`,
-     `/mnt/rules_ts_it/bazelisk` and `/mnt/rules_ts_it/pnpm` under the key
-     `nested-bazel-<runner.os>-<hash of MODULE.bazel, tests/npm/pnpm-lock.yaml,
-     tests/integration/**/pnpm-lock.yaml, oxc_cli/Cargo.lock, .bazelversion>`,
-     with `nested-bazel-<runner.os>-` as the restore-key prefix. One key serves
-     both legs; only the first leg to finish saves it. Cold, the concurrent
-     servers all miss the shared cache at once and fetch the same artifacts, a
-     measured ~4GB (`tests/integration/tags.bzl`). The cache is
-     content-addressed, so a stale restore is a miss, never a wrong answer.
-     `.bazelversion` is in the key because the bazelisk directory holds one
-     Bazel binary named by version, and `actions/cache` never overwrites an
-     existing key
+     `/mnt/rules_ts_it/disk_cache`, `/mnt/rules_ts_it/bazelisk` and
+     `/mnt/rules_ts_it/pnpm` under the key
+     `nested-bazel-<runner.os>-<shard>-<commit>`, with
+     `nested-bazel-<runner.os>-<shard>-` as the restore-key prefix. Each leg
+     saves its own. `/mnt/rules_ts_it/repository_cache` is a link to the
+     shared repository cache (see [Caches](#caches)), which this job restores
+     and does not save. Cold, the concurrent servers all miss the
+     shared cache at once and fetch the same artifacts, a measured ~4GB
+     (`tests/integration/tags.bzl`). The cache is content-addressed, so a stale
+     restore is a miss, never a wrong answer
    - A step then runs `bazelisk --version` once with
      `BAZELISK_HOME=/mnt/rules_ts_it/bazelisk` and `USE_BAZEL_VERSION` read off
      `bazel_binaries.download(version = ...)` in `MODULE.bazel`, so on a cold
      cache one download primes what every nested Bazel would otherwise fetch at
      the same instant
+
+7. **Repository cache** (`repository-cache`)
+   - One leg per OS: `bazel build --nobuild //...` in every workspace the other
+     jobs build on that OS (after the `pnpm install` a workspace's lockfile
+     needs), then saves the shared repository cache. The only job that saves
+     it; it skips the fetch on an exact key hit
 
 6. **Linting & Code Quality** (`lint`)
    - `buildifier --mode=check -r .`, using the released `v8.2.1` binary
@@ -145,6 +148,47 @@ bazelisk and repository caches in all of them, the external cache in all but
    - `mkdocs build --strict` into a temporary site directory. `docs.yml` builds
      the site only on push to `main`, so without this step a broken nav or page
      reference is caught only after merge
+
+### Caches
+
+Every Bazel job passes setup-bazel a `cache-version` of its own (`2-test`,
+`2-e2e`, `2-examples-<name>`, `2-determinism`, `2-integration-<shard>`).
+setup-bazel puts it in front of every key and restore-key, followed by the OS
+and architecture, so a job restores only the disk and bazelisk caches it built,
+and one job missing its cache leaves the others theirs.
+
+- The repository cache is shared instead: one `actions/cache` entry per OS and
+  architecture at `~/.cache/bazel-repo`, keyed
+  `bazel-repository-<os>-<arch>-<hash of every MODULE.bazel, pnpm-lock.yaml,
+  Cargo.lock and .bazelversion>` (the repository has no `MODULE.bazel.lock`),
+  with the prefix as the restore key. Every job restores it, setup-bazel's
+  `bazelrc` points every workspace at it, the nested-Bazel workspaces reach it
+  through `/mnt/rules_ts_it/repository_cache`, and only `repository-cache`
+  saves it, so no two jobs race for the key and none bloats it with a copy.
+  Under Bazel 9 it holds the repo contents cache too, so a hit skips the
+  repository rules as well as the downloads. Downloads that only the nested
+  workspaces make are not in it
+- The disk cache (all but `determinism`) is keyed on the root module files and
+  every BUILD file; the job writes the commit into `.git/BUILD.bazel` first,
+  which makes the key unique per commit, and the restore-key prefix finds the
+  newest
+- Every Bazel invocation in CI, the nested ones through the harness's rc,
+  retries a failed download: `--http_connector_attempts=10` with backoff capped
+  at `--http_connector_retry_max_timeout=60s` (5xx and 429 answers),
+  `--experimental_repository_downloader_retries=8` (dropped connections), and
+  `--http_timeout_scaling=2`
+- The examples legs print the downloads that went to the network: the `fetch`
+  events of each invocation's `--build_event_json_file`
+- Pull requests save as well as pushes, into their own ref, so a pull
+  request's second run starts from its first. A superseded entry is never
+  restored again, so it is the least recently used, the first the cache evicts
+
+Measured entry sizes: the Linux unit-test disk cache ~3.7 GB, the macOS one
+~2.6 GB, the Linux repository cache ~2.9 GB, a nested-Bazel cache ~2.5 GB
+(`core`) or ~0.3 GB (`npm`). One repository cache per OS plus one disk cache
+per job and leg on `main`, and the open pull requests' disk caches, are several
+times the 10 GB an Actions cache holds by
+default: the repository's limit has to be raised for the caches to survive.
 
 ### Test Source Coverage
 
@@ -206,7 +250,8 @@ combined report's `SF:` lines with the files each filter selects
 
 Pushes to `main` and `develop`, and every pull request, with no branch filter:
 a stacked PR targets the branch below it, and a filtered `pull_request` fires no
-run for one. There is no `workflow_dispatch` trigger, so the Actions tab offers
+run for one. A new push to a pull request cancels the run on its previous head;
+no other run cancels or waits on another. There is no `workflow_dispatch` trigger, so the Actions tab offers
 no "Run workflow" button: re-run a failed job, or push.
 
 ## Running CI Locally
