@@ -64,6 +64,10 @@ jobs:
     timeout-minutes: ${{ matrix.os == 'macos-latest' && 120 || 75 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The pull request's merge commit and its first parent, the base it
+          # is tested against: affected_targets.sh diffs the two.
+          fetch-depth: 2
 
       # setup-bazel hashes BUILD files; this marker refreshes action outputs
       # without duplicating dependency archives for every source revision.
@@ -120,8 +124,8 @@ jobs:
       # holds -- but a step defaults to `if: success()`, so one of them going
       # red used to skip everything below on ubuntu while fail-fast cancelled
       # macOS, and `bazel test //...` ran nowhere. That is how #74 to #77 merged
-      # onto a red main with the suite effectively switched off. These two run
-      # whatever the gates did; the job still fails, because a failed step
+      # onto a red main with the suite effectively switched off. The steps below
+      # run whatever the gates did; the job still fails, because a failed step
       # fails it.
       #
       # --config=ci is defined in .bazelrc. It expands --config=fast, which
@@ -129,9 +133,35 @@ jobs:
       # legs of the integration-tests job. Unfiltered they would run three times
       # per push — twice here across the OS matrix, once there.
       # Also the type check: .bazelrc builds +_validation for every command.
-      - name: Run all tests
+      #
+      # A pull request runs the targets its change can reach, which is `//...`
+      # whenever the build graph cannot say (affected_targets.sh lists when);
+      # a push runs `//...`. A failed selection is `//...` too.
+      - name: Select the targets this change can reach
+        id: targets
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: bazel test --config=ci //...
+        run: |
+          targets="$RUNNER_TEMP/targets"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            tools/ci/affected_targets.sh HEAD^1 "$targets" \
+              || echo '//...' > "$targets"
+          else
+            echo '//...' > "$targets"
+          fi
+          echo "file=$targets" >> "$GITHUB_OUTPUT"
+
+      - name: Run all tests
+        if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
+        run: |
+          if [ ! -s "${{ steps.targets.outputs.file }}" ]; then
+            echo "No target in //... can see this change."
+            exit 0
+          fi
+          status=0
+          bazel test --config=ci --skip_incompatible_explicit_targets \
+            --target_pattern_file="${{ steps.targets.outputs.file }}" || status=$?
+          # 4: everything built, and no test is among the selected targets.
+          [ "$status" -eq 0 ] || [ "$status" -eq 4 ]
 
       # The suite never runs `bazel coverage`, and a coverage run whose report
       # is empty passes; the fixture runs under it here and its report is read.

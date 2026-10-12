@@ -27,11 +27,12 @@ each with caches of its own (see [Caches](#caches)).
      provider, directive, export or path (see [below](#retired-names)). The
      three gates run before the suite and none skips it: the two `bazel` steps
      run whatever the gates did, and the job still fails on a failed gate
-   - `bazel test --config=ci //...`, then
-     `bazel build --config=ci //... --output_groups=+_validation`, then, on
-     ubuntu only, `tools/ci/check_coverage_report.sh`: the fixture under
-     `bazel coverage`, its report's `SF:` lines against what the filter selects
-     (see [below](#coverage-report))
+   - `bazel test --config=ci` over the targets `tools/ci/affected_targets.sh`
+     selects (see [below](#affected-targets)) on a pull request, over `//...`
+     on a push; `.bazelrc` builds `+_validation`, the type check, with every
+     command. Then, on ubuntu only, `tools/ci/check_coverage_report.sh`: the
+     fixture under `bazel coverage`, its report's `SF:` lines against what the
+     filter selects (see [below](#coverage-report))
    - Matrix: `ubuntu-latest` and `macos-latest`, on `vars.CI_LARGE_RUNNER` and
      `vars.CI_LARGE_MACOS_RUNNER` when those repository variables are set
 
@@ -189,6 +190,21 @@ Measured entry sizes: the Linux unit-test disk cache ~3.7 GB, the macOS one
 per job and leg on `main`, and the open pull requests' disk caches, are several
 times the 10 GB an Actions cache holds by
 default: the repository's limit has to be raised for the caches to survive.
+
+### Affected Targets
+
+On a pull request the `test` job runs `tools/ci/affected_targets.sh HEAD^1`,
+the merge commit against its first parent, the base. It writes
+`rdeps(//..., <changed files>)` without `manual` targets, or `//...` when the
+graph cannot answer: a deleted file; a BUILD, `.bzl`, `MODULE.bazel`,
+`.bazelrc` or `.bazelversion` file; a lockfile, manifest or patch, or a file
+`MODULE.bazel` names, since repository rules read those; anything under
+`.github/`, `tools/`, `platforms/` or `ts/toolchain/`; a file in the closure of
+a toolchain this workspace registers, since toolchain edges are resolved at
+analysis and the query graph lacks them; and a file no target owns, unless it is
+documentation. A change only to documentation, `e2e/` or `examples/` runs no
+target in the `test` job; the gates and the coverage check still run, and the
+other jobs run in full on every event. A failed selection runs `//...`.
 
 ### Test Source Coverage
 
