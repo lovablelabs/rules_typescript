@@ -336,6 +336,19 @@ a wrong dep is a wrong resolution or a wrong label for the right file:
 4. `# keep` above a rule, or on a `deps` entry, holds what you wrote
    ([`# keep`](../gazelle/directives.md#keep)).
 
+## Gazelle: .tsx file dropped for a same-named .ts
+
+```
+typescript: lib/a.test.tsx: in no program: lib/tsconfig.json lists lib/a.test.ts, the same module path, and the two would emit the same a.test.js
+```
+
+TypeScript expands `include` into one file per path without its extension and
+keeps `.ts` over `.tsx`, so `a.test.tsx` beside `a.test.ts` is in no program and
+in no target, and the two would compile to the same `a.test.js`. Gazelle fails
+the run rather than leave the `.tsx` out. Rename one file of the pair
+(`a.view.test.tsx`), or, when the `.tsx` is meant to stay out of every program,
+exclude it with `# gazelle:exclude a.test.tsx` in its directory's BUILD file.
+
 ## ts_dev_server: has no node_modules attr
 
 ```

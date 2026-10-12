@@ -117,7 +117,9 @@ A file belongs to the nearest package at or above its directory when that
 package's program lists it. A file that package does not list belongs to no
 package: every run from the repository root names each such file with the
 programs that reached it, and so names a listed file under a directory the walk
-did not enter (`# gazelle:exclude`, `.bazelignore`). A file
+did not enter (`# gazelle:exclude`, `.bazelignore`). A `.tsx` the `include`
+expansion drops for a same-named `.ts` fails the run
+([troubleshooting](../guides/troubleshooting.md#gazelle-tsx-file-dropped-for-a-same-named-ts)). A file
 two programs list, a parent's and a nested package's, is the nested package's
 alone, and the parent's edge to it is a dep.
 

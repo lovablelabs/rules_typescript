@@ -305,6 +305,42 @@ func (s *programStore) reportUnlisted() {
 		total, plural(total, "s"), dirs, plural(dirs, "ies", "y"))
 }
 
+// Fails the run on a visited .tsx no program lists beside a same-named .ts a
+// program roots: tsgo's include expansion keeps one file per extensionless path,
+// .ts over .tsx, so the .tsx would silently drop out of every target.
+func (s *programStore) reportStemCollisions() {
+	if s.skipped {
+		return
+	}
+	listed, rootedBy := map[string]bool{}, map[string]string{}
+	for _, dir := range slices.Sorted(maps.Keys(s.programs)) {
+		for _, f := range s.programs[dir].Files {
+			listed[f] = true
+		}
+		for _, f := range s.programs[dir].Roots {
+			if rootedBy[f] == "" {
+				rootedBy[f] = s.configPath(dir)
+			}
+		}
+	}
+	n := 0
+	for _, dir := range slices.Sorted(maps.Keys(s.visited)) {
+		for _, f := range slices.Sorted(slices.Values(s.visited[dir])) {
+			stem, ok := strings.CutSuffix(f, ".tsx")
+			if !ok || listed[f] || rootedBy[stem+".ts"] == "" {
+				continue
+			}
+			n++
+			log.Printf("typescript: %s: in no program: %s lists %s.ts, the same module path, "+
+				"and the two would emit the same %s.js", f, rootedBy[stem+".ts"], stem, path.Base(stem))
+		}
+	}
+	if n > 0 {
+		log.Fatalf("typescript: %d .tsx file%s dropped for a same-named .ts; rename one file of each pair, "+
+			"or exclude the .tsx with # gazelle:exclude", n, plural(n, "s"))
+	}
+}
+
 func plural(n int, many string, one ...string) string {
 	if n == 1 {
 		return strings.Join(one, "")

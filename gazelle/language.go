@@ -387,6 +387,7 @@ func (l *tsLang) DoneGeneratingRules() {
 		l.programs.reportCensus()
 		l.programs.reportUnlisted()
 		l.programs.reportUnowned()
+		l.programs.reportStemCollisions()
 	}
 }
 
