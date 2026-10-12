@@ -1018,7 +1018,9 @@ func packageScopeSources(args language.GenerateArgs, tc *tsConfig, res language.
 					continue
 				}
 				files[file] = true
-				if !firstParty(file) || !programCandidate(file) || s.generatedProgramFile(args.Config, s.index, file, true) || dirs[parentDir(file)] {
+				// owner(scope) is an ancestor of the file's directory, so only files under args.Rel can name it.
+				if dirs[parentDir(file)] || !within(parentDir(file), args.Rel) || !firstParty(file) || !programCandidate(file) ||
+					s.generatedProgramFile(args.Config, s.index, file, true) {
 					continue
 				}
 				dirs[parentDir(file)] = true

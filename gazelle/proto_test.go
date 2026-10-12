@@ -1333,3 +1333,25 @@ snapshots:
 		})
 	}
 }
+
+func TestWithinMatchesOnlyWholePathSegments(t *testing.T) {
+	for _, tc := range []struct {
+		dir, root string
+		want      bool
+	}{
+		{"web", "web", true},
+		{"web/src", "web", true},
+		{"web2", "web", false},
+		{"web2/src", "web", false},
+		{"we", "web", false},
+		{"", "", true},
+		{"web", "", true},
+		{"", "web", false},
+		{"web/src/a", "web/src", true},
+		{"web/srcs", "web/src", false},
+	} {
+		if got := within(tc.dir, tc.root); got != tc.want {
+			t.Errorf("within(%q, %q) = %v, want %v", tc.dir, tc.root, got, tc.want)
+		}
+	}
+}

@@ -1785,6 +1785,9 @@ func ruleHolding(c *config.Config, ix *resolve.RuleIndex, spec resolve.ImportSpe
 				continue
 			}
 			found := resolve.FindResult{Label: sourceLabelIdentity(lbl, language.GenerateArgs{Config: c})}
+			if required == scopeRole && found.Label.Pkg != scopePackage {
+				continue
+			}
 			if eligible(found) {
 				owners = append(owners, found)
 			}
