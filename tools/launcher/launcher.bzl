@@ -7,6 +7,7 @@ native application inputs occupy the build-owned view beside the config.
 """
 
 load("//ts/private:providers.bzl", "TsInfo", "canonical_runtime_file", "runtime_links")
+load("//ts/private:runtime_tools.bzl", "RUNTIME_TOOLS_TOOLCHAIN_TYPE")
 load(
     "//ts/private:toolchain.bzl",
     "LAUNCHER_TOOLCHAIN_TYPE",
@@ -17,6 +18,7 @@ load(
 
 LAUNCHER_TOOLCHAINS = [
     config_common.toolchain_type(LAUNCHER_TOOLCHAIN_TYPE, mandatory = False),
+    config_common.toolchain_type(RUNTIME_TOOLS_TOOLCHAIN_TYPE, mandatory = False),
 ]
 
 NativeExecutableInfo = provider(fields = ["launcher", "default_files"])
@@ -304,7 +306,7 @@ def validate_runfiles_modules(ctx, visible, demanded, consumer):
                 expected.owner,
             ))
 
-def declare_launcher(ctx, config, basename = None, runfiles = None, canonical_links = [], runtime_file = None):
+def declare_launcher(ctx, config, basename = None, runfiles = None, canonical_links = [], runtime_file = None, runtime_tools = None):
     """Writes a launcher config and the launcher symlink that reads it.
 
     The rule declares LAUNCHER_TOOLCHAINS and `fragments = ["platform"]`; a
@@ -317,11 +319,13 @@ def declare_launcher(ctx, config, basename = None, runfiles = None, canonical_li
         runfiles: admitted application inputs for a native runtime view.
         canonical_links: exact dependency alias and selected module File pairs.
         runtime_file: configured executable admitted to native runfiles lookup.
+        runtime_tools: program_runtime_tools()'s result, or None.
 
     Returns:
         A struct with the `executable` File, its `config` File, the `files`
-        that must reach runfiles, and the `root_symlinks` dict that stages the
-        config where the launcher can find it however it was started.
+        that must reach runfiles, the `root_symlinks` dict that stages the
+        config where the launcher can find it however it was started, and the
+        `tool_runfiles` the program's runfiles merge.
     """
     toolchain = get_launcher_toolchain(ctx)
     if toolchain == None:
@@ -337,6 +341,16 @@ def declare_launcher(ctx, config, basename = None, runfiles = None, canonical_li
     if public_name:
         config = dict(config)
         config["label"] = str(ctx.label.same_package_label(public_name))
+    tool_runfiles = ctx.runfiles()
+    if runtime_tools:
+        env = config.get("env") or {}
+        for name in sorted(runtime_tools.tool_env):
+            if name in env:
+                fail(("{}: env sets {}, which the runtime tools toolchain sets to the path of {}. " +
+                      "Did you mean to remove it from env?").format(ctx.label, name, runtime_tools.tool_env[name].executable.owner))
+        config = dict(config)
+        config["tool_env"] = {name: rlocation_path(ctx, tool.executable) for name, tool in runtime_tools.tool_env.items()}
+        tool_runfiles = runtime_tools.runfiles
     base = basename if basename else "{}_launcher".format(ctx.label.name)
     executable = ctx.actions.declare_file(base)
     config_file = ctx.actions.declare_file(base + ".json")
@@ -373,4 +387,5 @@ def declare_launcher(ctx, config, basename = None, runfiles = None, canonical_li
         native_view = base + ".runtime/view" if config["mode"] in ["node", "node_test"] else "",
         files = [executable, config_file, launcher] + native_files,
         root_symlinks = {base + ".json": config_file},
+        tool_runfiles = tool_runfiles,
     )

@@ -1,0 +1,171 @@
+"""The runtime tools toolchain type, over a probe executable.
+
+One toolchain of //ts/toolchain:runtime_tools_type sits behind :tools, a flag
+no build sets, so every other target in this repository resolves none. With
+`packages = ["shared", "vitest"]` it attaches the probe to a program whose npm
+closure holds vitest and to one inside the workspace member `shared`, and to
+no other. Every test here runs under that one value, so the programs share one
+configuration. The runtime_tools_test targets run a program that spawns the
+probe through RT_PROBE_TOOL; the analysis tests pin the config, the runfiles
+and the errors.
+"""
+
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@io_bazel_rules_go//go:def.bzl", "go_binary")
+load("//ts:defs.bzl", "ts_binary", "ts_compile", "ts_dev_server", "ts_test")
+load("//ts/toolchain:defs.bzl", "RUNTIME_TOOLS_TOOLCHAIN_TYPE", "ts_runtime_tools")
+load(
+    ":runtime_tools_tests.bzl",
+    "env_collision_test",
+    "gets_tools_test",
+    "invalid_name_test",
+    "runtime_tools_test",
+    "skips_tools_test",
+)
+
+string_flag(
+    name = "tools",
+    build_setting_default = "",
+    values = [
+        "",
+        "on",
+    ],
+)
+
+config_setting(
+    name = "on",
+    flag_values = {":tools": "on"},
+)
+
+go_binary(
+    name = "probe",
+    srcs = ["probe/main.go"],
+    pure = "on",
+)
+
+ts_runtime_tools(
+    name = "probe_tools",
+    packages = [
+        "shared",
+        "vitest",
+    ],
+    tool_env = {":probe": "RT_PROBE_TOOL"},
+)
+
+toolchain(
+    name = "probe_toolchain",
+    target_settings = [":on"],
+    toolchain = ":probe_tools",
+    toolchain_type = RUNTIME_TOOLS_TOOLCHAIN_TYPE,
+)
+
+# keep
+ts_test(
+    name = "spawn_test",
+    srcs = ["spawn.test.ts"],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    tags = ["manual"],
+    deps = [
+        "@npm//:types_node",
+        "@npm//:vitest",
+    ],
+)
+
+# The importer chain links vitest.
+ts_binary(
+    name = "spawn_binary",
+    entry_point = "spawn.mjs",
+    node_modules = "//tests/npm:node_modules",
+    tags = ["manual"],
+)
+
+ts_binary(
+    name = "unlinked_binary",
+    entry_point = "spawn.mjs",
+    tags = ["manual"],
+)
+
+runtime_tools_test(
+    name = "ts_test_spawns_tool_test",
+    program = ":spawn_test",
+)
+
+runtime_tools_test(
+    name = "ts_binary_spawns_tool_test",
+    program = ":spawn_binary",
+)
+
+gets_tools_test(
+    name = "ts_test_gets_tools_test",
+    target_under_test = ":spawn_test",
+)
+
+gets_tools_test(
+    name = "ts_binary_gets_tools_test",
+    target_under_test = ":spawn_binary",
+)
+
+gets_tools_test(
+    name = "npm_bin_gets_tools_test",
+    target_under_test = "@npm//:vitest_bin",
+)
+
+ts_compile(
+    name = "dev_entry",
+    srcs = ["dev_entry.ts"],
+)
+
+ts_dev_server(
+    name = "dev_server",
+    entry_point = ":dev_entry",
+    node_modules = "//tests/npm:node_modules",
+    server = "//vite:dev_server",
+    tags = ["manual"],
+)
+
+gets_tools_test(
+    name = "ts_dev_server_gets_tools_test",
+    target_under_test = ":dev_server",
+)
+
+gets_tools_test(
+    name = "self_package_gets_tools_test",
+    target_under_test = "//packages/shared:self_tools_test",
+)
+
+skips_tools_test(
+    name = "unlinked_program_skips_tools_test",
+    target_under_test = ":unlinked_binary",
+)
+
+# keep
+ts_test(
+    name = "collision_test",
+    srcs = ["collision.test.ts"],
+    emit = True,  # keep
+    env = {"RT_PROBE_TOOL": "literal"},
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    tags = ["manual"],
+    deps = [
+        "@npm//:types_node",
+        "@npm//:vitest",
+    ],
+)
+
+env_collision_test(
+    name = "env_collision_test",
+    target_under_test = ":collision_test__native_program",
+)
+
+ts_runtime_tools(
+    name = "invalid_name_tools",
+    tags = ["manual"],
+    tool_env = {":probe": "1BAD"},
+)
+
+invalid_name_test(
+    name = "invalid_name_test",
+    target_under_test = ":invalid_name_tools",
+)

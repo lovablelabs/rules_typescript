@@ -30,6 +30,7 @@ load(
 )
 load("//ts/private:providers.bzl", "NpmPackageInfo")
 load("//ts/private:runtime.bzl", "JS_RUNTIME_TOOLCHAIN_TYPE", "get_js_runtime")
+load("//ts/private:runtime_tools.bzl", "program_runtime_tools")
 load("//ts/private:toolchain.bzl", "TOOLS_TOOLCHAIN_TYPE")
 load(":store.bzl", "NpmStoreInfo")
 
@@ -105,8 +106,23 @@ def _npm_bin_impl(ctx):
         transitive_files = depset(ctx.files.package_files, transitive = optional_dep_pkg_files + ([store.transitive] if store else [])),
     )
 
-    launcher = declare_launcher(ctx, config, basename = "{}_bin_launcher".format(ctx.label.name), runfiles = runfiles, runtime_file = runtime_binary)
-    runfiles = runfiles.merge(ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks))
+    def closure_names():
+        if not store:
+            return []
+        return [store.tree.short_path.rpartition("/node_modules/")[2]] + store.links.keys()
+
+    launcher = declare_launcher(
+        ctx,
+        config,
+        basename = "{}_bin_launcher".format(ctx.label.name),
+        runfiles = runfiles,
+        runtime_file = runtime_binary,
+        runtime_tools = program_runtime_tools(ctx, closure_names),
+    )
+    runfiles = runfiles.merge_all([
+        ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks),
+        launcher.tool_runfiles,
+    ])
 
     return [
         DefaultInfo(

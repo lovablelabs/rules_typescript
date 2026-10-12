@@ -6,9 +6,10 @@ load(
     "declare_launcher",
     "rlocation_path",
 )
-load("//ts/private:node_modules.bzl", "check_dev_server_npm_contexts")
+load("//ts/private:node_modules.bzl", "check_dev_server_npm_contexts", "npm_closure_names")
 load("//ts/private:providers.bzl", "DevServerInfo", "NodeModulesInfo", "TsInfo", "canonical_runtime_file", "runtime_links", "runtime_scope_destinations")
 load("//ts/private:runtime.bzl", "JS_RUNTIME_TOOLCHAIN_TYPE", "get_js_runtime")
+load("//ts/private:runtime_tools.bzl", "program_runtime_tools")
 load("//ts/private:vite_config.bzl", "LOAD_USER_CONFIG_JS", "VITE_CONFIG_EXTENSIONS", "VITE_CONFIG_SRCS_DOC", "stage_vite_config")
 
 def _logical_path(f):
@@ -664,6 +665,13 @@ def _ts_dev_server_impl(ctx):
     if user_config:
         dev_server["user_config"] = user_config_rl
 
+    def closure_names():
+        names = npm_closure_names([entry.npm_packages], node_modules[NodeModulesInfo] if node_modules else None, ctx.label)
+        names.extend(npm_contexts.links.keys())
+        for stores in npm_contexts.members.values():
+            names.extend(stores.keys())
+        return names
+
     launcher = declare_launcher(ctx, {
         "label": str(ctx.label),
         "mode": "devserver",
@@ -671,7 +679,7 @@ def _ts_dev_server_impl(ctx):
         "runtime": rlocation_path(ctx, runtime_binary),
         "runtime_args": runtime_args,
         "dev_server": dev_server,
-    })
+    }, runtime_tools = program_runtime_tools(ctx, closure_names))
 
     explicit_runfiles = [config_file, runtime_binary] + launcher.files
     explicit_runfiles.extend(plugin_files)
@@ -716,7 +724,7 @@ def _ts_dev_server_impl(ctx):
         files = explicit_runfiles,
         root_symlinks = root_symlinks,
         transitive_files = transitive_runfiles,
-    )
+    ).merge(launcher.tool_runfiles)
 
     return [
         DefaultInfo(

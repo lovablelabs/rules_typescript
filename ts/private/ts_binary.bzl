@@ -24,7 +24,7 @@ load(
     "validate_runfiles_modules",
 )
 load("//ts/private:bundle_action.bzl", "create_bundle_action")
-load("//ts/private:node_modules.bzl", "runfiles_dir", "runtime_npm_contexts")
+load("//ts/private:node_modules.bzl", "npm_closure_names", "runfiles_dir", "runtime_npm_contexts")
 load(
     "//ts/private:providers.bzl",
     "BundlerInfo",
@@ -39,6 +39,7 @@ load(
     "ts_info",
 )
 load("//ts/private:runtime.bzl", "JS_RUNTIME_TOOLCHAIN_TYPE", "get_js_runtime")
+load("//ts/private:runtime_tools.bzl", "program_runtime_tools")
 load("//ts/private:toolchain.bzl", "TOOLS_TOOLCHAIN_TYPE")
 
 _JS_ENTRY_EXTENSIONS = [".js", ".mjs", ".cjs"]
@@ -257,14 +258,25 @@ def _ts_binary_impl(ctx):
         owners = owners,
     )
 
+    def closure_names():
+        return npm_closure_names(
+            [runtime.npm_packages for runtime in runtime_infos],
+            node_modules[NodeModulesInfo] if node_modules else None,
+            ctx.label,
+        )
+
     launcher = declare_launcher(
         ctx,
         config,
         runfiles = runfiles,
         runtime_file = runtime_binary,
         canonical_links = [pair for owner in owners for pair in getattr(owner, "canonical_links", ())],
+        runtime_tools = program_runtime_tools(ctx, closure_names),
     )
-    runfiles = runfiles.merge(ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks))
+    runfiles = runfiles.merge_all([
+        ctx.runfiles(files = launcher.files + ([runtime_binary] if runtime_binary else []), root_symlinks = launcher.root_symlinks),
+        launcher.tool_runfiles,
+    ])
 
     if bundle_out:
         output_group = OutputGroupInfo(

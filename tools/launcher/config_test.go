@@ -32,6 +32,7 @@ func TestParseConfigRejectsBadDocuments(t *testing.T) {
 		"devserver both server forms": `{"label":"//a:b","mode":"devserver","dev_server":{"config_file":"c","server_binary":"b","server_in_tree":"vite/bin/vite.js"}}`,
 		"devserver no server form":    `{"label":"//a:b","mode":"devserver","dev_server":{"config_file":"c"}}`,
 		"unknown field":               `{"label":"//a:b","mode":"node","node":{"entry":"a"},"shell":"bash"}`,
+		"tool_env shadowing env":      `{"label":"//a:b","mode":"node","node":{"entry":"a"},"env":{"TOOL":"x"},"tool_env":{"TOOL":"_main/tool"}}`,
 	}
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {

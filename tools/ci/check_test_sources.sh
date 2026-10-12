@@ -49,6 +49,13 @@ tests/workers_nested/test/data_shadow.test.ts
 # `bazel run //tests/vitest/reads_report:reads_report_test -- --reads` names;
 # reads_declared_test makes it with data set.
 tests/vitest/reads_report/reads_report.test.ts
+# Runs under ts_test_spawns_tool_test, which transitions it onto the test-only
+# runtime tools toolchain; untransitioned it has no tool to spawn.
+tests/runtime_tools/spawn.test.ts
+# Analysis-only fixtures: env_collision_test asserts the first fails analysis,
+# self_package_gets_tools_test inspects the second's launcher config.
+tests/runtime_tools/collision.test.ts
+packages/shared/self_tools.test.ts
 ALLOWLIST
 )
 

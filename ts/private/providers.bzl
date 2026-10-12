@@ -329,6 +329,9 @@ on the chain carries it as `NodeModulesInfo.hoist`.""",
                    "the declared symlink alone, with no dependency on the " +
                    "member's tree; a consumer's closure holds the tree " +
                    "through the member's link target.",
+        "member_names": "dict of string -> string: per workspace member " +
+                        "of the lockfile, hoisted or not, its directory " +
+                        "from the workspace root -> its package name.",
     },
 )
 

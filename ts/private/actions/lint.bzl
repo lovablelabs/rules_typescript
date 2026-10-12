@@ -8,6 +8,7 @@ names a binary. docs/guides/lint.md is the reference.
 
 load("//ts/private:node_modules.bzl", "importer_chain")
 load("//ts/private:providers.bzl", "NodeModulesInfo")
+load("//ts/private:runtime_tools.bzl", "tool_env_executables")
 load("//ts/private:toolchain.bzl", "get_tools_toolchain")
 load(":tsgo.bzl", "program_args", "program_inputs", "source_path")
 
@@ -28,16 +29,7 @@ def _lint_config_impl(ctx):
     binary = None
     if ctx.attr.binary:
         binary = ctx.attr.binary[DefaultInfo].files_to_run
-    tool_env = {}
-    for target, name in ctx.attr.tool_env.items():
-        if not name or name[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_" or any([c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789" for c in name.elems()]):
-            fail("tool_env for {} needs an environment variable name, got {}".format(target.label, repr(name)))
-        if name in tool_env:
-            fail("tool_env assigns {} to more than one executable".format(name))
-        tool = target[DefaultInfo].files_to_run
-        if not tool or not tool.executable:
-            fail("tool_env target {} must be executable".format(target.label))
-        tool_env[name] = tool
+    tool_env = tool_env_executables(ctx.attr.tool_env)
     importers = {}
     links = []
     stores = []

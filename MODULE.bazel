@@ -410,6 +410,12 @@ register_toolchains(
     dev_dependency = True,
 )
 
+# Gated on //tests/runtime_tools:tools, which only that package's tests set.
+register_toolchains(
+    "//tests/runtime_tools:probe_toolchain",
+    dev_dependency = True,
+)
+
 # ─── npm dependencies ────────────────────────────────────────────────────────
 
 # @npm is the consumer's to claim (the root module's translate_lock wins the
