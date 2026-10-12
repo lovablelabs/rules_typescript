@@ -80,7 +80,7 @@ func newProtoStore() *protoStore {
 }
 
 func within(dir, root string) bool {
-	return dir == root || root == "" || strings.HasPrefix(dir, root+"/")
+	return root == "" || strings.HasPrefix(dir, root) && (len(dir) == len(root) || dir[len(root)] == '/')
 }
 
 func (s *protoStore) checkScope(c *config.Config, owner string) error {
