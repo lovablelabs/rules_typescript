@@ -34,6 +34,7 @@ var tsgoRlocationpath string
 type program struct {
 	explainfiles.Listing
 	candidates []resolutionCandidate
+	resolution resolutionFacts
 	config     string
 	dir        string
 	refused    string
@@ -922,7 +923,10 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 		return uncachedListing(ctx, repoRoot, tsgo, subject, args)
 	}
 	key := listingKey(repoRoot, tsgo, subject, args)
-	if p := loadListing(key, subject); p != nil {
+	if p, patched := loadListing(key, subject); p != nil {
+		if patched && listingPatchVerify {
+			verifyPatchedListing(ctx, repoRoot, tsgo, subject, args, p)
+		}
 		return p, nil
 	}
 	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
@@ -948,7 +952,8 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	runErr := cmd.Run()
-	listing, candidates, err := splitResolutionTrace(repoRoot, stdout.String())
+	var facts resolutionFacts
+	listing, candidates, err := splitTrace(repoRoot, stdout.String(), &facts)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
@@ -956,7 +961,7 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
-	p := &program{Listing: *l, candidates: candidates, config: subject}
+	p := &program{Listing: *l, candidates: candidates, resolution: facts, config: subject}
 	internProgram(p)
 	for i := range p.candidates {
 		candidate := &p.candidates[i]
