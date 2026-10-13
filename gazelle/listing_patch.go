@@ -1631,16 +1631,5 @@ func writeListing(key string, entry *cachedListing) {
 	if gob.NewEncoder(&buf).Encode(entry) != nil {
 		return
 	}
-	tmp, err := os.CreateTemp(listingCacheDir, key+".*")
-	if err != nil {
-		return
-	}
-	_, werr := tmp.Write(buf.Bytes())
-	if cerr := tmp.Close(); werr != nil || cerr != nil {
-		os.Remove(tmp.Name())
-		return
-	}
-	if os.Rename(tmp.Name(), filepath.Join(listingCacheDir, key)) != nil {
-		os.Remove(tmp.Name())
-	}
+	writeAtomically(filepath.Join(listingCacheDir, key), buf.Bytes())
 }
