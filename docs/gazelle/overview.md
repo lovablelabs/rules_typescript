@@ -110,6 +110,21 @@ full pass without either cache in `-mode=diff` when the record matches, and
 fails and drops the record unless that pass changes nothing and exits and logs
 as the record does; `-ts_run_record=off` always runs in full.
 
+A run the run record does not stand for still skips Resolve when it can. The
+same full runs keep a resolve record (after gazelle-rs's narrowed run record)
+beside the listings: a digest of the state the first `Resolve` starts from
+(every BUILD file's rules after Gazelle's pre-resolve merge, the generated
+rules and their imports, the listings, the rule index and the extension's own
+state), with the BUILD files and log that
+`Resolve` and `AfterResolvingDeps` left. A run whose state matches, and whose
+reads (by stat, BUILD files by content) are unchanged, writes those back
+instead of resolving: a hand edit to an attribute Gazelle resolves, such as
+deleting a rule's `deps`, leaves that state as it was. An import edit, a new
+file or a BUILD edit Gazelle keeps (a `# keep`, a directive, a new rule)
+resolves in full. `-ts_resolve_record=verify` resolves anyway and fails, and
+drops the record, unless the BUILD files and log match it;
+`-ts_resolve_record=off` always resolves.
+
 ## The Package Model
 
 A directory is a package when its `tsconfig.json` lists a first-party file: a

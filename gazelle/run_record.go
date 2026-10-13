@@ -75,6 +75,11 @@ type dirSnapshot struct {
 var snapshotSlots = make(chan struct{}, 4*runtime.GOMAXPROCS(0))
 
 func noteRead(path string) {
+	// A projection is its listing's own, derived from configs noted apart, and gone when the run ends.
+	if isProjection(path) {
+		return
+	}
+	noteResolvePhaseRead(path)
 	in := runInputs
 	if in == nil {
 		return
@@ -463,13 +468,14 @@ func later(a, b time.Time) time.Time {
 	return a
 }
 
-// runRecordKey is what selects the inputs rather than what they hold.
-func runRecordKey(fs *flag.FlagSet, c *config.Config) string {
+// recordKey is what selects a record rather than what its inputs hold: the
+// binary, the run's configuration, and every flag but those in skip.
+func recordKey(magic string, fs *flag.FlagSet, c *config.Config, skip ...string) string {
 	h := sha256.New()
 	exe, _ := os.Executable()
-	fmt.Fprintf(h, "%s\nroot %s\nwd %s\nfix %t\nbuild %q\nTSGO %q\nexe %s\n", runRecordMagic, c.RepoRoot, c.WorkDir, c.ShouldFix, c.ValidBuildFileNames, os.Getenv("TSGO"), exe)
+	fmt.Fprintf(h, "%s\nroot %s\nwd %s\nfix %t\nbuild %q\nTSGO %q\nexe %s\n", magic, c.RepoRoot, c.WorkDir, c.ShouldFix, c.ValidBuildFileNames, os.Getenv("TSGO"), exe)
 	fs.VisitAll(func(f *flag.Flag) {
-		if f.Name != "ts_run_record" {
+		if !slices.Contains(skip, f.Name) {
 			fmt.Fprintf(h, "flag %s=%q\n", f.Name, f.Value.String())
 		}
 	})
@@ -479,11 +485,31 @@ func runRecordKey(fs *flag.FlagSet, c *config.Config) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func checkRecordMode(flag, mode string) error {
+	switch mode {
+	case "on", "verify", "off":
+		return nil
+	}
+	return fmt.Errorf("-%s=%q: want on, verify or off", flag, mode)
+}
+
+// A profile asks for the work a replay skips.
+func runRecordApplies(fs *flag.FlagSet, c *config.Config, fullWalk bool) bool {
+	return runRecordMode != "off" && recordableRun(fs, c, fullWalk) && flagValue(fs, "cpuprofile") == "" && flagValue(fs, "memprofile") == ""
+}
+
+func flagValue(fs *flag.FlagSet, name string) string {
+	if f := fs.Lookup(name); f != nil {
+		return f.Value.String()
+	}
+	return ""
+}
+
 // A replay stands only for a full, recursive fix or diff run of a binary
 // whose one language is this one, reading and writing BUILD files in the tree
 // and writing nothing else: another language's inputs are not recorded.
-func runRecordApplies(fs *flag.FlagSet, c *config.Config, fullWalk bool) bool {
-	if runRecordMode == "off" || listingCacheDir == "" || !fullWalk || c.ReadBuildFilesDir != "" || c.WriteBuildFilesDir != "" {
+func recordableRun(fs *flag.FlagSet, c *config.Config, fullWalk bool) bool {
+	if listingCacheDir == "" || !fullWalk || c.ReadBuildFilesDir != "" || c.WriteBuildFilesDir != "" {
 		return false
 	}
 	for name := range c.Exts {
@@ -491,31 +517,20 @@ func runRecordApplies(fs *flag.FlagSet, c *config.Config, fullWalk bool) bool {
 			return false
 		}
 	}
-	value := func(name string) string {
-		if f := fs.Lookup(name); f != nil {
-			return f.Value.String()
-		}
-		return ""
-	}
-	if mode := value("mode"); mode != "fix" && mode != "diff" {
+	if mode := flagValue(fs, "mode"); mode != "fix" && mode != "diff" {
 		return false
 	}
-	return value("patch") == "" && value("cpuprofile") == "" && value("memprofile") == ""
+	return flagValue(fs, "patch") == ""
 }
 
 // gateOnRunRecord exits when the record replays. Otherwise the full pass runs
 // as a child, which gathers a candidate record, and this process exits with
 // the child's status; it returns only in the process that does the work.
 func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
-	switch runRecordMode {
-	case "on", "verify", "off":
-	default:
-		return fmt.Errorf("-ts_run_record=%q: want on, verify or off", runRecordMode)
-	}
 	if in := runInputs; in != nil {
 		cache, _ := filepath.Abs(listingCacheDir)
 		in.mu.Lock()
-		in.key, in.repoRoot, in.cache, in.buildNames = runRecordKey(fs, c), c.RepoRoot, cache, c.ValidBuildFileNames
+		in.key, in.repoRoot, in.cache, in.buildNames = recordKey(runRecordMagic, fs, c, "ts_run_record"), c.RepoRoot, cache, c.ValidBuildFileNames
 		in.mu.Unlock()
 		if exe, err := os.Executable(); err == nil {
 			noteRead(exe)
@@ -535,7 +550,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if err := os.MkdirAll(cache, 0o755); err != nil {
 		return err
 	}
-	key := runRecordKey(fs, c)
+	key := recordKey(runRecordMagic, fs, c, "ts_run_record")
 	file := filepath.Join(cache, runRecordName+"-"+key[:16])
 	if rec := loadRunRecord(file); rec != nil && rec.key == key && rec.matches(c.ValidBuildFileNames, cache, nil) {
 		if runRecordMode == "verify" {
@@ -624,7 +639,7 @@ func promoteRunRecord(candidate, file, key string, buildNames []string, cache st
 // writes; the spawning process keeps the candidate only if this run exits 0.
 func writeRunCandidate() {
 	in := runInputs
-	if in == nil || in.key == "" {
+	if in == nil || in.key == "" || os.Getenv(runRecordCandidateEnv) == "" {
 		return
 	}
 	pendingWrites.Wait()
@@ -735,7 +750,8 @@ func verifyReplay(fs *flag.FlagSet, file string, rec *runRecord) int {
 func logLines(log []byte) []string {
 	var out []string
 	for line := range strings.SplitSeq(string(log), "\n") {
-		if line != "" && !strings.Contains(line, "typescript: listing cache") && !strings.Contains(line, "typescript: run record:") {
+		if line != "" && !strings.Contains(line, "typescript: listing cache") && !strings.Contains(line, "typescript: run record:") &&
+			!strings.Contains(line, "typescript: resolve record:") {
 			out = append(out, line)
 		}
 	}

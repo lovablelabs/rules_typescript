@@ -392,6 +392,13 @@ func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 	if l.programs == nil || l.programs.emission == nil {
 		return
 	}
+	if rec := l.programs.resolution; rec != nil && rec.started {
+		if rec.replay != nil {
+			rec.applyReplay(l.programs)
+			return
+		}
+		defer rec.finish(l.programs)
+	}
 	l.programs.ruleListsMayChange()
 	g := l.programs.emission
 	repo := l.programs.repoConfig.RepoName

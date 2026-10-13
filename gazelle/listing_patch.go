@@ -1482,12 +1482,23 @@ func programFromEntry(entry *cachedListing, subject string) *program {
 	p.Roots = slices.Clone(p.Roots)
 	p.Edges = slices.Clone(p.Edges)
 	for _, c := range entry.Candidates {
-		p.candidates = append(p.candidates, resolutionCandidate{
-			from: c.From, specifier: c.Specifier, path: c.Path, file: c.File, metadata: c.Metadata,
-			kind: c.Kind, block: c.Block, resolved: c.Resolved, skipped: c.Skipped,
-		})
+		p.candidates = append(p.candidates, c.resolutionCandidate())
 	}
 	return p
+}
+
+func (c cachedCandidate) resolutionCandidate() resolutionCandidate {
+	return resolutionCandidate{
+		from: c.From, specifier: c.Specifier, path: c.Path, file: c.File, metadata: c.Metadata,
+		kind: c.Kind, block: c.Block, resolved: c.Resolved, skipped: c.Skipped,
+	}
+}
+
+func (c resolutionCandidate) cached() cachedCandidate {
+	return cachedCandidate{
+		From: c.from, Specifier: c.specifier, Path: c.path, File: c.file, Metadata: c.metadata,
+		Kind: c.kind, Block: c.block, Resolved: c.resolved, Skipped: c.skipped,
+	}
 }
 
 // reachable is the listing's files as its roots, type entries and edges reach them.

@@ -434,14 +434,14 @@ func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.
 		}
 		s.emission.setRule(key, effective)
 		if imps, ok := res.Imports[i].(*ruleImports); ok {
-			reportSrcDrops := imps.reportSrcDrops
+			srcDrops := imps.srcDrops
 			*imps = ruleImports{}
 			if j >= 0 {
 				if selected, ok := final.Imports[j].(*ruleImports); ok {
 					*imps = *selected
 				}
 			}
-			imps.reportSrcDrops = reportSrcDrops
+			imps.srcDrops = srcDrops
 			if scopeCandidate || effective.IsEmpty(info) {
 				continue
 			}
@@ -925,12 +925,12 @@ func defaultVitestConfigFor(args language.GenerateArgs, tc *tsConfig) string {
 // ruleImports is what GenerateRules hands Resolve for one rule: the edges of
 // the files it compiles, its vitest config and the deps no edge names.
 type ruleImports struct {
-	program        *program
-	candidates     []resolutionCandidate
-	edges          []explainfiles.Edge
-	config         string
-	deps           []string
-	reportSrcDrops func(*rule.Rule)
+	program    *program
+	candidates []resolutionCandidate
+	edges      []explainfiles.Edge
+	config     string
+	deps       []string
+	srcDrops   *srcDrops
 }
 
 // The index is shared by every reader and must not be written.

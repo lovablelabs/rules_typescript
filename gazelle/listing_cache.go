@@ -182,10 +182,7 @@ func remember(key string, entry *cachedListing, p *program) *program {
 	entry.Listing = p.Listing
 	entry.Candidates = make([]cachedCandidate, 0, len(p.candidates))
 	for _, c := range p.candidates {
-		entry.Candidates = append(entry.Candidates, cachedCandidate{
-			From: c.from, Specifier: c.specifier, Path: c.path, File: c.file, Metadata: c.metadata,
-			Kind: c.kind, Block: c.block, Resolved: c.resolved, Skipped: c.skipped,
-		})
+		entry.Candidates = append(entry.Candidates, c.cached())
 	}
 	entry.Resolution = p.resolution
 	loadedListings.Store(key, entry)
@@ -348,10 +345,7 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 		}
 	}
 	for _, c := range p.candidates {
-		entry.Candidates = append(entry.Candidates, cachedCandidate{
-			From: c.from, Specifier: c.specifier, Path: c.path, File: c.file, Metadata: c.metadata,
-			Kind: c.kind, Block: c.block, Resolved: c.resolved, Skipped: c.skipped,
-		})
+		entry.Candidates = append(entry.Candidates, c.cached())
 		for _, probed := range []string{c.path, c.resolved, c.skipped} {
 			if probed != "" && !strings.HasPrefix(probed, embeddedLibs) {
 				entry.Reads = append(entry.Reads, abs(probed))
