@@ -133,6 +133,7 @@ func patchFixture() map[string]string {
 		"app/src/lib/index.ts":                    "export * from './d';\n",
 		"app/src/view/v.tsx":                      "import { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
 		"app/src/view/w.tsx":                      "import { a } from '../a';\nexport const W = () => <div>{a}</div>;\n",
+		"app/tool.mjs":                            "export const tool = 1;\n",
 	}
 }
 
@@ -319,6 +320,223 @@ func checkRelativeResolutions(t *testing.T, root string, p *program) int {
 		}
 	}
 	return len(blocks)
+}
+
+// project lists cfg's program with roots as its files list, through the cache.
+func (l *listingRuns) project(cfg string, roots []string) *program {
+	l.t.Helper()
+	listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+	sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
+	p, err := listCompilerProgram(l.root, cfg, l.tsgo, nil, roots...)
+	if err != nil {
+		l.t.Fatal(err)
+	}
+	pendingWrites.Wait()
+	return p
+}
+
+func (l *listingRuns) freshProject(cfg string, roots []string) *program {
+	l.t.Helper()
+	dir, runs := listingCacheDir, l.runs
+	listingCacheDir = ""
+	defer func() { listingCacheDir, l.runs = dir, runs }()
+	p, err := listCompilerProgram(l.root, cfg, l.tsgo, nil, roots...)
+	if err != nil {
+		l.t.Fatal(err)
+	}
+	return p
+}
+
+var projectionRoots = []string{"app/src/a.ts", "app/src/c.ts", "app/src/view/v.tsx"}
+
+// A files-list projection was keyed on its list, so every root gained or lost
+// listed the whole program again; its listing is now patched from its base's.
+func TestListingCache_FilesListProjectionPatchesRootChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		base, roots []string
+		edit        map[string]string
+		drop        []string
+	}{
+		{name: "a gained root new to the program", roots: append(slices.Clone(projectionRoots), "app/src/view/w.tsx")},
+		{name: "a gained root the program already imports", roots: append(slices.Clone(projectionRoots), "app/src/b.ts")},
+		{name: "a gained root that is a new file", edit: map[string]string{
+			"app/src/e.ts": "import { d } from './lib/d';\nexport const e = d;\n",
+		}, roots: append(slices.Clone(projectionRoots), "app/src/e.ts")},
+		{name: "a lost root nothing else imports", roots: []string{"app/src/a.ts", "app/src/c.ts"}},
+		{name: "a lost root another root still imports", edit: map[string]string{
+			"app/src/c.ts": "import { d } from './lib/d.js';\nimport { a } from './a';\nexport const c = d + a;\n",
+		}, roots: []string{"app/src/c.ts", "app/src/view/v.tsx"}},
+		{name: "a lost root whose file is deleted", drop: []string{"app/src/c.ts"}, roots: []string{"app/src/a.ts", "app/src/view/v.tsx"}},
+		{name: "a gained and a lost root", roots: []string{"app/src/a.ts", "app/src/lib/index.ts", "app/src/view/v.tsx"}},
+		{name: "a gained root beside a script tsgo does not root",
+			base:  append(slices.Clone(projectionRoots), "app/tool.mjs"),
+			roots: append(slices.Clone(projectionRoots), "app/src/view/w.tsx", "app/tool.mjs")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := tc.base
+			if base == nil {
+				base = projectionRoots
+			}
+			l := newListingRuns(t, patchFixture())
+			l.project("app/tsconfig.json", base)
+			writeWorkspace(t, l.root, tc.edit)
+			for _, rel := range tc.drop {
+				if err := os.Remove(filepath.Join(l.root, rel)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			patched := l.project("app/tsconfig.json", tc.roots)
+			if l.runs != 1 {
+				t.Fatalf("the files list change listed the program again (%d runs): %v", l.runs, lastPatchRefusal.Load())
+			}
+			if diff := listingDifference(patched, l.freshProject("app/tsconfig.json", tc.roots)); diff != "" {
+				t.Errorf("the patched listing differs from tsgo's:\n%s", diff)
+			}
+			if again := l.project("app/tsconfig.json", tc.roots); l.runs != 1 || listingDifference(again, patched) != "" {
+				t.Errorf("the patched entry was not kept under its own files list (%d runs)", l.runs)
+			}
+			if len(tc.edit)+len(tc.drop) > 0 {
+				return
+			}
+			if first := l.project("app/tsconfig.json", base); l.runs != 1 || !slices.Equal(slices.Sorted(slices.Values(first.Roots)), projectionRoots) {
+				t.Errorf("the first files list lost its own entry (%d runs): %q", l.runs, first.Roots)
+			}
+		})
+	}
+}
+
+// A files list change the patch does not model goes back to tsgo.
+func TestListingCache_FilesListProjectionRefusesWhatItDoesNotModel(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		base, roots []string
+		edit        map[string]string
+	}{
+		{name: "a gained root that does not exist", roots: append(slices.Clone(projectionRoots), "app/src/gone.ts")},
+		{name: "a gained root with a reference directive", edit: map[string]string{
+			"app/src/e.ts": "/// <reference types=\"react\" />\nexport const e = 1;\n",
+		}, roots: append(slices.Clone(projectionRoots), "app/src/e.ts")},
+		{name: "a gained JSON root", roots: append(slices.Clone(projectionRoots), "app/package.json")},
+		{name: "a changed base config", edit: map[string]string{
+			"app/tsconfig.json": strings.Replace(patchFixtureConfig, `"types":[]`, `"types":[],"strict":true`, 1),
+		}, roots: append(slices.Clone(projectionRoots), "app/src/b.ts")},
+		{name: "a lost script tsgo did not root", base: append(slices.Clone(projectionRoots), "app/tool.mjs"), roots: projectionRoots},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newListingRuns(t, patchFixture())
+			base := tc.base
+			if base == nil {
+				base = projectionRoots
+			}
+			l.project("app/tsconfig.json", base)
+			writeWorkspace(t, l.root, tc.edit)
+			got := l.project("app/tsconfig.json", tc.roots)
+			if l.runs != 2 {
+				t.Fatalf("the change was patched instead of listed again (%d runs)", l.runs)
+			}
+			if diff := listingDifference(got, l.freshProject("app/tsconfig.json", tc.roots)); diff != "" {
+				t.Errorf("the relisted program differs from tsgo's:\n%s", diff)
+			}
+		})
+	}
+}
+
+// Over every converge fixture config, a files-list projection that gains or
+// loses a root is patched to the listing tsgo prints for it.
+func TestListingCache_FilesListPatchMatchesTsgoOnTheFixtureCorpus(t *testing.T) {
+	requireTsgo(t)
+	patched := 0
+	for _, tc := range convergeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newListingRuns(t, tc.files)
+			for _, cfg := range corpusConfigs(t, l.root) {
+				base := l.list(cfg)
+				var roots []string
+				for _, r := range base.Roots {
+					if firstParty(r) && rootStem(r) != "" {
+						roots = append(roots, r)
+					}
+				}
+				if len(roots) < 2 {
+					continue
+				}
+				extra := projectionCandidates(t, l.root, parentDir(cfg), base.Files)
+				variants := [][]string{roots[1:], roots[:len(roots)-1]}
+				for _, f := range extra[:min(2, len(extra))] {
+					variants = append(variants, append(slices.Clone(roots), f), append(slices.Clone(roots[1:]), f))
+				}
+				l.project(cfg, roots)
+				for _, variant := range variants {
+					before := listingPatched.Load()
+					got := l.project(cfg, variant)
+					if listingPatched.Load() == before {
+						continue
+					}
+					patched++
+					if diff := listingDifference(got, l.freshProject(cfg, variant)); diff != "" {
+						t.Errorf("%s %q: the patched listing differs from tsgo's:\n%s", cfg, variant, diff)
+					}
+				}
+			}
+		})
+	}
+	t.Logf("%d patched files-list listings", patched)
+	if patched == 0 {
+		t.Error("the corpus exercised no patched files-list listing")
+	}
+}
+
+// projectionCandidates are the TypeScript sources under dir the listing does not hold.
+func projectionCandidates(t *testing.T, root, dir string, listed []string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(filepath.Join(root, filepath.FromSlash(dir)), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() && d.Name() == "node_modules" {
+			return filepath.SkipDir
+		}
+		rel, _ := filepath.Rel(root, p)
+		rel = filepath.ToSlash(rel)
+		if !d.IsDir() && patchableSource(rel) && rootStem(rel) != "" && !slices.Contains(listed, rel) {
+			out = append(out, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// -ts_listing_patch_verify must check a listing patched to a new files list, not
+// only one patched under its own key.
+func TestListingCache_PatchVerifyListsAPatchedFilesList(t *testing.T) {
+	l := newListingRuns(t, patchFixture())
+	l.project("app/tsconfig.json", projectionRoots)
+	listingPatchVerify = true
+	t.Cleanup(func() { listingPatchVerify = false })
+	before := listingPatched.Load()
+	l.project("app/tsconfig.json", append(slices.Clone(projectionRoots), "app/src/view/w.tsx"))
+	if listingPatched.Load() == before || l.runs != 2 {
+		t.Fatalf("the patched files list was not listed by tsgo too (%d patched, %d runs)", listingPatched.Load()-before, l.runs)
+	}
+}
+
+// The family entry fewest files apart can be one the patch must refuse, a
+// script tsgo does not root among them; another entry of the family patches.
+func TestListingCache_FilesListPatchesFromAnotherFamilyEntry(t *testing.T) {
+	l := newListingRuns(t, patchFixture())
+	l.project("app/tsconfig.json", projectionRoots)
+	l.project("app/tsconfig.json", append(slices.Clone(projectionRoots), "app/src/b.ts", "app/src/lib/index.ts", "app/tool.mjs"))
+	roots := append(slices.Clone(projectionRoots), "app/src/view/w.tsx", "app/tool.mjs")
+	patched := l.project("app/tsconfig.json", roots)
+	if l.runs != 2 {
+		t.Fatalf("no family entry patched the files list (%d runs): %v", l.runs, lastPatchRefusal.Load())
+	}
+	if diff := listingDifference(patched, l.freshProject("app/tsconfig.json", roots)); diff != "" {
+		t.Errorf("the patched listing differs from tsgo's:\n%s", diff)
+	}
 }
 
 // A walk up from a rooted importer looped on path.Dir("/") == "/".

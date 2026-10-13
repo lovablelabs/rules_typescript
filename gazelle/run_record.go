@@ -111,6 +111,11 @@ func statInput(path string) (fs.FileInfo, error) {
 	return os.Stat(path)
 }
 
+func lstatInput(path string) (fs.FileInfo, error) {
+	noteRead(path)
+	return os.Lstat(path)
+}
+
 func readInput(path string) ([]byte, error) {
 	noteRead(path)
 	return os.ReadFile(path)

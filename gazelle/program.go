@@ -922,8 +922,8 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	if listingCacheDir == "" {
 		return uncachedListing(ctx, repoRoot, tsgo, subject, args)
 	}
-	key := listingKey(repoRoot, tsgo, subject, args)
-	if p, patched := loadListing(key, subject); p != nil {
+	id := listingKey(repoRoot, tsgo, subject, args)
+	if p, patched := loadListing(id, subject); p != nil {
 		if patched && listingPatchVerify {
 			verifyPatchedListing(ctx, repoRoot, tsgo, subject, args, p)
 		}
@@ -931,8 +931,8 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	}
 	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
 	if err == nil {
-		saveListing(key, repoRoot, subject, args, p)
-		if _, kept := loadedListings.Load(key); !kept {
+		saveListing(id, repoRoot, subject, args, p)
+		if _, kept := loadedListings.Load(id.key); !kept {
 			noteIncomplete(subject + " was listed without a read set")
 		}
 	}
