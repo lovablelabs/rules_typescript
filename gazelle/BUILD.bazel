@@ -1,4 +1,4 @@
-load("@gazelle//:def.bzl", "gazelle", "gazelle_binary", "gazelle_generation_test")
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 # gazelle:prefix github.com/mikn/rules_typescript/gazelle
@@ -7,7 +7,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 # the Go language would generate a go_test embedding the runner.
 # gazelle:exclude *_test.go
 
-# Golden workspaces :gazelle_golden_test runs Gazelle over, not packages here.
+# Golden workspaces //gazelle/golden:gazelle_golden_test runs Gazelle over, not packages here.
 # gazelle:exclude testdata
 
 go_library(
@@ -126,14 +126,10 @@ gazelle_binary(
     visibility = ["//visibility:public"],
 )
 
-# Each testdata/<case> is a workspace: BUILD.in before the run, BUILD.out and
-# expected{Stderr,ExitCode}.txt after. `UPDATE_SNAPSHOTS=true bazel run` rewrites them.
-gazelle_generation_test(
-    name = "gazelle_golden_test",
-    size = "medium",
-    gazelle_binary = ":gazelle_typescript",
-    gazelle_timeout_seconds = 60,
-    test_data = glob(["testdata/**"]),
+filegroup(
+    name = "golden_testdata",
+    srcs = glob(["testdata/**"]),
+    visibility = ["//gazelle/golden:__pkg__"],
 )
 
 # Go and proto are here because this repo generates BUILD files for its own .go
