@@ -196,6 +196,29 @@ func TestImportsForRule_SourceLabelsShareFileIdentity(t *testing.T) {
 	}
 }
 
+// Producers are found through a per-file index, which must keep the first rule of a name as the scan did.
+func TestImportsForRule_EveryLookupTakesTheFirstProducerOfAName(t *testing.T) {
+	c := emptyConfig()
+	r, f := newRule(indexedRule{
+		kind: "ts_compile", name: "lib", pkg: "lib",
+		srcs: []string{"gen", "x.ts", "gen", "y.ts", "other", "gen"},
+	})
+	for name, out := range map[string]string{"gen": "first.ts", "other": "other.ts"} {
+		producer := rule.NewRule("genrule", name)
+		producer.SetAttr("outs", []string{out})
+		f.Rules = append(f.Rules, producer)
+	}
+	shadowed := rule.NewRule("genrule", "gen")
+	shadowed.SetAttr("outs", []string{"second.ts"})
+	f.Rules = append(f.Rules, shadowed)
+
+	got := specStrings(importsForRule(c, r, f))
+	want := []string{"lib/first.ts", "lib/x.ts", "lib/first.ts", "lib/y.ts", "lib/other.ts", "lib/first.ts"}
+	if !slices.Equal(got, want) {
+		t.Errorf("importsForRule = %v, want %v", got, want)
+	}
+}
+
 func TestImportsForRule_ProducerLabelsShareCompilerOwnership(t *testing.T) {
 	for _, producerKind := range []string{"ts_codegen", "genrule"} {
 		for _, compilerPkg := range []string{"generated", "compiled"} {

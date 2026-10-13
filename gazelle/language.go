@@ -56,6 +56,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
 	fs.BoolVar(&listingPatchVerify, "ts_listing_patch_verify", false,
 		"also list every patched stale listing with tsgo, and fail on any difference")
+	fs.StringVar(&parallelMode, "ts_parallel", "on",
+		"with -ts_listing_cache on a full recursive run, on: decode the cached listings on a worker pool ahead of the walk; "+
+			"off: decode each when the walk reaches it; verify: read each again when the walk reaches it and exit on any difference")
 	l.programs = tc.programs
 	c.Exts[languageName] = tc
 }
@@ -113,10 +116,18 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if err := checkRecordMode("ts_resolve_record", resolveRecordMode); err != nil {
 		return err
 	}
-	if err := gateOnRunRecord(fs, c, getConfig(c).programs.fullWalk); err != nil {
+	if err := checkRecordMode("ts_parallel", parallelMode); err != nil {
 		return err
 	}
-	return startResolveRecord(fs, c, getConfig(c).programs)
+	s := getConfig(c).programs
+	// Only the process that does the work gets past the gate, so a replay decodes nothing.
+	if err := gateOnRunRecord(fs, c, s.fullWalk); err != nil {
+		return err
+	}
+	if listingCacheDir != "" && parallelMode != "off" && s.fullWalk {
+		predecodes.start(listingCacheDir, parallelMode == "verify")
+	}
+	return startResolveRecord(fs, c, s)
 }
 
 func (l *tsLang) KnownDirectives() []string {

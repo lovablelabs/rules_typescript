@@ -122,7 +122,7 @@ func startResolveRecord(fs *flag.FlagSet, c *config.Config, s *programStore) err
 		return fmt.Errorf("-ts_listing_cache: %w", err)
 	}
 	// Everything a run is asked to do except where its caches live and how it is checked or profiled.
-	key := recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_listing_cache", "ts_listing_patch_verify", "cpuprofile", "memprofile", "trace")
+	key := recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
 	if runInputs == nil {
 		runInputs = &inputSet{files: map[string]string{}, dirs: map[string]*dirSnapshot{}, key: key, repoRoot: c.RepoRoot, cache: cache, buildNames: c.ValidBuildFileNames}
 		if exe, err := os.Executable(); err == nil {

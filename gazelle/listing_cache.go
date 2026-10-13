@@ -58,6 +58,7 @@ func listingNameSkipped(name string) bool {
 var listingHits, listingAbsent, listingStale atomic.Int64
 
 func logListingCache() {
+	predecodes.finish()
 	pendingWrites.Wait()
 	if listingCacheDir != "" {
 		log.Printf("typescript: listing cache %d hit(s), %d patched, %d new, %d stale", listingHits.Load(), listingPatched.Load(), listingAbsent.Load(), listingStale.Load())
@@ -195,15 +196,18 @@ func loadListing(id listingID, subject string) (*program, bool) {
 		listingHits.Add(1)
 		return programFromEntry(v.(*cachedListing), subject), false
 	}
-	entry, err := readListing(filepath.Join(listingCacheDir, id.key))
+	entry, fresh, err := predecodes.take(id.key)
+	if errors.Is(err, errPredecodeMismatch) {
+		log.Fatal(err)
+	}
 	if errors.Is(err, fs.ErrNotExist) && id.family != "" {
 		return patchFromFamily(id, subject)
 	}
-	if entry == nil {
+	if err != nil {
 		listingAbsent.Add(1)
 		return nil, false
 	}
-	if listingFingerprint(entry.Reads, entry.Dirs) != entry.Fingerprint {
+	if !fresh {
 		if p := patchListing(entry, subject, id.files); p != nil {
 			return keepPatched(id, entry, p), true
 		}
@@ -220,9 +224,7 @@ func loadListing(id listingID, subject string) (*program, bool) {
 func keepPatched(id listingID, entry *cachedListing, p *program) *program {
 	p = remember(id.key, entry, p)
 	// Nothing writes the entry after remember, so encoding it alongside the run is safe.
-	pendingWrites.Go(func() {
-		writeListing(id.key, entry)
-	})
+	pendingWrites.Go(func() { writeListing(id.key, entry) })
 	return p
 }
 
@@ -254,6 +256,10 @@ func readListing(file string) (*cachedListing, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeEntry(file, data)
+}
+
+func decodeEntry(file string, data []byte) (*cachedListing, error) {
 	var entry cachedListing
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&entry); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)

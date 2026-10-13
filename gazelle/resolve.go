@@ -47,6 +47,7 @@ func declaredSourceImports(c *config.Config, r *rule.Rule, f *rule.File,
 	var result sourceProjection
 	s := getConfig(c).programs
 	active := map[label.Label]bool{}
+	named := rulesByName{}
 	unknown := func(owner label.Label, attr string) {
 		if result.incomplete == "" {
 			result.incomplete = fmt.Sprintf("%s has unsupported %s membership", owner, attr)
@@ -103,13 +104,10 @@ func declaredSourceImports(c *config.Config, r *rule.Rule, f *rule.File,
 		}
 		var producer *rule.Rule
 		if producerFile != nil {
-			for _, candidate := range producerFile.Rules {
-				if candidate.Name() == src.Name {
-					producer = candidate
-					if observed := s.semanticRule(emissionLabel(c.RepoName, src.Pkg, ":"+candidate.Name())); observed != nil {
-						producer = observed
-					}
-					break
+			if candidate := named.find(producerFile, src.Name); candidate != nil {
+				producer = candidate
+				if observed := s.semanticRule(emissionLabel(c.RepoName, src.Pkg, ":"+src.Name)); observed != nil {
+					producer = observed
 				}
 			}
 		}
@@ -146,6 +144,24 @@ func declaredSourceImports(c *config.Config, r *rule.Rule, f *rule.File,
 	}
 	list(r.Attr("srcs"), label.New(c.RepoName, f.Pkg, r.Name()), "srcs")
 	return result
+}
+
+// rulesByName indexes each file's first rule of a name; it lives for one
+// declaredSourceImports call, which edits no rule list.
+type rulesByName map[*rule.File]map[string]*rule.Rule
+
+func (n rulesByName) find(file *rule.File, name string) *rule.Rule {
+	index, ok := n[file]
+	if !ok {
+		index = make(map[string]*rule.Rule, len(file.Rules))
+		for _, r := range file.Rules {
+			if _, seen := index[r.Name()]; !seen {
+				index[r.Name()] = r
+			}
+		}
+		n[file] = index
+	}
+	return index[name]
 }
 
 func managesProgramClosure(r *rule.Rule) bool {
