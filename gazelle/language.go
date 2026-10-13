@@ -48,6 +48,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 	fs.StringVar(&tc.protos.graphPath, "ts_proto_graph", "", "declared native external protobuf graph artifact")
 	fs.StringVar(&listingCacheDir, "ts_listing_cache", "",
 		"a directory that keeps tsgo listings across runs, each reused while everything it read is unchanged")
+	fs.StringVar(&resolveRecordMode, "ts_resolve_record", "on",
+		"with -ts_listing_cache on a full fix or diff run: on writes back the last run's resolved BUILD files when "+
+			"Resolve would start from the same state; verify runs Resolve anyway and fails on any difference; off always resolves")
 	fs.StringVar(&runRecordMode, "ts_run_record", "on",
 		"with -ts_listing_cache on a full fix or diff run: on exits at once when every input matches the last run that changed nothing; "+
 			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
@@ -104,7 +107,16 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 			return fmt.Errorf("-ts_tsgo: %w", err)
 		}
 	}
-	return gateOnRunRecord(fs, c, getConfig(c).programs.fullWalk)
+	if err := checkRecordMode("ts_run_record", runRecordMode); err != nil {
+		return err
+	}
+	if err := checkRecordMode("ts_resolve_record", resolveRecordMode); err != nil {
+		return err
+	}
+	if err := gateOnRunRecord(fs, c, getConfig(c).programs.fullWalk); err != nil {
+		return err
+	}
+	return startResolveRecord(fs, c, getConfig(c).programs)
 }
 
 func (l *tsLang) KnownDirectives() []string {
@@ -381,6 +393,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 			l.observeProgram(p)
 		}
 	}
+	s.resolution.noteGenerated(args, res)
 	return res
 }
 
@@ -404,10 +417,12 @@ func (l *tsLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve
 		}
 		g.setRule(emissionLabel(c.RepoName, f.Pkg, ":"+r.Name()), r)
 	}
-	if l.programs != nil {
-		return importsForRule(c, r, f, recordedDirInfo)
+	if l.programs == nil {
+		return importsForRule(c, r, f)
 	}
-	return importsForRule(c, r, f)
+	specs := importsForRule(c, r, f, recordedDirInfo)
+	l.programs.resolution.noteImports(c, r, f, specs)
+	return specs
 }
 
 func (l *tsLang) Embeds(_ *rule.Rule, _ label.Label) []label.Label { return nil }
@@ -420,7 +435,11 @@ func (l *tsLang) Resolve(
 	imports any,
 	from label.Label,
 ) {
-	getConfig(c).programs.ruleListsMayChange()
+	s := getConfig(c).programs
+	if s.resolution.begin(s) {
+		return
+	}
+	s.ruleListsMayChange()
 	liveRule := r
 	r = canonicalRule(c, r)
 	tc := getConfig(c)
@@ -518,14 +537,14 @@ func (l *tsLang) Resolve(
 						promote(emissionLabel(c.RepoName, from.Pkg, dep))
 					}
 				}
-				if imps.reportSrcDrops != nil {
-					imps.reportSrcDrops(live)
+				if imps.srcDrops != nil {
+					imps.srcDrops.report(live)
 				}
 			}
 		} else {
 			retainSourceImporters(c, r, from, imps.program, deps)
-			if imps.reportSrcDrops != nil {
-				imps.reportSrcDrops(r)
+			if imps.srcDrops != nil {
+				imps.srcDrops.report(r)
 			}
 		}
 	}

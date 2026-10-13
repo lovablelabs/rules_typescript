@@ -65,19 +65,7 @@ func reportManagedAttrDrops(args language.GenerateArgs, gen []*rule.Rule, import
 				dropped := droppedAttrValues(args, have, want, attr)
 				if attr == "srcs" && len(dropped) > 0 && i < len(imports) {
 					if imps, ok := imports[i].(*ruleImports); ok && imps != nil {
-						imps.reportSrcDrops = func(final *rule.Rule) {
-							retained := map[label.Label]bool{}
-							for _, value := range final.AttrStrings("srcs") {
-								if lbl, err := parseLabel(value); err == nil {
-									retained[sourceLabelIdentity(lbl, args)] = true
-								}
-							}
-							dropped = slices.DeleteFunc(dropped, func(value string) bool {
-								lbl, err := parseLabel(value)
-								return err == nil && retained[sourceLabelIdentity(lbl, args)]
-							})
-							reportDroppedValues(args, have, attr, dropped)
-						}
+						imps.srcDrops = &srcDrops{args: args, have: have, dropped: dropped}
 						continue
 					}
 				}
@@ -85,6 +73,28 @@ func reportManagedAttrDrops(args language.GenerateArgs, gen []*rule.Rule, import
 			}
 		}
 	}
+}
+
+// srcDrops are the sources a BUILD file lists that the generated rule does
+// not; Resolve may add some back, and report names the rest.
+type srcDrops struct {
+	args    language.GenerateArgs
+	have    *rule.Rule
+	dropped []string
+}
+
+func (d *srcDrops) report(final *rule.Rule) {
+	retained := map[label.Label]bool{}
+	for _, value := range final.AttrStrings("srcs") {
+		if lbl, err := parseLabel(value); err == nil {
+			retained[sourceLabelIdentity(lbl, d.args)] = true
+		}
+	}
+	d.dropped = slices.DeleteFunc(d.dropped, func(value string) bool {
+		lbl, err := parseLabel(value)
+		return err == nil && retained[sourceLabelIdentity(lbl, d.args)]
+	})
+	reportDroppedValues(d.args, d.have, "srcs", d.dropped)
 }
 
 // The shapes a merge reconciles value by value, the two rule.MergeRules

@@ -79,6 +79,7 @@ type programStore struct {
 	fullWalk         bool
 	manifests        map[string]*manifest
 	noLockSaid       bool
+	resolution       *resolveRecorder
 }
 
 // Every observed package retains configuration, even without a compiler program;
