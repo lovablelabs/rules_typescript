@@ -51,6 +51,8 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 	fs.StringVar(&runRecordMode, "ts_run_record", "on",
 		"with -ts_listing_cache on a full fix or diff run: on exits at once when every input matches the last run that changed nothing; "+
 			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
+	fs.BoolVar(&listingPatchVerify, "ts_listing_patch_verify", false,
+		"also list every patched stale listing with tsgo, and fail on any difference")
 	l.programs = tc.programs
 	c.Exts[languageName] = tc
 }

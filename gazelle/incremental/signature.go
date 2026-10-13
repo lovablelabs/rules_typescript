@@ -39,8 +39,18 @@ func Specifiers(name string, src []byte) (specs []string, rest string, err error
 	}
 	sort.Strings(specs)
 	sort.Strings(others)
-	sum := sha256.Sum256([]byte(fmt.Sprintf("jsx=%t module=%t\n%s", s.sawJSX, s.module, strings.Join(others, "\n"))))
-	return specs, hex.EncodeToString(sum[:]), nil
+	return specs, restDigest(s.sawJSX, s.module, others), nil
+}
+
+// PlainRest is the rest Specifiers returns for a source whose only facts are
+// its module specifiers.
+func PlainRest(jsx, module bool) string {
+	return restDigest(jsx, module, nil)
+}
+
+func restDigest(jsx, module bool, others []string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("jsx=%t module=%t\n%s", jsx, module, strings.Join(others, "\n"))))
+	return hex.EncodeToString(sum[:])
 }
 
 func scanSource(name string, src []byte) (*scanner, error) {

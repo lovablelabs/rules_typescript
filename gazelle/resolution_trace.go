@@ -5,6 +5,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -113,9 +114,27 @@ func foundPackageTrace(line string) (string, bool) {
 	return traceField(rest[width:], "json' at '", "'.")
 }
 
+// resolutionFacts is what every module resolution in a listing said about how
+// relative specifiers resolve, so patchListing can resolve a new one the same way.
+type resolutionFacts struct {
+	Kinds, RelativeTargets []string
+	RootDirs               bool
+}
+
+func (f *resolutionFacts) add(list *[]string, value string) {
+	if !slices.Contains(*list, value) {
+		*list = append(*list, value)
+	}
+}
+
 // Trace arrays are emitted serially by the compiler's filesparser, before its listing.
 func splitResolutionTrace(root, output string) (string, []resolutionCandidate, error) {
+	return splitTrace(root, output, &resolutionFacts{})
+}
+
+func splitTrace(root, output string, facts *resolutionFacts) (string, []resolutionCandidate, error) {
 	var listing strings.Builder
+	sawCandidate := false
 	var candidates []resolutionCandidate
 	var kind, specifier, from, previous, jsonModule, moduleCandidate string
 	block, blockStart := 0, 0
@@ -155,7 +174,7 @@ func splitResolutionTrace(root, output string) (string, []resolutionCandidate, e
 					previous = ""
 					continue
 				}
-				moduleCandidate = ""
+				moduleCandidate, sawCandidate = "", false
 				blockStart = len(candidates)
 				if m := start; m != nil {
 					kind, specifier = "module", m[1]
@@ -222,9 +241,21 @@ func splitResolutionTrace(root, output string) (string, []resolutionCandidate, e
 				if err != nil {
 					return "", nil, err
 				}
+				if !sawCandidate && relativeSpecifier(specifier) {
+					facts.add(&facts.RelativeTargets, m[2])
+				}
+				sawCandidate = true
 				// This announcement precedes file probes; only a later skipped
 				// directory establishes where a cold tree fits in their order.
 				moduleCandidate = candidate
+			}
+		}
+		if kind == "module" {
+			if strings.Contains(line, "odule resolution kind") {
+				facts.add(&facts.Kinds, line)
+			}
+			if strings.HasPrefix(line, "'rootDirs' option is set") {
+				facts.RootDirs = true
 			}
 		}
 		if kind != "" {
@@ -269,4 +300,10 @@ func splitResolutionTrace(root, output string) (string, []resolutionCandidate, e
 		return "", nil, fmt.Errorf("unfinished compiler resolution trace for %q", specifier)
 	}
 	return listing.String(), candidates, nil
+}
+
+// relativeSpecifier is tsgo's IsExternalModuleNameRelative: ".", "..", or a path
+// starting with either, or a rooted one.
+func relativeSpecifier(spec string) bool {
+	return spec == "." || spec == ".." || strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/")
 }

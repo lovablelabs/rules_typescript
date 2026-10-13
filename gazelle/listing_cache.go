@@ -26,6 +26,9 @@ var listingCacheDir string
 // listingVerbose is -ts_verbose, for the cache's own reasons.
 var listingVerbose bool
 
+// listingPatchVerify is -ts_listing_patch_verify.
+var listingPatchVerify bool
+
 var listingNames = newListingNames()
 
 // An include glob matches only source and JSON names, so a BUILD file or a
@@ -66,6 +69,12 @@ type cachedListing struct {
 	Root                  string
 	ReadLines, DirDigests []string
 	Sources               map[string]cachedSource
+	// From PatchVersion 2: how the program resolves, which files its include
+	// globs match, and the TypeScript files under its include roots they do not.
+	PatchVersion int
+	Resolution   resolutionFacts
+	Config       *patchConfig
+	Unmatched    []string
 }
 
 type cachedCandidate struct {
@@ -123,44 +132,44 @@ func remember(key string, entry *cachedListing, p *program) *program {
 			Kind: c.kind, Block: c.block, Resolved: c.resolved, Skipped: c.skipped,
 		})
 	}
+	entry.Resolution = p.resolution
 	loadedListings.Store(key, entry)
 	return programFromEntry(entry, p.config)
 }
 
-func loadListing(key, subject string) *program {
+// loadListing is the cached listing for key, and whether it was patched.
+func loadListing(key, subject string) (*program, bool) {
 	if v, ok := loadedListings.Load(key); ok {
 		listingHits.Add(1)
-		return programFromEntry(v.(*cachedListing), subject)
+		return programFromEntry(v.(*cachedListing), subject), false
 	}
 	data, err := os.ReadFile(filepath.Join(listingCacheDir, key))
 	if err != nil {
 		listingAbsent.Add(1)
-		return nil
+		return nil, false
 	}
 	var entry cachedListing
 	if gob.NewDecoder(bytes.NewReader(data)).Decode(&entry) != nil {
 		listingAbsent.Add(1)
-		return nil
+		return nil, false
 	}
 	if listingFingerprint(entry.Reads, entry.Dirs) != entry.Fingerprint {
 		if p := patchListing(&entry, key, subject); p != nil {
 			p = remember(key, &entry, p)
 			// Nothing writes the entry after remember, so encoding it alongside the run is safe.
-			pendingWrites.Add(1)
-			go func() {
-				defer pendingWrites.Done()
+			pendingWrites.Go(func() {
 				writeListing(key, &entry)
-			}()
-			return p
+			})
+			return p, true
 		}
 		if listingVerbose {
 			log.Printf("typescript: listing cache: %s listed again: %v", subject, lastPatchRefusal.Load())
 		}
 		listingStale.Add(1)
-		return nil
+		return nil, false
 	}
 	listingHits.Add(1)
-	return remember(key, &entry, programFromEntry(&entry, subject))
+	return remember(key, &entry, programFromEntry(&entry, subject)), false
 }
 
 func saveListing(key, repoRoot, subject string, args []string, p *program) {
@@ -170,7 +179,7 @@ func saveListing(key, repoRoot, subject string, args []string, p *program) {
 		}
 		return filepath.Join(repoRoot, filepath.FromSlash(rel))
 	}
-	entry := cachedListing{Listing: p.Listing}
+	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution}
 	for _, file := range p.Files {
 		if !strings.HasPrefix(file, embeddedLibs) {
 			entry.Reads = append(entry.Reads, abs(file))
@@ -181,7 +190,7 @@ func saveListing(key, repoRoot, subject string, args []string, p *program) {
 			From: c.from, Specifier: c.specifier, Path: c.path, File: c.file, Metadata: c.metadata,
 			Kind: c.kind, Block: c.block, Resolved: c.resolved, Skipped: c.skipped,
 		})
-		for _, probed := range []string{c.path, c.resolved} {
+		for _, probed := range []string{c.path, c.resolved, c.skipped} {
 			if probed != "" && !strings.HasPrefix(probed, embeddedLibs) {
 				entry.Reads = append(entry.Reads, abs(probed))
 			}
@@ -199,6 +208,8 @@ func saveListing(key, repoRoot, subject string, args []string, p *program) {
 			configs = append(configs, args[i+1])
 		}
 	}
+	var project *tsconfig.Resolved
+	projectDir := ""
 	for _, cfg := range configs {
 		resolved, err := tsconfig.ResolveWithAdmission(cfg, func(path string) error {
 			if !isProjection(path) {
@@ -210,13 +221,14 @@ func saveListing(key, repoRoot, subject string, args []string, p *program) {
 			return
 		}
 		entry.Dirs = append(entry.Dirs, includeRoots(filepath.Dir(cfg), resolved)...)
+		project, projectDir = resolved, filepath.Dir(cfg)
 	}
 	slices.Sort(entry.Reads)
 	entry.Reads = slices.Compact(entry.Reads)
 	slices.Sort(entry.Dirs)
 	entry.Dirs = slices.Compact(entry.Dirs)
 	entry.Fingerprint = listingFingerprint(entry.Reads, entry.Dirs)
-	recordPatchState(&entry, repoRoot)
+	recordPatchState(&entry, repoRoot, project, projectDir)
 	loadedListings.Store(key, &entry)
 	if os.MkdirAll(listingCacheDir, 0o755) != nil {
 		return
