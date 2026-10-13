@@ -26,6 +26,7 @@ load(
 string_flag(
     name = "tools",
     build_setting_default = "",
+    scope = "target",
     values = [
         "",
         "on",

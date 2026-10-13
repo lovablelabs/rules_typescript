@@ -10,11 +10,15 @@ load("//ts/private/actions:lint.bzl", "lint_config")
 
 package(default_visibility = ["//visibility:public"])
 
+# scope = "target": a value of these flags no longer forks the exec tools.
+# Not on the label_flags below: their scope attribute is Bazel 9 only.
+
 # Who emits the .d.ts a dependent reads: tsgo from the full program, on the
 # dependent's path (TsgoDeclare), or oxc syntactically (exports annotated).
 string_flag(
     name = "declarations",
     build_setting_default = "tsgo",
+    scope = "target",
     values = [
         "tsgo",
         "oxc",
@@ -26,6 +30,7 @@ string_flag(
 bool_flag(
     name = "source_map",
     build_setting_default = True,
+    scope = "target",
 )
 
 # A .d.ts.map beside every declaration tsgo emits, so go-to-definition across a
@@ -33,6 +38,7 @@ bool_flag(
 bool_flag(
     name = "declaration_map",
     build_setting_default = False,
+    scope = "target",
 )
 
 # The threads tsgo checks with, and the cpus TsgoCheck and TsgoDeclare declare
@@ -40,12 +46,14 @@ bool_flag(
 int_flag(
     name = "checkers",
     build_setting_default = 0,
+    scope = "target",
 )
 
 # Library checking exposes invalid third-party declarations hidden by skipLibCheck.
 bool_flag(
     name = "lib_check",
     build_setting_default = False,
+    scope = "target",
 )
 
 # The linter every compile runs: ts.lint() in the root MODULE.bazel writes the

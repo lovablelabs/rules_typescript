@@ -33,14 +33,14 @@ flags in `.bazelrc`. Every compiler option is the tsconfig's.
 | `node_modules` | `label` | `None` | The `node_modules` target of the nearest lockfile importer at or above the package: the chain a direct npm dep resolves along. Required when the closure holds an npm package; Gazelle writes it. See [The node_modules Chain](#the-node_modules-chain) |
 | `source_node_modules` | `label_list` | `[]` | Importer chains for retained sources, searched alongside `node_modules` for declared store Files. Nearest links and their types companions keep their original importer paths. |
 
-Emission settings otherwise use build flags, one value for the whole build:
+Emission settings otherwise use build flags, one value for every target-configuration build; tools built for the exec configuration use the defaults below:
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--//ts:declarations` | `string` | `"tsgo"` | Which tool emits `.d.ts`: `"tsgo"` or `"oxc"`. See [Which tool emits the declarations](#which-tool-emits-the-declarations) |
 | `--//ts:source_map` | `bool` | `True` | Emit a `.js.map` next to every `.js`. See [Source and declaration maps](#source-and-declaration-maps) |
 | `--//ts:declaration_map` | `bool` | `False` | Emit a `.d.ts.map` next to every declaration. See [Source and declaration maps](#source-and-declaration-maps) |
-| `--//ts:lib_check` | `bool` | `False` | Turn `skipLibCheck` off for every target. See [Finding a broken declaration](#finding-a-broken-declaration) |
+| `--//ts:lib_check` | `bool` | `False` | Turn `skipLibCheck` off for every target-configuration target. See [Finding a broken declaration](#finding-a-broken-declaration) |
 | `--//ts:checkers` | `int` | `0` | The threads tsgo checks with: `--checkers N` on TsgoCheck and TsgoDeclare, and `cpu:N` on each so Bazel schedules it as N cpus. `0` leaves tsgo's own count, the four the checkout's `tsc -p` runs with. |
 | `--//ts:lint` | `label` | `@lint_config//:lint` | The `lint_config` every target runs as its `TsLint` validation: the one the root module's `ts.lint()` writes. `//ts:no_lint` names no binary, so no target lints. See [Lint](../guides/lint.md) |
 
@@ -612,7 +612,7 @@ resolve reports nothing. What it exports becomes `any`, and the first visible
 error is elsewhere, typically a `TS7006` on a callback parameter in application
 code.
 
-`--//ts:lib_check` turns `skipLibCheck` off for every target in the build, over
+`--//ts:lib_check` turns `skipLibCheck` off for every target-configuration target, over
 whatever the target's tsconfig says:
 
 ```bash
