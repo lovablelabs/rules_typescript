@@ -1,0 +1,15 @@
+load("@gazelle//:def.bzl", "gazelle_generation_test")
+
+# Kept out of //gazelle, which every consumer loads for :typescript: Gazelle
+# 0.54 fails this macro's load on gazelle_timeout_seconds, which 0.47 needs.
+#
+# Each //gazelle:testdata/<case> is a workspace: BUILD.in before the run,
+# BUILD.out and expected{Stderr,ExitCode}.txt after.
+# `UPDATE_SNAPSHOTS=true bazel run` rewrites them.
+gazelle_generation_test(
+    name = "gazelle_golden_test",
+    size = "medium",
+    gazelle_binary = "//gazelle:gazelle_typescript",
+    gazelle_timeout_seconds = 60,
+    test_data = ["//gazelle:golden_testdata"],
+)
