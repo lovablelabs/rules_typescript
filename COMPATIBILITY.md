@@ -22,6 +22,10 @@ with the startup environment variable `BAZEL_TRACK_SOURCE_DIRECTORIES=1`
 without it they warn "dependency checking of directories is unsound" per
 package and detect a changed package by mtime alone.
 
+The `//ts:*` build flags carry `scope = "target"`, so Bazel 9 builds exec
+tools with their defaults. Bazel 7 ignores the attribute and passes a set value
+into the exec configuration; whether Bazel 8 accepts it is unverified.
+
 ## Platforms
 
 | Platform | Status |
