@@ -1,0 +1,342 @@
+package typescript
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mikn/rules_typescript/gazelle/incremental"
+)
+
+// fastPathTree is one package whose sources and test import each other, a
+// second package the first imports from, and a directory no program lists.
+func fastPathTree() map[string]string {
+	return map[string]string{
+		"MODULE.bazel":                 "module(name = \"fast_path\")\n",
+		".bazelignore":                 "node_modules\n",
+		"node_modules/.pnpm/lock.yaml": "lockfileVersion: '9.0'\n",
+		"package.json":                 `{"type":"module"}`,
+		"lib/tsconfig.json":            `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["*.ts"]}`,
+		"lib/x.ts":                     "export const x = 1;\n",
+		"lib/y.ts":                     "export const y = 2;\n",
+		"app/tsconfig.json":            `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"paths":{"@app/*":["./*"]}},"include":["*.ts"]}`,
+		"app/a.ts":                     "import { b } from './b';\nimport { x } from '../lib/x';\nexport const a = b + x;\n",
+		"app/b.ts":                     "export const b = 1;\n",
+		"app/c.ts":                     "import { b } from './b';\nexport const c = b;\n",
+		"app/d.ts":                     "export const d = 4;\n",
+		"app/e.ts":                     "export const e = 5;\n",
+		"app/e.test.ts":                "import { d } from './d';\nexport const t = d;\n",
+		"extra/z.ts":                   "export const z = 6;\n",
+	}
+}
+
+// -ts_verbose is what says a run replayed through the fast path.
+func fastPathReplayed(output string) bool { return strings.Contains(output, "fast path: replayed") }
+
+// primeFastPath generates the tree, then records a run that changed nothing
+// once every input is past the racy window.
+func primeFastPath(t *testing.T, root, cache string, args ...string) {
+	t.Helper()
+	args = append([]string{"-ts_listing_cache=" + cache}, args...)
+	for i := range 2 {
+		if i > 0 {
+			time.Sleep(pastRacyWindow)
+		}
+		if out, err := tsGazelle(t, root, args...); err != nil {
+			t.Fatalf("gazelle %q: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// Every edit the fast path takes must leave the BUILD files and log the full
+// pass would: verify mode decides, runs that pass, and says so when they agree.
+// Without -ts_verbose, whose per-listing edge counts an added import changes.
+func TestFastPath_ReplayedEditsMatchTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	for _, edit := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"a body edit", map[string]string{"app/c.ts": "import { b } from './b';\nexport const c = b + 1;\n"}},
+		{"an import of a source another source of the rule imports", map[string]string{"app/d.ts": "import { b } from './b';\nexport const d = b;\n"}},
+		{"a type-only import of such a source", map[string]string{"app/e.ts": "import type { b } from './b';\nexport const e: typeof b = 5;\n"}},
+		{"the same source imported under another specifier", map[string]string{"app/c.ts": "import { b } from './b';\nimport { b as again } from '../app/b';\nexport const c = b + again;\n"}},
+		{"an import beside a BUILD file rewritten with the same content", map[string]string{
+			"app/d.ts":        "import { b } from './b';\nexport const d = b;\n",
+			"app/BUILD.bazel": "",
+		}},
+		{"two sources importing such a source at once", map[string]string{
+			"app/d.ts": "import { b } from './b';\nexport const d = b;\n",
+			"app/e.ts": "import { b } from './b';\nexport const e = b;\n",
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, fastPathTree())
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			if _, rewrite := edit.files["app/BUILD.bazel"]; rewrite {
+				data, err := os.ReadFile(filepath.Join(root, "app/BUILD.bazel"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				edit.files["app/BUILD.bazel"] = string(data)
+			}
+			writeWorkspace(t, root, edit.files)
+			same := requireAsCacheless(t, root, edit.name)
+			out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
+			if err != nil || !strings.Contains(out, "fast path: verified") {
+				t.Errorf("%s was not replayed and verified: %v\n%s", edit.name, err, out)
+			}
+			same()
+		})
+	}
+}
+
+// -ts_verbose logs each listing's edge count: an added import, which changes it,
+// runs in full there, while a body edit, which changes no listing, still replays.
+func TestFastPath_VerboseRunsReplayOnlyEditsThatKeepTheLog(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, fastPathTree())
+	cache := t.TempDir()
+	primeFastPath(t, root, cache, "-ts_verbose")
+	writeFile(t, filepath.Join(root, "app/c.ts"), "import { b } from './b';\nexport const c = b + 1;\n")
+	if out := recordGazelle(t, root, cache); !fastPathReplayed(out) {
+		t.Errorf("a body edit under -ts_verbose ran the full pass:\n%s", out)
+	}
+	writeFile(t, filepath.Join(root, "app/d.ts"), "import { b } from './b';\nexport const d = b;\n")
+	same := requireAsCacheless(t, root, "an import under -ts_verbose")
+	if out := recordGazelle(t, root, cache); !strings.Contains(out, "fast path: declined ("+declineVerboseLog+")") {
+		t.Errorf("an import under -ts_verbose was not declined for its log:\n%s", out)
+	}
+	same()
+}
+
+// Each edit here can change a BUILD file, or changes what the proof reads; the
+// fast path must decline it with its reason, and the full pass must run.
+func TestFastPath_DeclinedEditsRunTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	for _, edit := range []struct {
+		name, code string
+		do         func(t *testing.T, root string)
+	}{
+		{"a new source", declineInputs, editFile("app/f.ts", "export const f = 6;\n")},
+		{"a deleted source", declineInputs, removeFile("app/e.ts")},
+		{"a BUILD edit", declineInputs, editFile("app/BUILD.bazel", "")},
+		{"a tsconfig edit", declineInputs, editFile("app/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["a.ts","b.ts"]}`)},
+		{"a removed import", declineEdgeRemoved, editFile("app/c.ts", "export const c = 3;\n")},
+		{"an import of a source nothing imports", declineSelectionWitness, editFile("app/d.ts", "import { e } from './e';\nexport const d = e;\n")},
+		{"an import of a source only a test imports", declineWalkWitness, editFile("app/e.ts", "import { d } from './d';\nexport const e = d;\n")},
+		{"an import that lists a new file", declineListingShape, editFile("app/e.ts", "import { z } from '../extra/z';\nexport const e = z;\n")},
+		{"an import of another rule's source", declineWalkConditional, editFile("app/c.ts", "import { b } from './b';\nimport { x } from '../lib/x';\nexport const c = b + x;\n")},
+		{"a second import of the same specifier", declineSpecifierReused, editFile("app/c.ts", "import { b } from './b';\nimport './b';\nexport const c = b;\n")},
+		{"an import through a paths alias", declinePatch, editFile("app/d.ts", "import { b } from '@app/b';\nexport const d = b;\n")},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, fastPathTree())
+			cache := t.TempDir()
+			primeFastPath(t, root, cache, "-ts_verbose")
+			edit.do(t, root)
+			same := requireAsCacheless(t, root, edit.name)
+			out := recordGazelle(t, root, cache)
+			if want := "fast path: declined (" + edit.code + ")"; !strings.Contains(out, want) {
+				t.Errorf("%s: want %q in the log:\n%s", edit.name, want, out)
+			}
+			same()
+		})
+	}
+}
+
+func editFile(rel, body string) func(t *testing.T, root string) {
+	return func(t *testing.T, root string) { writeFile(t, filepath.Join(root, rel), body) }
+}
+
+func removeFile(rel string) func(t *testing.T, root string) {
+	return func(t *testing.T, root string) {
+		if err := os.Remove(filepath.Join(root, rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A record kept while the fast path was off holds no facts to prove an edit
+// with, so the edit runs in full however small it is.
+func TestFastPath_ARecordWithoutFactsIsNeverReplayedForAnEdit(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, fastPathTree())
+	cache := t.TempDir()
+	primeFastPath(t, root, cache, "-ts_verbose", "-ts_fastpath=off")
+	writeFile(t, filepath.Join(root, "app/c.ts"), "import { b } from './b';\nexport const c = b + 1;\n")
+	if out := recordGazelle(t, root, cache); !strings.Contains(out, "fast path: declined ("+declineNoFacts+")") {
+		t.Errorf("a record without facts was not declined for lack of them:\n%s", out)
+	}
+}
+
+// An accepted edit outside the racy window carries the record forward, so it
+// matches the edited tree, and a later edit is proved against the moved record.
+func TestFastPath_AReplayLeavesARecordOfTheEditedTree(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, fastPathTree())
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	for _, edit := range []struct{ file, body string }{
+		{"app/d.ts", "import { b } from './b';\nexport const d = b;\n"},
+		{"app/e.ts", "import { b } from './b';\nexport const e = b;\n"},
+	} {
+		writeFile(t, filepath.Join(root, edit.file), edit.body)
+		time.Sleep(pastRacyWindow)
+		same := requireAsCacheless(t, root, edit.file)
+		if out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify"); err != nil || !strings.Contains(out, "fast path: verified") {
+			t.Fatalf("the edit to %s was not replayed and verified: %v\n%s", edit.file, err, out)
+		}
+		same()
+		matches, err := filepath.Glob(filepath.Join(cache, runRecordName+"-*"))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("want one run record, have %v (%v)", matches, err)
+		}
+		if rec := loadRunRecord(matches[0]); rec == nil || !rec.matches([]string{"BUILD.bazel", "BUILD"}, cache, nil) {
+			t.Errorf("after the edit to %s the record does not stand for the edited tree", edit.file)
+		}
+	}
+}
+
+// -ts_fastpath=verify checks a replay against the full pass: a record whose
+// log the full pass no longer writes fails the run and is removed.
+func TestFastPath_VerifyFailsWhenTheFullPassLogsOtherwise(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, fastPathTree())
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	matches, err := filepath.Glob(filepath.Join(cache, runRecordName+"-*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("want one run record, have %v (%v)", matches, err)
+	}
+	rec := loadRunRecord(matches[0])
+	if rec == nil {
+		t.Fatalf("%s does not load as a run record", matches[0])
+	}
+	rec.stderr = append(rec.stderr, "gazelle: typescript: a line the full pass does not write\n"...)
+	data, err := rec.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, matches[0], string(data))
+	writeFile(t, filepath.Join(root, "app/d.ts"), "import { b } from './b';\nexport const d = b;\n")
+	out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
+	if err == nil || !strings.Contains(out, "fast path: the full pass logs otherwise") {
+		t.Errorf("verify passed a record the full pass contradicts: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(matches[0]); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("verify kept the record it failed: %v", err)
+	}
+}
+
+// The converge cases under -ts_fastpath=verify: whatever the fast path decides
+// on each mutation, the run passes its check and writes what a cache-less run does.
+func TestFastPath_VerifyPassesOnEveryConvergeMutation(t *testing.T) {
+	requireTsgo(t)
+	for _, tc := range convergeCases() {
+		for _, mut := range tc.mutations {
+			t.Run(tc.name+"/"+mut.kind, func(t *testing.T) {
+				t.Parallel()
+				root := writeTree(t, tc.files)
+				cache := t.TempDir()
+				primeFastPath(t, root, cache)
+				applyMutation(t, root, mut)
+				same := requireAsCacheless(t, root, mut.kind)
+				out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
+				if err != nil {
+					t.Fatalf("the verified run failed: %v\n%s", err, out)
+				}
+				same()
+			})
+		}
+	}
+}
+
+// A run that replays its Resolve phase reads none of that phase's inputs; its
+// run record must hold them all the same, or a change to one replays stale.
+func TestFastPath_AReplayedResolvePhaseLeavesItsReadsInTheRunRecord(t *testing.T) {
+	root := t.TempDir()
+	read := filepath.Join(root, "pkg", "package.json")
+	listed := filepath.Join(root, "pkg", "listed.ts")
+	writeFile(t, read, "{}\n")
+	writeFile(t, listed, "export {};\n")
+	saved := runInputs
+	t.Cleanup(func() { runInputs, loadedListings = saved, sync.Map{} })
+	loadedListings = sync.Map{}
+	runInputs = &inputSet{files: map[string]string{}, dirs: map[string]*dirSnapshot{}, key: "k", repoRoot: root}
+	line, _ := fileLine(read)
+	listedLine := incremental.EntryLine(listed)
+	(&resolveRecord{
+		Reads:    []recordedRead{{Path: read, Line: line}},
+		Dirs:     []recordedRead{{Path: filepath.Join(root, "pkg"), Line: "f package.json\n"}},
+		Listings: []recordedListing{{Reads: []string{listed}, ReadLines: []string{listedLine}}},
+	}).noteReplayedReads()
+	rec, why := runInputs.candidate()
+	if why != "" {
+		t.Fatal(why)
+	}
+	for _, want := range []struct {
+		list []string
+		path string
+	}{{rec.files, read}, {rec.dirs, filepath.Join(root, "pkg")}, {rec.reads, listed}} {
+		if !slices.Contains(want.list, want.path) {
+			t.Errorf("the run record lacks %s, which the replayed phase read", want.path)
+		}
+	}
+}
+
+// A run whose Resolve phase replays from the resolve record walks nothing; the
+// run record it keeps must carry that record's facts, complete, or the next
+// edit would be proved against none.
+func TestFastPath_ARunThatReplaysResolveKeepsItsFacts(t *testing.T) {
+	requireTsgo(t)
+	tree := fastPathTree()
+	tree["app/notes.md"] = "a data file\n"
+	root := writeTree(t, tree)
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	resolveRecords, err := filepath.Glob(filepath.Join(cache, resolveRecordName+"-*"))
+	if err != nil || len(resolveRecords) != 1 {
+		t.Fatalf("want one resolve record, have %v (%v)", resolveRecords, err)
+	}
+	before, err := os.Stat(resolveRecords[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A data file's stat is the run record's input but not Resolve's.
+	writeFile(t, filepath.Join(root, "app/notes.md"), "a data file\n")
+	time.Sleep(pastRacyWindow)
+	if out, err := tsGazelle(t, root, "-ts_listing_cache="+cache); err != nil {
+		t.Fatalf("the run after touching a data file failed: %v\n%s", err, out)
+	}
+	if after, err := os.Stat(resolveRecords[0]); err != nil || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("the run after touching a data file resolved again instead of replaying (%v)", err)
+	}
+	runRecords, err := filepath.Glob(filepath.Join(cache, runRecordName+"-*"))
+	if err != nil || len(runRecords) != 1 {
+		t.Fatalf("want one run record, have %v (%v)", runRecords, err)
+	}
+	rec := loadRunRecord(runRecords[0])
+	if rec == nil {
+		t.Fatalf("%s does not load as a run record", runRecords[0])
+	}
+	facts, err := decodeImportFacts(rec.facts)
+	if err != nil || facts.Incomplete != "" || len(facts.Resolves) == 0 || len(facts.Selections) == 0 {
+		t.Fatalf("the replaying run's record holds no complete facts: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "app/d.ts"), "import { b } from './b';\nexport const d = b;\n")
+	same := requireAsCacheless(t, root, "an import after a resolve replay")
+	if out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify"); err != nil || !strings.Contains(out, "fast path: verified") {
+		t.Errorf("an import after a run that replayed Resolve was not replayed and verified: %v\n%s", err, out)
+	}
+	same()
+}

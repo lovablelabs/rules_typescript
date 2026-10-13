@@ -125,6 +125,25 @@ resolves in full. `-ts_resolve_record=verify` resolves anyway and fails, and
 drops the record, unless the BUILD files and log match it;
 `-ts_resolve_record=off` always resolves.
 
+An edit to TypeScript sources alone can still replay the run record, after
+gazelle-rs's import fast path. The record also keeps what its `Resolve` did
+with the listings' edges: which files each selection reached and each walk
+started from, and what each edge from a rule's own sources resolved to. When
+every changed input is an existing source's content, the run patches the
+listings that read it, as a full run does, and replays the record if no
+listing gained or lost a file, root or edge other than the edit's new imports,
+and each new import is relative and resolves, in every selection and walk
+that reads the importer, the way an edge from another source of the same rule
+into the same file already does: to the rule itself, or to a dep the rule
+takes whatever its imports are. A body edit, which leaves the listings as they
+were, replays the same way. Anything else (a new, deleted or renamed file, a
+removed import, an import into a file no source of the rule already imports, a
+BUILD, config or `package.json` edit) runs in full, and `-ts_verbose` names the
+reason. `-ts_fastpath=verify` runs the full pass in `-mode=diff` after
+deciding to replay and fails, and drops the record, unless it changes nothing
+and exits and logs as the record does; `-ts_fastpath=off` never replays an
+edit.
+
 ## The Package Model
 
 A directory is a package when its `tsconfig.json` lists a first-party file: a

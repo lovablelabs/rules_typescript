@@ -40,6 +40,8 @@ type program struct {
 	refused    string
 	manifest   bool
 	bySource   *edgeIndex
+	// key names the cached listing the program was read from; "" when none was.
+	key string
 	// candidateEdge's index of Edges; built on first use, so Edges must not change after.
 	moduleEdges map[[3]string]explainfiles.EdgeKind
 }
@@ -80,6 +82,7 @@ type programStore struct {
 	manifests        map[string]*manifest
 	noLockSaid       bool
 	resolution       *resolveRecorder
+	importFacts      *importFactsRecorder
 }
 
 // Every observed package retains configuration, even without a compiler program;
@@ -933,7 +936,9 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
 	if err == nil {
 		saveListing(id, repoRoot, subject, args, p)
-		if _, kept := loadedListings.Load(id.key); !kept {
+		if _, kept := loadedListings.Load(id.key); kept {
+			p.key = id.key
+		} else {
 			noteIncomplete(subject + " was listed without a read set")
 		}
 	}

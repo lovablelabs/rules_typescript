@@ -486,6 +486,7 @@ func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.
 				s.selectProgram(args.Config, &selected)
 				imps.program = &selected
 			}
+			imps.sources = sources
 			imps.edges = sourceEdges(imps.program.edgesBySource(), sources)
 			imps.candidates = imps.program.ownedCandidates(sources)
 			// Gazelle's index already holds the provisional sources. Derive its
@@ -927,10 +928,12 @@ func defaultVitestConfigFor(args language.GenerateArgs, tc *tsConfig) string {
 type ruleImports struct {
 	program    *program
 	candidates []resolutionCandidate
-	edges      []explainfiles.Edge
-	config     string
-	deps       []string
-	srcDrops   *srcDrops
+	// sources are the files whose edges are edges.
+	sources  []string
+	edges    []explainfiles.Edge
+	config   string
+	deps     []string
+	srcDrops *srcDrops
 }
 
 // The index is shared by every reader and must not be written.
