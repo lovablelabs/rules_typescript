@@ -209,9 +209,12 @@ gazelle_roundtrip_workspace(
     workers_lock = "//tests/workers:pnpm-lock.yaml",
 )
 
+# The groups below with timeout = "eternal" ran 600-915 s of nested Bazel alone
+# from empty nested caches, plus ~190 s of staging, against the 900 s of `long`;
+# the rest stay under 530 s cold.
 bazel_integration_test(
     name = "gazelle_roundtrip_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -227,7 +230,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_borrowed_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -261,7 +264,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_roots_helpers_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -295,7 +298,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_foreign_runtime_scope_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -327,9 +330,12 @@ bazel_integration_test(
     workspace_path = "gazelle_roundtrip",
 )
 
+# The warmup builds, from a cold nested cache, what every other group would
+# otherwise build inside its own 900 s: measured 683-1,001 s for its test
+# targets alone, and 658 s more for //... in the round trip.
 bazel_integration_test(
     name = "gazelle_roundtrip_warmup_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -380,7 +386,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_foreign_runtime_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -397,7 +403,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_scope_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -414,7 +420,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_packages_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -448,7 +454,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_roots_identity_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -465,7 +471,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_roots_runtime_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -482,7 +488,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_transitive_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
@@ -499,7 +505,7 @@ bazel_integration_test(
 
 bazel_integration_test(
     name = "gazelle_roundtrip_runtime_test",
-    timeout = "long",
+    timeout = "eternal",
     bazel_binaries = bazel_binaries,
     bazel_version = bazel_binaries.versions.current,
     data = [
