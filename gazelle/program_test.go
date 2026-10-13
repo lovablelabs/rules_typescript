@@ -86,6 +86,40 @@ func TestProgram_ArgvPinsPrettyFalse(t *testing.T) {
 	}
 }
 
+// A wrong match turns a deliberately left-out .tsx into a failed run, or lets a
+// dropped one pass.
+func TestProgram_TsWildcardMatchesAsTsconfigSpecsDo(t *testing.T) {
+	for _, tc := range []struct {
+		spec    string
+		exclude bool
+		file    string
+		want    bool
+	}{
+		{"**/*", false, "a.tsx", true},
+		{"lib/**/*", false, "lib/a.tsx", true},
+		{"lib/**/*", false, "lib/sub/a.tsx", true},
+		{"lib/**/*.ts", false, "lib/a.tsx", false},
+		{"lib/*", false, "lib/sub/a.tsx", false},
+		{"lib/a.?sx", false, "lib/a.tsx", true},
+		{"lib/a.test.tsx", false, "lib/a.test.tsx", true},
+		{"lib/a+b.tsx", false, "lib/aab.tsx", false},
+		{"lib/**/*", false, "lib/.gen/a.tsx", false},
+		{"lib/*", false, "lib/.hidden.tsx", false},
+		{"lib/?hidden.tsx", false, "lib/.hidden.tsx", false},
+		{"lib/.gen/*", false, "lib/.gen/a.tsx", true},
+		{"lib/*", true, "lib/.hidden.tsx", true},
+		{"lib/**", true, "lib/sub/a.tsx", true},
+		{"lib/gen", true, "lib/gen/a.tsx", true},
+		{"lib/gen", true, "lib/generated/a.tsx", false},
+		{"**/*.tsx", true, "lib/a.tsx", true},
+		{"**/*.tsx", true, "lib/a.ts", false},
+	} {
+		if got := tsWildcard(tc.spec, tc.exclude).MatchString(tc.file); got != tc.want {
+			t.Errorf("tsWildcard(%q, exclude=%v) on %s = %v, want %v", tc.spec, tc.exclude, tc.file, got, tc.want)
+		}
+	}
+}
+
 func TestKeptManifestRootsPreserveDiscoveryIdentityAndCompilerFlags(t *testing.T) {
 	root := t.TempDir()
 	argv := filepath.Join(root, "argv")

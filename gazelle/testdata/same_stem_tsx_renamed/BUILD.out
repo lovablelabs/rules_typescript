@@ -1,0 +1,4 @@
+exports_files(
+    srcs = ["package.json"],
+    visibility = ["//:__subpackages__"],
+)

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -303,6 +304,159 @@ func (s *programStore) reportUnlisted() {
 	}
 	log.Printf("typescript: %d .ts/.tsx/.mts/.cts file%s in no program across %d director%s",
 		total, plural(total, "s"), dirs, plural(dirs, "ies", "y"))
+}
+
+// Fails the run on a .tsx beside a same-named .ts, in a directory this run
+// generates, that one tsconfig program compiles with it: both compile to the
+// same outputs. When the program's include matches both, tsgo keeps one file per
+// path without its extension, .ts over .tsx, and the .tsx silently drops out.
+func (s *programStore) reportStemCollisions() {
+	if s.skipped {
+		return
+	}
+	listedBy := map[string][]*program{}
+	for _, dir := range slices.Sorted(maps.Keys(s.programs)) {
+		if p := s.programs[dir]; !p.manifest {
+			for _, f := range p.Files {
+				listedBy[f] = append(listedBy[f], p)
+			}
+		}
+	}
+	n := 0
+	for _, dir := range slices.Sorted(maps.Keys(s.visited)) {
+		if !s.walked[dir] || s.foreign[dir] != "" {
+			continue
+		}
+		for _, tsx := range slices.Sorted(slices.Values(s.visited[dir])) {
+			stem, ok := strings.CutSuffix(tsx, ".tsx")
+			if !ok {
+				continue
+			}
+			ts := stem + ".ts"
+			for _, p := range listedBy[ts] {
+				var why string
+				switch {
+				case slices.Contains(p.Files, tsx):
+					why = fmt.Sprintf("%s compiles it and %s, which write the same %s outputs; "+
+						"take one out of its files or imports", p.config, ts, path.Base(stem))
+				case len(listedBy[tsx]) == 0 && s.included(p, ts) && s.included(p, tsx):
+					why = fmt.Sprintf("in no program: %s includes it and %s, which write the same %s outputs, "+
+						"and tsgo's include expansion keeps only the .ts; # gazelle:exclude it to leave it out",
+						p.config, ts, path.Base(stem))
+				default:
+					continue
+				}
+				n++
+				log.Printf("typescript: %s: %s", tsx, why)
+				break
+			}
+		}
+	}
+	if n > 0 {
+		log.Fatalf("typescript: %d .tsx file%s collide%s with a same-named .ts; rename one file of each pair",
+			n, plural(n, "s"), plural(n, "", "s"))
+	}
+}
+
+// included reports whether p's tsconfig include matches file and its exclude
+// does not: whether tsgo's wildcard expansion would list it.
+func (s *programStore) included(p *program, file string) bool {
+	root := s.repoConfig.RepoRoot
+	r, err := tsconfig.Resolve(filepath.Join(root, filepath.FromSlash(p.config)))
+	if err != nil {
+		return false
+	}
+	rel := func(dir string) string {
+		d, err := filepath.Rel(root, dir)
+		if err != nil || d == "." {
+			return ""
+		}
+		return filepath.ToSlash(d)
+	}
+	// A spec is relative to the config that set it; ${configDir} is the leaf's.
+	rebase := func(dir, spec string) string {
+		spec = strings.ReplaceAll(spec, "${configDir}", filepath.Join(root, filepath.FromSlash(parentDir(p.config))))
+		if filepath.IsAbs(spec) {
+			return rel(spec)
+		}
+		return path.Join(rel(dir), spec)
+	}
+	includes, includeDir := []string{"**/*"}, filepath.Join(root, filepath.FromSlash(parentDir(p.config)))
+	switch {
+	case r.Include != nil:
+		includes, includeDir = *r.Include, r.IncludeDir
+	case r.Files != nil:
+		return false
+	}
+	matched := false
+	for _, spec := range includes {
+		spec = rebase(includeDir, spec)
+		last := path.Base(spec)
+		if last == "**" {
+			continue
+		}
+		if !strings.ContainsAny(last, ".*?") {
+			spec += "/**/*"
+		}
+		if tsWildcard(spec, false).MatchString(file) {
+			matched = true
+			break
+		}
+	}
+	if !matched || r.Exclude == nil {
+		return matched
+	}
+	for _, spec := range *r.Exclude {
+		if tsWildcard(rebase(r.ExcludeDir, spec), true).MatchString(file) {
+			return false
+		}
+	}
+	return true
+}
+
+// tsWildcard is a tsconfig include or exclude spec over repository paths: **
+// spans directories, * and ? stay within one; an include's wildcards never
+// match a segment's leading dot, and an exclude covers what a matched directory
+// holds.
+func tsWildcard(spec string, exclude bool) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	segments := strings.Split(spec, "/")
+	for i, segment := range segments {
+		switch {
+		case segment == "**" && i == len(segments)-1:
+			b.WriteString(".*")
+			continue
+		case segment == "**" && exclude:
+			b.WriteString("(?:[^/]+/)*")
+			continue
+		case segment == "**":
+			b.WriteString("(?:[^./][^/]*/)*")
+			continue
+		}
+		for j, r := range segment {
+			switch {
+			case r == '*' && j == 0 && !exclude:
+				b.WriteString("(?:[^./][^/]*)?")
+			case r == '*':
+				b.WriteString("[^/]*")
+			case r == '?' && j == 0 && !exclude:
+				b.WriteString("[^./]")
+			case r == '?':
+				b.WriteString("[^/]")
+			default:
+				b.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		if i < len(segments)-1 {
+			b.WriteString("/")
+		}
+	}
+	if exclude {
+		b.WriteString("(?:/.*)?")
+	}
+	b.WriteString("$")
+	return regexp.MustCompile(b.String())
 }
 
 func plural(n int, many string, one ...string) string {

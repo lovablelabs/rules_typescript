@@ -1,0 +1,3 @@
+gazelle: typescript: lib/tsconfig.json extends "../tsconfig.base.json", which no selected ts_config owns; declare an explicit ts_config for the base in its existing BUILD package and add it to //lib:tsconfig's deps under # keep
+gazelle: typescript: lib/a.test.tsx: in no program: lib/tsconfig.json includes it and lib/a.test.ts, which write the same a.test outputs, and tsgo's include expansion keeps only the .ts; # gazelle:exclude it to leave it out
+gazelle: typescript: 1 .tsx file collides with a same-named .ts; rename one file of each pair
