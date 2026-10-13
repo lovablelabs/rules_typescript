@@ -38,13 +38,28 @@ export interface BazelWatcherOptions {
   recursiveWatch?: boolean;
 }
 
+type Closable = Pick<fs.FSWatcher, 'close'>;
+
+/** Node on darwin: libuv runs one FSEvents stream per loop and restarts it for every directory handle. */
+const LIBUV_FSEVENTS = process.platform === 'darwin' && !('Deno' in globalThis);
+
 interface NativeWatch {
   /** Null for a directory its parent's recursive watch already covers. */
-  readonly watcher: fs.FSWatcher | null;
+  readonly watcher: Closable | null;
   readonly onEvent: (filename: string | null) => void;
   readonly dev: number;
   readonly ino: number;
   readonly directory: boolean;
+  /** A link's resolved target outside bazel-bin. A change to it re-watches the link. */
+  readonly target: string | null;
+}
+
+interface TargetDirectory {
+  readonly watcher: fs.FSWatcher;
+  readonly dev: number;
+  readonly ino: number;
+  /** The links into the directory, by target name. */
+  readonly links: Map<string, Set<string>>;
 }
 
 export class BazelWatcher {
@@ -71,6 +86,8 @@ export class BazelWatcher {
   };
 
   private readonly watches = new Map<string, NativeWatch>();
+  private readonly fileStamps = new Map<string, string>();
+  private readonly targetDirectories = new Map<string, TargetDirectory>();
   private attached: WatchSource | null = null;
   private pendingChanges: Set<string> = new Set();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -82,7 +99,7 @@ export class BazelWatcher {
     this.declaredFiles = options.declaredFiles ?? {};
     this.source = options.source ?? null;
     this.debounceMs = options.debounceMs ?? 50;
-    this.recursive = options.recursiveWatch ?? (process.platform === 'darwin' && !('Deno' in globalThis));
+    this.recursive = options.recursiveWatch ?? LIBUV_FSEVENTS;
     const outputs = Object.values(this.declaredFiles).filter((file) => !file.isSource);
     const outside = outputs.filter((file) => bazelPathToModuleId(file.path, this.bazelBin) === null);
     this.roots = [this.bazelBin, ...outside.map((file) => path.dirname(file.path))];
@@ -137,6 +154,7 @@ export class BazelWatcher {
     }
     for (const resource of this.watches.values()) resource.watcher?.close();
     this.watches.clear();
+    this.fileStamps.clear();
     this.skipped.clear();
     this.pendingChanges.clear();
   }
@@ -250,10 +268,11 @@ export class BazelWatcher {
         (!entry?.isSymbolicLink() || filePath === this.bazelBin || this.canFollowDirectorySymlink(filePath)) &&
         !this.skips(filePath, stat, notify);
       const needsWatch = stat !== undefined && (directory || (entry?.isSymbolicLink() && stat.isFile()));
+      const target = needsWatch && !directory ? this.watchedTarget(filePath) : null;
       if (
         previous &&
-        (!needsWatch || previous.dev !== stat?.dev ||
-          previous.ino !== stat?.ino || previous.directory !== directory)
+        (!needsWatch || previous.dev !== stat?.dev || previous.ino !== stat?.ino ||
+          previous.directory !== directory || previous.target !== target)
       ) {
         this.unwatchTree(filePath);
         if (notify && previous.directory) this.enqueueChange(filePath);
@@ -280,12 +299,10 @@ export class BazelWatcher {
         };
         const covered = this.recursive && directory && !entry?.isSymbolicLink() &&
           this.watches.get(path.dirname(filePath))?.directory === true;
-        const watcher = covered ? null : fs.watch(
-          filePath,
-          { persistent: true, recursive: this.recursive && directory },
-          (_event, filename) => this.dispatch(filePath, filename === null ? null : filename.toString(), onEvent),
-        );
-        const resource: NativeWatch = { watcher, onEvent, dev: stat.dev, ino: stat.ino, directory };
+        let watcher: Closable | null = null;
+        if (target !== null) watcher = this.watchLinkTarget(filePath, target, onEvent);
+        else if (!covered) watcher = this.watchPath(filePath, directory, onEvent);
+        const resource: NativeWatch = { watcher, onEvent, dev: stat.dev, ino: stat.ino, directory, target };
         this.watches.set(filePath, resource);
         const current = fs.statSync(filePath, { throwIfNoEntry: false });
         if (current?.dev !== stat.dev || current?.ino !== stat.ino) {
@@ -299,15 +316,112 @@ export class BazelWatcher {
         }
         if (directory) this.scanDirectory(filePath, notify);
       }
-      if (notify && !directory) this.handleFileEvent(filePath);
+      if (!directory) this.reportFile(filePath, stat, notify);
     } catch (err) {
       if (!this.isUnavailableChild(filePath, err)) throw err;
+      this.fileStamps.delete(filePath);
       this.unwatchTree(filePath);
       if (notify) {
         if (previous?.directory) this.enqueueChange(filePath);
         else this.handleFileEvent(filePath);
       }
     }
+  }
+
+  private watchPath(filePath: string, directory: boolean, onEvent: NativeWatch['onEvent']): fs.FSWatcher {
+    return fs.watch(
+      filePath,
+      { persistent: true, recursive: this.recursive && directory },
+      (_event, filename) => this.dispatch(filePath, filename === null ? null : filename.toString(), onEvent),
+    );
+  }
+
+  /**
+   * The target to watch a link through, when it is a file outside bazel-bin: a watch on the link follows it to an
+   * inode whose link count a remote executor's co-located actions change for every input they stage.
+   */
+  private watchedTarget(link: string): string | null {
+    if (LIBUV_FSEVENTS) return null;
+    const target = fs.realpathSync(link);
+    // start() resolves realBin before the first watch. A target inside it is an output Bazel writes in place.
+    return bazelPathToModuleId(target, this.realBin!) === null ? target : null;
+  }
+
+  /** Shares one watch of the target's directory among every link into it. */
+  private watchLinkTarget(link: string, target: string, onEvent: NativeWatch['onEvent']): Closable {
+    const directory = path.dirname(target);
+    let shared = this.targetDirectories.get(directory);
+    if (shared === undefined) {
+      const identity = fs.statSync(directory);
+      let watcher: fs.FSWatcher;
+      try {
+        watcher = fs.watch(directory, { persistent: true }, (_event, filename) => {
+          const name = filename === null ? null : path.basename(filename.toString());
+          this.onTargetDirectoryEvent(directory, created, name);
+        });
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        // inotify needs read access to the directory, not only to the target in it.
+        if (code === 'EACCES' || code === 'EPERM') return this.watchPath(link, false, onEvent);
+        throw err;
+      }
+      const created: TargetDirectory = { watcher, dev: identity.dev, ino: identity.ino, links: new Map() };
+      this.targetDirectories.set(directory, (shared = created));
+    }
+    const owner = shared;
+    const name = path.basename(target);
+    owner.links.set(name, (owner.links.get(name) ?? new Set()).add(link));
+    return {
+      close: () => {
+        const named = owner.links.get(name);
+        named?.delete(link);
+        if (named?.size === 0) owner.links.delete(name);
+        if (owner.links.size > 0 || this.targetDirectories.get(directory) !== owner) return;
+        owner.watcher.close();
+        this.targetDirectories.delete(directory);
+      },
+    };
+  }
+
+  /** Wakes the links an event names. A replaced or removed directory re-attaches every link into it. */
+  private onTargetDirectoryEvent(directory: string, shared: TargetDirectory, name: string | null): void {
+    if (this.targetDirectories.get(directory) !== shared) return;
+    // libuv reports an event on the watched directory itself under the directory's basename.
+    if (name === null || name === path.basename(directory)) {
+      const current = fs.statSync(directory, { throwIfNoEntry: false });
+      if (current?.dev !== shared.dev || current?.ino !== shared.ino) {
+        shared.watcher.close();
+        this.targetDirectories.delete(directory);
+        for (const link of [...shared.links.values()].flatMap((links) => [...links])) {
+          this.unwatchTree(link);
+          this.watchEntry(link, true);
+        }
+        return;
+      }
+    }
+    const names = name === null ? [...shared.links.keys()] : [name];
+    for (const changed of names) {
+      for (const link of [...(shared.links.get(changed) ?? [])]) this.watches.get(link)?.onEvent(null);
+    }
+  }
+
+  /** Stamps a reportable file at every sighting, so the walk at start records what later events compare to. */
+  private reportFile(filePath: string, stat: fs.Stats | undefined, notify: boolean): void {
+    const stamped = stat?.isDirectory() !== true && this.isReportable(filePath);
+    if (stamped && !this.stampChanged(filePath, stat)) return;
+    if (notify) this.handleFileEvent(filePath);
+  }
+
+  /** Leaves out ctime and link count: remote executors hardlink inputs from a cache co-located actions share. */
+  private stampChanged(filePath: string, stat: fs.Stats | undefined): boolean {
+    if (stat === undefined) {
+      this.fileStamps.delete(filePath);
+      return true;
+    }
+    const stamp = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    if (this.fileStamps.get(filePath) === stamp) return false;
+    this.fileStamps.set(filePath, stamp);
+    return true;
   }
 
   /** Routes a recursive watch's nested event to the nearest watched directory above it. */
@@ -364,16 +478,26 @@ export class BazelWatcher {
   }
 
   private unwatchTree(directory: string): void {
+    let tree = false;
     for (const [watched, resource] of this.watches) {
       if (watched === directory || watched.startsWith(directory + path.sep)) {
         this.watches.delete(watched);
         resource.watcher?.close();
+        tree ||= resource.directory;
       }
+    }
+    if (!tree) return;
+    for (const stamped of this.fileStamps.keys()) {
+      if (stamped.startsWith(directory + path.sep)) this.fileStamps.delete(stamped);
     }
   }
 
+  private isReportable(filePath: string): boolean {
+    return filePath.endsWith('.js') || this.isDeclaredFile(filePath);
+  }
+
   private handleFileEvent(absolutePath: string): void {
-    if (!absolutePath.endsWith('.js') && !this.isDeclaredFile(absolutePath)) return;
+    if (!this.isReportable(absolutePath)) return;
     this.enqueueChange(absolutePath);
   }
 
