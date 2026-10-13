@@ -2,10 +2,14 @@ package typescript
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/gob"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/mikn/rules_typescript/gazelle/incremental"
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
@@ -75,6 +80,8 @@ type cachedListing struct {
 	Resolution   resolutionFacts
 	Config       *patchConfig
 	Unmatched    []string
+	// A files-list projection's files, as its key names them.
+	FilesList []string
 }
 
 type cachedCandidate struct {
@@ -85,23 +92,71 @@ type cachedCandidate struct {
 	Resolved, Skipped     string
 }
 
-func listingKey(repoRoot, tsgo, subject string, args []string) string {
+// listingID names a cached listing. A files-list projection's key also names
+// its family, the listings of the same base with other files lists, which a new
+// list is patched from.
+type listingID struct {
+	key, family string
+	files       []string
+}
+
+func listingKey(repoRoot, tsgo, subject string, args []string) listingID {
 	h := sha256.New()
 	fmt.Fprintf(h, "v1\n%s\n%s\n", repoRoot, subject)
 	if info, err := os.Stat(tsgo); err == nil {
 		fmt.Fprintf(h, "tsgo %s %d %d\n", tsgo, info.Size(), info.ModTime().UnixNano())
 	}
+	var id listingID
 	for _, arg := range args {
 		if isProjection(arg) {
 			data, _ := os.ReadFile(arg)
 			// The projection excludes itself by its random name.
 			data = bytes.ReplaceAll(data, []byte(filepath.Base(arg)), []byte(".gazelle-tsconfig-*"))
+			if base, files, ok := splitFilesList(repoRoot, filepath.Dir(arg), data); ok {
+				data, id.files = base, files
+				fmt.Fprintf(h, "files-list projection\n")
+			}
 			fmt.Fprintf(h, "projection %s %s\n", filepath.Dir(arg), data)
 			continue
 		}
 		fmt.Fprintf(h, "arg %s\n", arg)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	id.key = hex.EncodeToString(h.Sum(nil))
+	if id.files != nil {
+		id.family = id.key
+		f := sha256.New()
+		for _, file := range id.files {
+			fmt.Fprintf(f, "%s\n", file)
+		}
+		id.key += "-" + hex.EncodeToString(f.Sum(nil))
+	}
+	return id
+}
+
+// splitFilesList is a projection without its files list, and the list's files
+// relative to repoRoot; ok is false when the projection has no files list.
+func splitFilesList(repoRoot, dir string, data []byte) (base []byte, files []string, ok bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return nil, nil, false
+	}
+	var names []string
+	if json.Unmarshal(fields["files"], &names) != nil || len(names) == 0 {
+		return nil, nil, false
+	}
+	for _, name := range names {
+		rel, err := filepath.Rel(repoRoot, filepath.Join(dir, filepath.FromSlash(name)))
+		if err != nil {
+			return nil, nil, false
+		}
+		files = append(files, filepath.ToSlash(rel))
+	}
+	delete(fields, "files")
+	base, err := json.Marshal(fields)
+	if err != nil {
+		return nil, nil, false
+	}
+	return base, files, true
 }
 
 func isProjection(arg string) bool {
@@ -137,30 +192,23 @@ func remember(key string, entry *cachedListing, p *program) *program {
 	return programFromEntry(entry, p.config)
 }
 
-// loadListing is the cached listing for key, and whether it was patched.
-func loadListing(key, subject string) (*program, bool) {
-	if v, ok := loadedListings.Load(key); ok {
+// loadListing is the cached listing for id, and whether it was patched.
+func loadListing(id listingID, subject string) (*program, bool) {
+	if v, ok := loadedListings.Load(id.key); ok {
 		listingHits.Add(1)
 		return programFromEntry(v.(*cachedListing), subject), false
 	}
-	data, err := os.ReadFile(filepath.Join(listingCacheDir, key))
-	if err != nil {
-		listingAbsent.Add(1)
-		return nil, false
+	entry, err := readListing(filepath.Join(listingCacheDir, id.key))
+	if errors.Is(err, fs.ErrNotExist) && id.family != "" {
+		return patchFromFamily(id, subject)
 	}
-	var entry cachedListing
-	if gob.NewDecoder(bytes.NewReader(data)).Decode(&entry) != nil {
+	if entry == nil {
 		listingAbsent.Add(1)
 		return nil, false
 	}
 	if listingFingerprint(entry.Reads, entry.Dirs) != entry.Fingerprint {
-		if p := patchListing(&entry, key, subject); p != nil {
-			p = remember(key, &entry, p)
-			// Nothing writes the entry after remember, so encoding it alongside the run is safe.
-			pendingWrites.Go(func() {
-				writeListing(key, &entry)
-			})
-			return p, true
+		if p := patchListing(entry, subject, id.files); p != nil {
+			return keepPatched(id, entry, p), true
 		}
 		if listingVerbose {
 			log.Printf("typescript: listing cache: %s listed again: %v", subject, lastPatchRefusal.Load())
@@ -169,17 +217,131 @@ func loadListing(key, subject string) (*program, bool) {
 		return nil, false
 	}
 	listingHits.Add(1)
-	return remember(key, &entry, programFromEntry(&entry, subject)), false
+	return remember(id.key, entry, programFromEntry(entry, subject)), false
 }
 
-func saveListing(key, repoRoot, subject string, args []string, p *program) {
+func keepPatched(id listingID, entry *cachedListing, p *program) *program {
+	p = remember(id.key, entry, p)
+	// Nothing writes the entry after remember, so encoding it alongside the run is safe.
+	pendingWrites.Go(func() {
+		writeListing(id.key, entry)
+	})
+	return p
+}
+
+// patchFromFamily patches a files list with no entry of its own from its
+// family's entries, nearest first, until one patches.
+func patchFromFamily(id listingID, subject string) (*program, bool) {
+	entries := familyEntries(id)
+	if len(entries) == 0 {
+		listingAbsent.Add(1)
+		return nil, false
+	}
+	for _, entry := range entries {
+		if p := patchListing(entry, subject, id.files); p != nil {
+			return keepPatched(id, entry, p), true
+		}
+		if listingVerbose {
+			log.Printf("typescript: listing cache: %s not patched from a files list of %d: %v", subject, len(entry.FilesList), lastPatchRefusal.Load())
+		}
+	}
+	if listingVerbose {
+		log.Printf("typescript: listing cache: %s listed again: no entry of its files list's family patched", subject)
+	}
+	listingStale.Add(1)
+	return nil, false
+}
+
+func readListing(file string) (*cachedListing, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var entry cachedListing
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&entry); err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	return &entry, nil
+}
+
+// familyCandidates bounds how many of a family's latest entries a new files
+// list decodes and tries.
+const familyCandidates = 4
+
+// familyEntries are the latest entries of id's family, those whose files list
+// differs from id's in TypeScript files alone first, then by fewest files apart.
+func familyEntries(id listingID) []*cachedListing {
+	dirEntries, err := os.ReadDir(listingCacheDir)
+	if err != nil {
+		return nil
+	}
+	type member struct {
+		name    string
+		modTime time.Time
+	}
+	var members []member
+	for _, d := range dirEntries {
+		rest, ok := strings.CutPrefix(d.Name(), id.family+"-")
+		// A name with a dot is an entry still being written.
+		if !ok || strings.Contains(rest, ".") {
+			continue
+		}
+		if info, err := d.Info(); err == nil {
+			members = append(members, member{d.Name(), info.ModTime()})
+		}
+	}
+	slices.SortFunc(members, func(a, b member) int { return b.modTime.Compare(a.modTime) })
+	want := setOf(id.files)
+	type candidate struct {
+		entry    *cachedListing
+		scripts  bool
+		distance int
+	}
+	var candidates []candidate
+	for _, m := range members[:min(len(members), familyCandidates)] {
+		entry, err := readListing(filepath.Join(listingCacheDir, m.name))
+		if err != nil || entry.FilesList == nil {
+			continue
+		}
+		c := candidate{entry: entry}
+		have := setOf(entry.FilesList)
+		for _, pair := range [][2]map[string]bool{{want, have}, {have, want}} {
+			for f := range pair[0] {
+				if !pair[1][f] {
+					c.distance++
+					c.scripts = c.scripts || rootStem(f) == ""
+				}
+			}
+		}
+		if listingVerbose {
+			log.Printf("typescript: listing cache: files list of %d: family entry %s of %d files, %d apart", len(want), m.name, len(entry.FilesList), c.distance)
+		}
+		candidates = append(candidates, c)
+	}
+	slices.SortStableFunc(candidates, func(a, b candidate) int {
+		if a.scripts != b.scripts {
+			if a.scripts {
+				return 1
+			}
+			return -1
+		}
+		return cmp.Compare(a.distance, b.distance)
+	})
+	entries := make([]*cachedListing, len(candidates))
+	for i, c := range candidates {
+		entries[i] = c.entry
+	}
+	return entries
+}
+
+func saveListing(id listingID, repoRoot, subject string, args []string, p *program) {
 	abs := func(rel string) string {
 		if filepath.IsAbs(rel) {
 			return filepath.Clean(rel)
 		}
 		return filepath.Join(repoRoot, filepath.FromSlash(rel))
 	}
-	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution}
+	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution, FilesList: id.files}
 	for _, file := range p.Files {
 		if !strings.HasPrefix(file, embeddedLibs) {
 			entry.Reads = append(entry.Reads, abs(file))
@@ -220,20 +382,23 @@ func saveListing(key, repoRoot, subject string, args []string, p *program) {
 		if err != nil {
 			return
 		}
-		entry.Dirs = append(entry.Dirs, includeRoots(filepath.Dir(cfg), resolved)...)
 		project, projectDir = resolved, filepath.Dir(cfg)
 	}
 	slices.Sort(entry.Reads)
 	entry.Reads = slices.Compact(entry.Reads)
+	// A projection's include replaces its base's, so only the last config's globs enumerate.
+	if project != nil {
+		entry.Dirs = includeRoots(projectDir, project)
+	}
 	slices.Sort(entry.Dirs)
 	entry.Dirs = slices.Compact(entry.Dirs)
 	entry.Fingerprint = listingFingerprint(entry.Reads, entry.Dirs)
 	recordPatchState(&entry, repoRoot, project, projectDir)
-	loadedListings.Store(key, &entry)
+	loadedListings.Store(id.key, &entry)
 	if os.MkdirAll(listingCacheDir, 0o755) != nil {
 		return
 	}
-	writeListing(key, &entry)
+	writeListing(id.key, &entry)
 }
 
 // includeRoots are the directories a config's include globs enumerate: each

@@ -473,6 +473,8 @@ type patcher struct {
 	specOwners  map[string][]string
 	implicit    map[string]map[string]int
 	entering    []string
+	// The files list a files-list projection now names.
+	filesList []string
 	// Reads the patch adds to the listing's, and files it drops from it.
 	newReads, dropped []string
 	refusal           string
@@ -500,14 +502,15 @@ func (t *patcher) rel(abs string) (string, bool) {
 	return filepath.ToSlash(rel), true
 }
 
-// patchListing updates a listing staled by import edits and added or deleted
-// files, keeping every resolution whose probes still find what they found.
-func patchListing(entry *cachedListing, key, subject string) *program {
+// patchListing updates a listing staled by import edits, added or deleted
+// files and a changed files list, keeping every resolution whose probes still
+// find what they found.
+func patchListing(entry *cachedListing, subject string, filesList []string) *program {
 	if entry.PatchVersion != patchStateVersion || entry.Sources == nil || entry.Config == nil ||
 		len(entry.ReadLines) != len(entry.Reads) || len(entry.DirDigests) != len(entry.Dirs) {
 		return refuse("no patch state")
 	}
-	t := &patcher{entry: entry, root: entry.Root, dirty: map[int]bool{}, scopes: map[string]string{}, nms: map[string]string{}}
+	t := &patcher{entry: entry, root: entry.Root, filesList: filesList, dirty: map[int]bool{}, scopes: map[string]string{}, nms: map[string]string{}}
 	p := t.patch(subject)
 	if p == nil {
 		return refuse(t.refusal)
@@ -605,6 +608,14 @@ func (t *patcher) patch(subject string) *program {
 			return nil
 		}
 	}
+	if !slices.Equal(t.filesList, entry.FilesList) {
+		changed = true
+		added, removed, ok := t.filesListChanges()
+		if !ok {
+			return nil
+		}
+		addedRoots, removedRoots = append(addedRoots, added...), append(removedRoots, removed...)
+	}
 	if !changed {
 		t.fail("nothing changed")
 		return nil
@@ -612,7 +623,7 @@ func (t *patcher) patch(subject string) *program {
 	roots := setOf(p.Roots)
 	for f := range deleted {
 		if roots[f] && !slices.Contains(removedRoots, f) {
-			t.fail("a deleted root is not one the include globs matched")
+			t.fail("a deleted root is not one the include globs or files list dropped")
 			return nil
 		}
 	}
@@ -1329,6 +1340,7 @@ func (t *patcher) commit(dirsChanged bool, unmatched []string) {
 	if dirsChanged {
 		entry.Unmatched = unmatched
 	}
+	entry.FilesList = t.filesList
 	entry.Fingerprint = listingFingerprint(entry.Reads, entry.Dirs)
 }
 
@@ -1392,6 +1404,58 @@ func (t *patcher) rootChanges() (added, removed, unmatched []string, ok bool) {
 		}
 	}
 	return added, removed, unmatched, true
+}
+
+// filesListChanges is the roots a files-list projection gained and lost; tsgo
+// roots a files list's files and nothing else, so the listing's roots must be its old list.
+func (t *patcher) filesListChanges() (added, removed []string, ok bool) {
+	was, now, roots := setOf(t.entry.FilesList), setOf(t.filesList), setOf(t.p.Roots)
+	// tsgo roots only the TypeScript files of a list; the rest, a script without
+	// allowJs, stays out of the program with a diagnostic of its own.
+	rooted := maps.Clone(was)
+	maps.DeleteFunc(rooted, func(f string, _ bool) bool { return rootStem(f) == "" })
+	switch {
+	case t.entry.FilesList == nil || t.filesList == nil:
+		return nil, nil, t.fail("only a files list's listing patches to another files list")
+	case len(t.entry.Dirs) > 0:
+		return nil, nil, t.fail("a files-list projection has include roots")
+	case !maps.Equal(rooted, roots):
+		var differ []string
+		for f := range rooted {
+			if !roots[f] {
+				differ = append(differ, f+" (listed, not a root)")
+			}
+		}
+		for f := range roots {
+			if !rooted[f] {
+				differ = append(differ, f+" (a root, not listed)")
+			}
+		}
+		slices.Sort(differ)
+		return nil, nil, t.fail("the listing's roots are not its files list, such as " + strings.Join(differ[:min(3, len(differ))], ", "))
+	}
+	for _, f := range slices.Sorted(maps.Keys(now)) {
+		if was[f] {
+			continue
+		}
+		if !patchableSource(f) || rootStem(f) == "" {
+			return nil, nil, t.fail("a root the files list gained is not a TypeScript source: " + f)
+		}
+		if info, err := lstatInput(t.abs(f)); err != nil || !info.Mode().IsRegular() {
+			return nil, nil, t.fail("a root the files list gained is not a regular file")
+		}
+		added = append(added, f)
+	}
+	for _, f := range slices.Sorted(maps.Keys(was)) {
+		switch {
+		case now[f]:
+		case !rooted[f]:
+			return nil, nil, t.fail("a file the files list lost was not a root, and its diagnostic goes with it")
+		default:
+			removed = append(removed, f)
+		}
+	}
+	return added, removed, true
 }
 
 func setOf(list []string) map[string]bool {
