@@ -1,0 +1,780 @@
+package typescript
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"maps"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/bazelbuild/bazel-gazelle/config"
+	"github.com/bazelbuild/bazel-gazelle/walk"
+	"github.com/bazelbuild/rules_go/go/runfiles"
+
+	"github.com/mikn/rules_typescript/gazelle/incremental"
+)
+
+// runRecordMode is -ts_run_record: on, verify or off.
+var runRecordMode = "on"
+
+const (
+	runRecordName  = "run-record"
+	runRecordMagic = "rules_typescript gazelle run record v2"
+	// Set by the run that spawns a recording run: where it leaves its candidate.
+	runRecordCandidateEnv = "RULES_TYPESCRIPT_GAZELLE_RUN_RECORD_CANDIDATE"
+	// git's racy-clean rule: a stamp this close to the run's start may hide a
+	// same-size rewrite within one timestamp tick.
+	racyWindow = 2 * time.Second
+)
+
+var processStart = time.Now()
+
+// runInputs collects what a recording run reads; nil in any other run.
+var runInputs = func() *inputSet {
+	if os.Getenv(runRecordCandidateEnv) == "" {
+		return nil
+	}
+	return &inputSet{files: map[string]string{}, dirs: map[string]*dirSnapshot{}}
+}()
+
+// inputSet holds each input's line as the run first saw it.
+type inputSet struct {
+	mu         sync.Mutex
+	files      map[string]string
+	dirs       map[string]*dirSnapshot
+	pending    sync.WaitGroup
+	incomplete string
+	key        string
+	repoRoot   string
+	cache      string
+	buildNames []string
+}
+
+type dirSnapshot struct {
+	abs, line string
+	err       error
+}
+
+var snapshotSlots = make(chan struct{}, 4*runtime.GOMAXPROCS(0))
+
+func noteRead(path string) {
+	in := runInputs
+	if in == nil {
+		return
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	in.mu.Lock()
+	_, seen := in.files[path]
+	in.mu.Unlock()
+	if seen {
+		return
+	}
+	line, _ := fileLine(path)
+	in.mu.Lock()
+	if _, seen := in.files[path]; !seen {
+		in.files[path] = line
+	}
+	in.mu.Unlock()
+}
+
+func noteIncomplete(reason string) {
+	if in := runInputs; in != nil {
+		in.mu.Lock()
+		if in.incomplete == "" {
+			in.incomplete = reason
+		}
+		in.mu.Unlock()
+	}
+}
+
+func statInput(path string) (fs.FileInfo, error) {
+	noteRead(path)
+	return os.Stat(path)
+}
+
+func readInput(path string) ([]byte, error) {
+	noteRead(path)
+	return os.ReadFile(path)
+}
+
+// recordedDirInfo is walk.GetDirInfo for a directory the run depends on. The
+// snapshot is taken off the walk's goroutine, right after Gazelle read it.
+func recordedDirInfo(rel string) (walk.DirInfo, error) {
+	info, err := walk.GetDirInfo(rel)
+	in := runInputs
+	if in == nil || err != nil || in.key == "" {
+		return info, err
+	}
+	abs := filepath.Join(in.repoRoot, filepath.FromSlash(rel))
+	if inCacheDir(abs, in.cache) {
+		return info, err
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if _, seen := in.dirs[rel]; !seen {
+		snap := &dirSnapshot{abs: abs}
+		in.dirs[rel] = snap
+		in.pending.Go(func() {
+			snapshotSlots <- struct{}{}
+			snap.line, _, snap.err = dirLine(abs, in.buildNames, in.cache)
+			<-snapshotSlots
+		})
+	}
+	return info, err
+}
+
+func inCacheDir(path, dir string) bool {
+	return dir != "" && (path == dir || strings.HasPrefix(path, dir+string(filepath.Separator)))
+}
+
+// runRecord names its inputs; digest is over their lines, walkDigest over
+// the walked directories' alone. exit, stdout and stderr are the recorded
+// run's, which a replay writes back.
+type runRecord struct {
+	key, digest, walkDigest string
+	// dirs are walked, files the extension opened, reads and roots what the
+	// listings stat'ed and enumerated, judged as the listing cache judges them.
+	dirs, files, reads, roots []string
+	exit                      int
+	stdout, stderr            []byte
+}
+
+func (r *runRecord) lists() []*[]string { return []*[]string{&r.dirs, &r.files, &r.reads, &r.roots} }
+
+func (r *runRecord) encode() ([]byte, error) {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest,
+		len(r.dirs), len(r.files), len(r.reads), len(r.roots), r.exit, len(r.stdout), len(r.stderr))
+	for _, list := range r.lists() {
+		for _, p := range *list {
+			if strings.ContainsAny(p, "\n\r") {
+				return nil, fmt.Errorf("an input path holds a line break: %q", p)
+			}
+			b.WriteString(p)
+			b.WriteByte('\n')
+		}
+	}
+	b.Write(r.stdout)
+	b.Write(r.stderr)
+	return b.Bytes(), nil
+}
+
+func loadRunRecord(file string) *runRecord {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	line := func() (string, bool) {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			return "", false
+		}
+		l := string(data[:i])
+		data = data[i+1:]
+		return l, true
+	}
+	var header [6]string
+	for i := range header {
+		var ok bool
+		if header[i], ok = line(); !ok {
+			return nil
+		}
+	}
+	if header[0] != runRecordMagic {
+		return nil
+	}
+	r := &runRecord{key: header[1], digest: header[2], walkDigest: header[3]}
+	numbers := func(text string, n int) []int {
+		fields := strings.Fields(text)
+		if len(fields) != n {
+			return nil
+		}
+		out := make([]int, n)
+		for i, f := range fields {
+			v, err := strconv.Atoi(f)
+			if err != nil || v < 0 {
+				return nil
+			}
+			out[i] = v
+		}
+		return out
+	}
+	counts, tail := numbers(header[4], len(r.lists())), numbers(header[5], 3)
+	if counts == nil || tail == nil {
+		return nil
+	}
+	for i, list := range r.lists() {
+		for range counts[i] {
+			p, ok := line()
+			if !ok {
+				return nil
+			}
+			*list = append(*list, p)
+		}
+	}
+	if tail[1] > len(data) || len(data)-tail[1] != tail[2] {
+		return nil
+	}
+	r.exit, r.stdout, r.stderr = tail[0], data[:tail[1]], data[tail[1]:]
+	return r
+}
+
+func writeAtomically(file string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), file); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return nil
+}
+
+// inputLines are the lines of a record's inputs, in its order.
+type inputLines struct{ dirs, files, reads, roots []string }
+
+func (r *runRecord) digests(l inputLines) (digest, walkDigest string) {
+	walkDigest = digestOfWalk(r.dirs, l.dirs)
+	h := sha256.New()
+	fmt.Fprintf(h, "walk %s\n", walkDigest)
+	for i, file := range r.files {
+		fmt.Fprintf(h, "file %s %s\n", file, l.files[i])
+	}
+	for i, read := range r.reads {
+		fmt.Fprintf(h, "read %s %s\n", read, l.reads[i])
+	}
+	for i, root := range r.roots {
+		fmt.Fprintf(h, "names %s %s\n", root, l.roots[i])
+	}
+	return hex.EncodeToString(h.Sum(nil)), walkDigest
+}
+
+func digestOfWalk(dirs, lines []string) string {
+	h := sha256.New()
+	for i, dir := range dirs {
+		fmt.Fprintf(h, "%s\n%s\n", dir, lines[i])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// newest is the latest change stamp among inputs, for the racy-clean rule.
+type newest struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (n *newest) see(t time.Time) {
+	if n == nil {
+		return
+	}
+	n.mu.Lock()
+	if t.After(n.at) {
+		n.at = t
+	}
+	n.mu.Unlock()
+}
+
+func dirLines(dirs, buildNames []string, skip string, stamps *newest) ([]string, error) {
+	lines := make([]string, len(dirs))
+	errs := make([]error, len(dirs))
+	parallel(len(dirs), func(i int) {
+		var t time.Time
+		lines[i], t, errs[i] = dirLine(dirs[i], buildNames, skip)
+		stamps.see(t)
+	})
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return lines, nil
+}
+
+func fileLines(files []string, stamps *newest) []string {
+	lines := make([]string, len(files))
+	parallel(len(files), func(i int) {
+		var t time.Time
+		lines[i], t = fileLine(files[i])
+		stamps.see(t)
+	})
+	return lines
+}
+
+func listingReadLines(reads []string, stamps *newest) []string {
+	lines := make([]string, len(reads))
+	parallel(len(reads), func(i int) {
+		lines[i] = (*incremental.StatCache)(nil).Line(reads[i])
+		if stamps != nil {
+			_, t := fileLine(reads[i])
+			stamps.see(t)
+		}
+	})
+	return lines
+}
+
+func rootLines(roots []string) []string {
+	names := newListingNames()
+	lines := make([]string, len(roots))
+	parallel(len(roots), func(i int) { lines[i] = names.Digest(roots[i]) })
+	return lines
+}
+
+func parallel(n int, do func(i int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(n, 4*runtime.GOMAXPROCS(0)) {
+		wg.Go(func() {
+			for i := int(next.Add(1) - 1); i < n; i = int(next.Add(1) - 1) {
+				do(i)
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// dirLine names every entry of dir, and stamps is the latest change among
+// its files. A projection lives only inside one listing and the listing cache
+// outside the inputs, so neither counts; a subdirectory counts by name.
+func dirLine(dir string, buildNames []string, skip string) (string, time.Time, error) {
+	var stamp time.Time
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "absent", stamp, nil
+	}
+	if err != nil {
+		return "", stamp, err
+	}
+	var b strings.Builder
+	for _, entry := range entries {
+		name := entry.Name()
+		file := filepath.Join(dir, name)
+		if isProjection(name) || file == skip {
+			continue
+		}
+		if entry.IsDir() {
+			fmt.Fprintf(&b, "d %s\n", name)
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			fmt.Fprintf(&b, "gone %s\n", name)
+			continue
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			target, _ := os.Readlink(file)
+			fmt.Fprintf(&b, "l %s -> %s %s: ", name, target, statLine(info))
+			stamp = later(stamp, changed(info))
+			if info, err = os.Stat(file); err != nil {
+				b.WriteString("dangling\n")
+				continue
+			}
+		}
+		switch {
+		case info.IsDir():
+			fmt.Fprintf(&b, "d %s\n", name)
+			continue
+		case info.Mode().IsRegular() && slices.Contains(buildNames, name):
+			data, err := os.ReadFile(file)
+			if err != nil {
+				return "", stamp, err
+			}
+			fmt.Fprintf(&b, "b %s %o %x\n", name, info.Mode(), sha256.Sum256(data))
+		default:
+			fmt.Fprintf(&b, "f %s %s\n", name, statLine(info))
+		}
+		stamp = later(stamp, changed(info))
+	}
+	return b.String(), stamp, nil
+}
+
+// A directory read is a probe of its existence; its stamp moves with every
+// projection written into it. A link is read through, so its target counts.
+func fileLine(file string) (string, time.Time) {
+	info, err := os.Lstat(file)
+	switch {
+	case err != nil:
+		return "absent", time.Time{}
+	case info.IsDir():
+		return "dir", time.Time{}
+	case info.Mode()&fs.ModeSymlink == 0:
+		return statLine(info), changed(info)
+	}
+	target, _ := os.Readlink(file)
+	line := statLine(info) + " -> " + target
+	switch to, err := os.Stat(file); {
+	case err != nil:
+		return line + " dangling", changed(info)
+	case to.IsDir():
+		return line + " dir", changed(info)
+	default:
+		return line + " " + statLine(to), later(changed(info), changed(to))
+	}
+}
+
+func statLine(info fs.FileInfo) string {
+	var ino uint64
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		ino = uint64(st.Ino)
+	}
+	return fmt.Sprintf("%o %d %d %d %d", info.Mode(), info.Size(), info.ModTime().UnixNano(), changeTime(info).UnixNano(), ino)
+}
+
+// changed is the later of a file's mtime and ctime.
+func changed(info fs.FileInfo) time.Time { return later(info.ModTime(), changeTime(info)) }
+
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// runRecordKey is what selects the inputs rather than what they hold.
+func runRecordKey(fs *flag.FlagSet, c *config.Config) string {
+	h := sha256.New()
+	exe, _ := os.Executable()
+	fmt.Fprintf(h, "%s\nroot %s\nwd %s\nfix %t\nbuild %q\nTSGO %q\nexe %s\n", runRecordMagic, c.RepoRoot, c.WorkDir, c.ShouldFix, c.ValidBuildFileNames, os.Getenv("TSGO"), exe)
+	fs.VisitAll(func(f *flag.Flag) {
+		if f.Name != "ts_run_record" {
+			fmt.Fprintf(h, "flag %s=%q\n", f.Name, f.Value.String())
+		}
+	})
+	for _, arg := range fs.Args() {
+		fmt.Fprintf(h, "arg %q\n", arg)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// A replay stands only for a full, recursive fix or diff run of a binary
+// whose one language is this one, reading and writing BUILD files in the tree
+// and writing nothing else: another language's inputs are not recorded.
+func runRecordApplies(fs *flag.FlagSet, c *config.Config, fullWalk bool) bool {
+	if runRecordMode == "off" || listingCacheDir == "" || !fullWalk || c.ReadBuildFilesDir != "" || c.WriteBuildFilesDir != "" {
+		return false
+	}
+	for name := range c.Exts {
+		if name != languageName && !strings.HasPrefix(name, "_") {
+			return false
+		}
+	}
+	value := func(name string) string {
+		if f := fs.Lookup(name); f != nil {
+			return f.Value.String()
+		}
+		return ""
+	}
+	if mode := value("mode"); mode != "fix" && mode != "diff" {
+		return false
+	}
+	return value("patch") == "" && value("cpuprofile") == "" && value("memprofile") == ""
+}
+
+// gateOnRunRecord exits when the record replays. Otherwise the full pass runs
+// as a child, which gathers a candidate record, and this process exits with
+// the child's status; it returns only in the process that does the work.
+func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
+	switch runRecordMode {
+	case "on", "verify", "off":
+	default:
+		return fmt.Errorf("-ts_run_record=%q: want on, verify or off", runRecordMode)
+	}
+	if in := runInputs; in != nil {
+		cache, _ := filepath.Abs(listingCacheDir)
+		in.mu.Lock()
+		in.key, in.repoRoot, in.cache, in.buildNames = runRecordKey(fs, c), c.RepoRoot, cache, c.ValidBuildFileNames
+		in.mu.Unlock()
+		if exe, err := os.Executable(); err == nil {
+			noteRead(exe)
+		}
+		// Beside the listings' own reads: what an install rewrites.
+		noteRead(filepath.Join(c.RepoRoot, "node_modules", ".modules.yaml"))
+		noteRead(filepath.Join(c.RepoRoot, "node_modules", ".pnpm", "lock.yaml"))
+		return nil
+	}
+	if !runRecordApplies(fs, c, fullWalk) {
+		return nil
+	}
+	cache, err := filepath.Abs(listingCacheDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		return err
+	}
+	key := runRecordKey(fs, c)
+	file := filepath.Join(cache, runRecordName+"-"+key[:16])
+	if rec := loadRunRecord(file); rec != nil && rec.key == key && rec.matches(c.ValidBuildFileNames, cache, nil) {
+		if runRecordMode == "verify" {
+			os.Exit(verifyReplay(fs, file, rec))
+		}
+		os.Stdout.Write(rec.stdout)
+		os.Stderr.Write(rec.stderr)
+		if listingVerbose {
+			log.Print("typescript: run record: replayed; every input is unchanged since a run that changed nothing")
+		}
+		os.Exit(rec.exit)
+	}
+	candidate := fmt.Sprintf("%s.candidate.%d", file, os.Getpid())
+	code, stdout, stderr := runSelf(os.Args[1:], runRecordCandidateEnv+"="+candidate)
+	if code == 0 {
+		promoteRunRecord(candidate, file, key, c.ValidBuildFileNames, cache, stdout, stderr)
+	}
+	os.Remove(candidate)
+	os.Exit(code)
+	return nil
+}
+
+// matches compares the walk first: most edits change it, and it is the
+// smaller part to read.
+func (r *runRecord) matches(buildNames []string, cache string, stamps *newest) bool {
+	dirs, err := dirLines(r.dirs, buildNames, cache, stamps)
+	if err != nil || digestOfWalk(r.dirs, dirs) != r.walkDigest {
+		return false
+	}
+	digest, _ := r.digests(inputLines{dirs, fileLines(r.files, stamps), listingReadLines(r.reads, stamps), rootLines(r.roots)})
+	return digest == r.digest
+}
+
+// The candidate holds the inputs as the run read them. They still hold only
+// if nothing moved while it ran and it wrote no BUILD file; no input may be
+// stamped inside the racy window; and the run could have written every BUILD
+// file it wanted, since Gazelle logs a failed write and still exits 0.
+func promoteRunRecord(candidate, file, key string, buildNames []string, cache string, stdout, stderr []byte) {
+	rec := loadRunRecord(candidate)
+	if rec == nil || rec.key != key {
+		return
+	}
+	refuse := func(why string) {
+		if listingVerbose {
+			log.Printf("typescript: run record: not kept; %s", why)
+		}
+	}
+	stamps := &newest{}
+	if !rec.matches(buildNames, cache, stamps) {
+		refuse("an input moved or a BUILD file was written during the run")
+		return
+	}
+	if !stamps.at.Before(processStart.Add(-racyWindow)) {
+		refuse("an input changed within " + racyWindow.String() + " of the run's start")
+		return
+	}
+	var unwritable atomic.Bool
+	parallel(len(rec.dirs), func(i int) {
+		paths := []string{rec.dirs[i]}
+		for _, name := range buildNames {
+			if _, err := os.Lstat(filepath.Join(rec.dirs[i], name)); err == nil {
+				paths = append(paths, filepath.Join(rec.dirs[i], name))
+			}
+		}
+		for _, p := range paths {
+			if syscall.Access(p, 2) != nil {
+				unwritable.Store(true)
+			}
+		}
+	})
+	if unwritable.Load() {
+		refuse("a walked directory or BUILD file is not writable")
+		return
+	}
+	rec.exit, rec.stdout, rec.stderr = 0, stdout, stderr
+	data, err := rec.encode()
+	if err == nil {
+		err = writeAtomically(file, data)
+	}
+	if err != nil {
+		log.Printf("typescript: run record: %v", err)
+	}
+}
+
+// writeRunCandidate runs at the end of the last callback before Gazelle
+// writes; the spawning process keeps the candidate only if this run exits 0.
+func writeRunCandidate() {
+	in := runInputs
+	if in == nil || in.key == "" {
+		return
+	}
+	pendingWrites.Wait()
+	in.pending.Wait()
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	rec, why := in.candidate()
+	if why == "" {
+		var data []byte
+		var err error
+		if data, err = rec.encode(); err == nil {
+			err = writeAtomically(os.Getenv(runRecordCandidateEnv), data)
+		}
+		if err != nil {
+			why = err.Error()
+		}
+	}
+	if why != "" && listingVerbose {
+		log.Printf("typescript: run record: not recorded; %s", why)
+	}
+}
+
+// candidate is the record of the inputs as the run first saw them, each
+// listing's as the listing itself saw them, or why there is none.
+func (in *inputSet) candidate() (*runRecord, string) {
+	if in.incomplete != "" {
+		return nil, in.incomplete
+	}
+	rec := &runRecord{key: in.key}
+	var lines inputLines
+	for _, rel := range slices.Sorted(maps.Keys(in.dirs)) {
+		snap := in.dirs[rel]
+		if snap.err != nil {
+			return nil, snap.err.Error()
+		}
+		rec.dirs = append(rec.dirs, snap.abs)
+		lines.dirs = append(lines.dirs, snap.line)
+	}
+	rec.files = slices.Sorted(maps.Keys(in.files))
+	for _, file := range rec.files {
+		lines.files = append(lines.files, in.files[file])
+	}
+	reads, roots := map[string]string{}, map[string]string{}
+	var why string
+	merge := func(into map[string]string, path, line string) {
+		if was, ok := into[path]; ok && was != line {
+			why = path + " changed between two listings that read it"
+		}
+		into[path] = line
+	}
+	loadedListings.Range(func(_, v any) bool {
+		entry := v.(*cachedListing)
+		if len(entry.ReadLines) != len(entry.Reads) || len(entry.DirDigests) != len(entry.Dirs) {
+			why = "a listing kept no read-time state"
+			return false
+		}
+		for i, read := range entry.Reads {
+			merge(reads, read, entry.ReadLines[i])
+		}
+		for i, dir := range entry.Dirs {
+			merge(roots, dir, entry.DirDigests[i])
+		}
+		return why == ""
+	})
+	if why != "" {
+		return nil, why
+	}
+	rec.reads, rec.roots = slices.Sorted(maps.Keys(reads)), slices.Sorted(maps.Keys(roots))
+	for _, read := range rec.reads {
+		lines.reads = append(lines.reads, reads[read])
+	}
+	for _, root := range rec.roots {
+		lines.roots = append(lines.roots, roots[root])
+	}
+	rec.digest, rec.walkDigest = rec.digests(lines)
+	return rec, ""
+}
+
+// verifyReplay runs the pass a replay stands for, without any cache, and
+// fails unless it changes nothing and exits and logs as the record does.
+func verifyReplay(fs *flag.FlagSet, file string, rec *runRecord) int {
+	args := slices.Clone(os.Args[1:])
+	at := len(args) - fs.NArg()
+	if at > 0 && args[at-1] == "--" {
+		at--
+	}
+	args = slices.Insert(args, at, "-mode=diff", "-ts_listing_cache=", "-ts_run_record=off")
+	code, stdout, stderr := runSelf(args)
+	fail := func(why string) int {
+		os.Remove(file)
+		log.Printf("typescript: run record: a full pass without caches %s; the record is removed", why)
+		return 1
+	}
+	switch {
+	case code == 1 && len(stdout) > 0:
+		return fail("differs from the replayed record (diff above)")
+	case code != rec.exit:
+		return fail(fmt.Sprintf("exits %d where the record exits %d", code, rec.exit))
+	case !slices.Equal(logLines(stderr), logLines(rec.stderr)):
+		return fail(fmt.Sprintf("logs otherwise than the record:\n--- record\n%s--- full pass\n%s", rec.stderr, stderr))
+	}
+	log.Print("typescript: run record: verified; a full pass without caches changes nothing and logs the same")
+	return 0
+}
+
+// logLines is a log's lines without the caches' own, in an order that does
+// not depend on how concurrent listings interleaved.
+func logLines(log []byte) []string {
+	var out []string
+	for line := range strings.SplitSeq(string(log), "\n") {
+		if line != "" && !strings.Contains(line, "typescript: listing cache") && !strings.Contains(line, "typescript: run record:") {
+			out = append(out, line)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// runSelf runs this binary with args and returns its exit status and what it
+// wrote, which it also passes through.
+func runSelf(args []string, env ...string) (int, []byte, []byte) {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Fatalf("typescript: run record: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, &stdout), io.MultiWriter(os.Stderr, &stderr)
+	cmd.Env = os.Environ()
+	if rf, err := runfiles.Env(); err == nil {
+		cmd.Env = append(cmd.Env, rf...)
+	}
+	cmd.Env = append(cmd.Env, env...)
+	dieWithParent(cmd)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer func() {
+		signal.Stop(signals)
+		close(signals)
+	}()
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("typescript: run record: %v", err)
+	}
+	go func() {
+		for s := range signals {
+			cmd.Process.Signal(s)
+		}
+	}()
+	cmd.Wait()
+	if cmd.ProcessState == nil {
+		return 1, stdout.Bytes(), stderr.Bytes()
+	}
+	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal()), stdout.Bytes(), stderr.Bytes()
+	}
+	return cmd.ProcessState.ExitCode(), stdout.Bytes(), stderr.Bytes()
+}

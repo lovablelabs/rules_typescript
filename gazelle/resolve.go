@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -1600,7 +1599,7 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 		slices.Contains([]string{".js", ".jsx", ".mjs", ".cjs", ".json"}, path.Ext(e.To))) {
 		file := generatedFile
 		if !file {
-			st, err := os.Stat(filepath.Join(c.RepoRoot, filepath.FromSlash(e.To)))
+			st, err := statInput(filepath.Join(c.RepoRoot, filepath.FromSlash(e.To)))
 			file = err == nil && st.Mode().IsRegular()
 		}
 		if file {

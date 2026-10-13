@@ -3,7 +3,6 @@ package typescript
 import (
 	"log"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -34,7 +33,7 @@ type npmLock struct {
 }
 
 func loadNpmLock(repoRoot string, manifestAt func(string) *manifest) (*npmLock, error) {
-	data, err := os.ReadFile(filepath.Join(repoRoot, pnpmLockfileName))
+	data, err := readInput(filepath.Join(repoRoot, pnpmLockfileName))
 	if err != nil {
 		return nil, err
 	}

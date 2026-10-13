@@ -3,7 +3,6 @@ package typescript
 import (
 	"fmt"
 	"log"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -14,7 +13,6 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/rule"
-	"github.com/bazelbuild/bazel-gazelle/walk"
 
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
@@ -60,7 +58,7 @@ func (s *programStore) wranglerConfigOf(c *config.Config, cfg string) (string, e
 // wranglerLiterals is every distinct wrangler config the file names, each as
 // first spelled.
 func wranglerLiterals(file string) []string {
-	data, err := os.ReadFile(file)
+	data, err := readInput(file)
 	if err != nil {
 		return nil
 	}
@@ -83,7 +81,7 @@ func (s *programStore) observeWranglerConfig(c *config.Config, cfg string) {
 	if len(names) == 1 {
 		file := path.Join(parentDir(cfg), names[0])
 		if firstParty(file) {
-			s.observeBuild(parentDir(file), walk.GetDirInfo)
+			s.observeBuild(parentDir(file), recordedDirInfo)
 		}
 	}
 }

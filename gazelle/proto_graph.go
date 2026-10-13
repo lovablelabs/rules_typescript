@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"slices"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -27,7 +26,7 @@ type protoGraph struct {
 }
 
 func loadProtoGraph(file string) (*protoGraph, error) {
-	b, err := os.ReadFile(file)
+	b, err := readInput(file)
 	if err != nil {
 		return nil, err
 	}

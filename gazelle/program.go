@@ -157,7 +157,7 @@ func (s *programStore) locateBinary() (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := os.Stat(abs); err != nil {
+	if _, err := statInput(abs); err != nil {
 		return "", "", fmt.Errorf("tsgo from %s: %w", how, err)
 	}
 	return abs, how, nil
@@ -325,7 +325,7 @@ func (s *programStore) readBases(c *config.Config, rel string, resolved *tsconfi
 		if !ok {
 			continue
 		}
-		if st, err := os.Stat(basePath); err != nil || st.IsDir() {
+		if st, err := statInput(basePath); err != nil || st.IsDir() {
 			continue
 		}
 		baseRel, err := filepath.Rel(repoRoot, basePath)
@@ -441,7 +441,7 @@ func (s *programStore) reconcileCompilerProgram(c *config.Config, p *program, di
 				declared := ruleOutputs(r, c.RepoName, pkg)
 				var files []string
 				for _, output := range declared.files {
-					info, err := os.Stat(filepath.Join(c.RepoRoot, filepath.FromSlash(path.Join(pkg, output))))
+					info, err := statInput(filepath.Join(c.RepoRoot, filepath.FromSlash(path.Join(pkg, output))))
 					if os.IsNotExist(err) {
 						continue
 					}
@@ -624,7 +624,7 @@ func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg str
 	}
 	p := s.compilerPrograms[cfg]
 	if p == nil {
-		if _, err := os.Stat(filepath.Join(c.RepoRoot, filepath.FromSlash(cfg))); os.IsNotExist(err) {
+		if _, err := statInput(filepath.Join(c.RepoRoot, filepath.FromSlash(cfg))); os.IsNotExist(err) {
 			return nil
 		}
 		tsgo, err := s.binary()
@@ -692,11 +692,11 @@ func (s *programStore) configProgram(repoRoot, cfg string) *program {
 // installMissing says why the listing cannot be trusted: a root lockfile with
 // no node_modules from pnpm; tsgo prints no line for an unresolved import.
 func installMissing(repoRoot string) string {
-	if _, err := os.Stat(filepath.Join(repoRoot, pnpmLockfileName)); err != nil {
+	if _, err := statInput(filepath.Join(repoRoot, pnpmLockfileName)); err != nil {
 		return ""
 	}
 	marker := filepath.Join(repoRoot, "node_modules", ".modules.yaml")
-	if _, err := os.Stat(marker); err == nil {
+	if _, err := statInput(marker); err == nil {
 		return ""
 	}
 	return pnpmLockfileName + " is at the root and node_modules/.modules.yaml " +
@@ -774,6 +774,9 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
 	if err == nil {
 		saveListing(key, repoRoot, subject, args, p)
+		if _, kept := loadedListings.Load(key); !kept {
+			noteIncomplete(subject + " was listed without a read set")
+		}
 	}
 	return p, err
 }

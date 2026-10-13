@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -32,7 +31,7 @@ func (s *protoStore) loadRuntimeImports() error {
 	if err != nil {
 		return fmt.Errorf("protobuf runtime import metadata is missing from Gazelle runfiles: %w", err)
 	}
-	b, err := os.ReadFile(p)
+	b, err := readInput(p)
 	if err != nil {
 		return err
 	}
