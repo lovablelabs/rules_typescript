@@ -97,6 +97,7 @@ go_test(
         "resolve_record_test.go",
         "resolve_test.go",
         "run_record_test.go",
+        "state_digest_test.go",
         "tsconfig_extends_test.go",
         "workers_pool_test.go",
     ],
