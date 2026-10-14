@@ -1623,15 +1623,15 @@ func multisetMinus(a, b []string) []string {
 	return out
 }
 
-// verifyPatchedListing is -ts_listing_patch_verify: the patched listing must be
-// the one tsgo prints for the tree as it is.
-func verifyPatchedListing(ctx context.Context, repoRoot, tsgo, subject string, args []string, patched *program) {
+// verifyListing is -ts_listing_patch_verify: a listing tsgo did not print for
+// args must be the one it prints for the tree as it is.
+func verifyListing(ctx context.Context, repoRoot, tsgo, subject string, args []string, got *program, how string) {
 	fresh, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
 	if err != nil {
 		log.Fatalf("typescript: -ts_listing_patch_verify: %v", err)
 	}
-	if diff := listingDifference(patched, fresh); diff != "" {
-		log.Fatalf("typescript: -ts_listing_patch_verify: the patched listing of %s differs from tsgo's:\n%s", subject, diff)
+	if diff := listingDifference(got, fresh); diff != "" {
+		log.Fatalf("typescript: -ts_listing_patch_verify: the %s listing of %s differs from tsgo's:\n%s", how, subject, diff)
 	}
 }
 
