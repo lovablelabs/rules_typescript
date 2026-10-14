@@ -123,7 +123,7 @@ type resolutionFacts struct {
 
 func (f *resolutionFacts) add(list *[]string, value string) {
 	if !slices.Contains(*list, value) {
-		*list = append(*list, value)
+		*list = append(*list, strings.Clone(value))
 	}
 }
 
@@ -133,173 +133,198 @@ func splitResolutionTrace(root, output string) (string, []resolutionCandidate, e
 }
 
 func splitTrace(root, output string, facts *resolutionFacts) (string, []resolutionCandidate, error) {
-	var listing strings.Builder
-	sawCandidate := false
-	var candidates []resolutionCandidate
-	var kind, specifier, from, previous, jsonModule, moduleCandidate string
-	block, blockStart := 0, 0
-	under := filepath.Clean(root) + string(filepath.Separator)
-	relative := func(value string) (string, error) {
-		if !filepath.IsAbs(value) {
-			return "", fmt.Errorf("compiler resolution path is not absolute: %q", value)
-		}
-		if len(value) > len(under) && strings.HasPrefix(value, under) && filepath.Clean(value) == value {
-			return filepath.ToSlash(value[len(under):]), nil
-		}
-		rel, err := filepath.Rel(root, value)
-		return filepath.ToSlash(rel), err
-	}
+	t := newTraceSplitter(root, facts)
 	for rest := output; rest != ""; {
 		raw := rest
 		if i := strings.IndexByte(rest, '\n'); i >= 0 {
 			raw = rest[:i+1]
 		}
 		rest = rest[len(raw):]
-		line := strings.TrimRight(raw, "\r\n")
-		if strings.HasPrefix(line, "========") {
-			var start, typeStart []string
-			if strings.HasPrefix(line, "======== Resolving module '") {
-				start = moduleTraceStart(line)
-			}
-			if start == nil && strings.HasPrefix(line, "======== Resolving type reference directive '") {
-				typeStart = typeTraceStart.FindStringSubmatch(line)
-			}
-			switch {
-			case start != nil || typeStart != nil:
-				if kind != "" {
-					redirect := importsTrace.FindStringSubmatch(previous)
-					if kind != "module" || start == nil || redirect == nil || start[1] != redirect[1] || !filepath.IsAbs(start[2]) {
-						return "", nil, fmt.Errorf("unrecognised nested compiler resolution trace: %q", line)
-					}
-					previous = ""
-					continue
-				}
-				moduleCandidate, sawCandidate = "", false
-				blockStart = len(candidates)
-				if m := start; m != nil {
-					kind, specifier = "module", m[1]
-					var err error
-					from, err = relative(m[2])
-					if err != nil {
-						return "", nil, err
-					}
-				} else {
-					kind, specifier = "type", typeStart[1]
-					if m := typeContainingFileTrace.FindStringSubmatch(line); m != nil {
-						var err error
-						from, err = relative(m[1])
-						if err != nil {
-							return "", nil, err
-						}
-					}
-				}
-			default:
-				var m []string
-				if kind == "type" {
-					m = typeTraceEnd.FindStringSubmatch(line)
-				} else {
-					m = moduleTraceEnd(line)
-				}
-				if kind == "" || m == nil || m[1] != specifier {
-					return "", nil, fmt.Errorf("unrecognised compiler resolution boundary: %q", line)
-				}
-				resolved := ""
-				if m[2] != "" {
-					var err error
-					resolved, err = relative(m[2])
-					if err != nil {
-						return "", nil, err
-					}
-					candidates = append(candidates, resolutionCandidate{from: from, specifier: specifier, path: resolved, file: true})
-				}
-				for i := blockStart; i < len(candidates); i++ {
-					candidates[i].block, candidates[i].resolved = block, resolved
-					if kind == "type" {
-						candidates[i].kind = explainfiles.TypeReference
-					}
-				}
-				block++
-				kind, specifier, from = "", "", ""
-			}
-			previous = ""
-			continue
-		}
-		previous = line
-		missing, isMissing := missingFileTrace(line)
-		if value, ok := traceField(line, "File name '", "' has a '.json' extension - stripping it."); kind == "module" && ok {
-			jsonModule = value
-		} else if !isMissing {
-			jsonModule = ""
-		}
-		if strings.HasPrefix(line, "Loading module as file / folder") {
-			m := candidateTrace(line)
-			if kind == "" || m == nil {
-				return "", nil, fmt.Errorf("unframed or malformed compiler candidate: %q", line)
-			}
-			if kind == "module" {
-				candidate, err := relative(m[1])
-				if err != nil {
-					return "", nil, err
-				}
-				if !sawCandidate && relativeSpecifier(specifier) {
-					facts.add(&facts.RelativeTargets, m[2])
-				}
-				sawCandidate = true
-				// This announcement precedes file probes; only a later skipped
-				// directory establishes where a cold tree fits in their order.
-				moduleCandidate = candidate
-			}
-		}
-		if kind == "module" {
-			if strings.Contains(line, "odule resolution kind") {
-				facts.add(&facts.Kinds, line)
-			}
-			if strings.HasPrefix(line, "'rootDirs' option is set") {
-				facts.RootDirs = true
-			}
-		}
-		if kind != "" {
-			if isMissing {
-				candidate, err := relative(missing)
-				if err != nil {
-					return "", nil, err
-				}
-				metadata := path.Base(candidate) == "package.json" && missing != jsonModule
-				if firstParty(candidate) && (metadata || programCandidate(candidate) || kind == "module" && path.Ext(candidate) == ".json") {
-					candidates = append(candidates, resolutionCandidate{from: from, specifier: specifier, path: candidate, file: !metadata, metadata: metadata})
-				}
-			}
-			found, ok := foundPackageTrace(line)
-			if !ok {
-				found, ok = traceField(line, "File '", "' exists according to earlier cached lookups.")
-			}
-			if ok {
-				candidate, err := relative(found)
-				if err != nil {
-					return "", nil, err
-				}
-				if firstParty(candidate) && path.Base(candidate) == "package.json" {
-					candidates = append(candidates, resolutionCandidate{from: from, specifier: specifier, path: candidate, metadata: true})
-				}
-			}
-			if missingDirectory, ok := traceField(line, "Directory '", "' does not exist, skipping all lookups in it."); kind == "module" && ok && moduleCandidate != "" {
-				directory, err := relative(missingDirectory)
-				if err != nil {
-					return "", nil, err
-				}
-				if parentDir(moduleCandidate) == directory || moduleCandidate == directory {
-					candidates = append(candidates, resolutionCandidate{from: from, specifier: specifier, path: moduleCandidate, skipped: directory})
-				}
-			}
-		}
-		if kind == "" {
-			listing.WriteString(raw)
+		if err := t.line(raw); err != nil {
+			return "", nil, err
 		}
 	}
-	if kind != "" {
-		return "", nil, fmt.Errorf("unfinished compiler resolution trace for %q", specifier)
+	return t.finish()
+}
+
+// traceSplitter takes tsgo's output a line at a time, keeping the listing's
+// lines and the trace's candidates. What it keeps past the next line is copied
+// or interned, so the output it was handed can be freed as it goes.
+type traceSplitter struct {
+	root, under                                                  string
+	facts                                                        *resolutionFacts
+	listing                                                      strings.Builder
+	candidates                                                   []resolutionCandidate
+	sawCandidate                                                 bool
+	kind, specifier, from, previous, jsonModule, moduleCandidate string
+	block, blockStart                                            int
+}
+
+func newTraceSplitter(root string, facts *resolutionFacts) *traceSplitter {
+	return &traceSplitter{root: root, under: filepath.Clean(root) + string(filepath.Separator), facts: facts}
+}
+
+func (t *traceSplitter) relative(value string) (string, error) {
+	if !filepath.IsAbs(value) {
+		return "", fmt.Errorf("compiler resolution path is not absolute: %q", value)
 	}
-	return listing.String(), candidates, nil
+	if len(value) > len(t.under) && strings.HasPrefix(value, t.under) && filepath.Clean(value) == value {
+		return internString(filepath.ToSlash(value[len(t.under):])), nil
+	}
+	rel, err := filepath.Rel(t.root, value)
+	return internString(filepath.ToSlash(rel)), err
+}
+
+func (t *traceSplitter) line(raw string) error {
+	facts := t.facts
+	line := strings.TrimRight(raw, "\r\n")
+	if strings.HasPrefix(line, "========") {
+		var start, typeStart []string
+		if strings.HasPrefix(line, "======== Resolving module '") {
+			start = moduleTraceStart(line)
+		}
+		if start == nil && strings.HasPrefix(line, "======== Resolving type reference directive '") {
+			typeStart = typeTraceStart.FindStringSubmatch(line)
+		}
+		switch {
+		case start != nil || typeStart != nil:
+			if t.kind != "" {
+				redirect := importsTrace.FindStringSubmatch(t.previous)
+				if t.kind != "module" || start == nil || redirect == nil || start[1] != redirect[1] || !filepath.IsAbs(start[2]) {
+					return fmt.Errorf("unrecognised nested compiler resolution trace: %q", line)
+				}
+				t.previous = ""
+				return nil
+			}
+			t.moduleCandidate, t.sawCandidate = "", false
+			t.blockStart = len(t.candidates)
+			if m := start; m != nil {
+				t.kind, t.specifier = "module", internString(m[1])
+				var err error
+				t.from, err = t.relative(m[2])
+				if err != nil {
+					return err
+				}
+			} else {
+				t.kind, t.specifier = "type", internString(typeStart[1])
+				if m := typeContainingFileTrace.FindStringSubmatch(line); m != nil {
+					var err error
+					t.from, err = t.relative(m[1])
+					if err != nil {
+						return err
+					}
+				}
+			}
+		default:
+			var m []string
+			if t.kind == "type" {
+				m = typeTraceEnd.FindStringSubmatch(line)
+			} else {
+				m = moduleTraceEnd(line)
+			}
+			if t.kind == "" || m == nil || m[1] != t.specifier {
+				return fmt.Errorf("unrecognised compiler resolution boundary: %q", line)
+			}
+			resolved := ""
+			if m[2] != "" {
+				var err error
+				resolved, err = t.relative(m[2])
+				if err != nil {
+					return err
+				}
+				t.candidates = append(t.candidates, resolutionCandidate{from: t.from, specifier: t.specifier, path: resolved, file: true})
+			}
+			for i := t.blockStart; i < len(t.candidates); i++ {
+				t.candidates[i].block, t.candidates[i].resolved = t.block, resolved
+				if t.kind == "type" {
+					t.candidates[i].kind = explainfiles.TypeReference
+				}
+			}
+			t.block++
+			t.kind, t.specifier, t.from = "", "", ""
+		}
+		t.previous = ""
+		return nil
+	}
+	t.previous = line
+	missing, isMissing := missingFileTrace(line)
+	if value, ok := traceField(line, "File name '", "' has a '.json' extension - stripping it."); t.kind == "module" && ok {
+		t.jsonModule = value
+	} else if !isMissing {
+		t.jsonModule = ""
+	}
+	if strings.HasPrefix(line, "Loading module as file / folder") {
+		m := candidateTrace(line)
+		if t.kind == "" || m == nil {
+			return fmt.Errorf("unframed or malformed compiler candidate: %q", line)
+		}
+		if t.kind == "module" {
+			candidate, err := t.relative(m[1])
+			if err != nil {
+				return err
+			}
+			if !t.sawCandidate && relativeSpecifier(t.specifier) {
+				facts.add(&facts.RelativeTargets, m[2])
+			}
+			t.sawCandidate = true
+			// This announcement precedes file probes; only a later skipped
+			// directory establishes where a cold tree fits in their order.
+			t.moduleCandidate = candidate
+		}
+	}
+	if t.kind == "module" {
+		if strings.Contains(line, "odule resolution kind") {
+			facts.add(&facts.Kinds, line)
+		}
+		if strings.HasPrefix(line, "'rootDirs' option is set") {
+			facts.RootDirs = true
+		}
+	}
+	if t.kind != "" {
+		if isMissing {
+			candidate, err := t.relative(missing)
+			if err != nil {
+				return err
+			}
+			metadata := path.Base(candidate) == "package.json" && missing != t.jsonModule
+			if firstParty(candidate) && (metadata || programCandidate(candidate) || t.kind == "module" && path.Ext(candidate) == ".json") {
+				t.candidates = append(t.candidates, resolutionCandidate{from: t.from, specifier: t.specifier, path: candidate, file: !metadata, metadata: metadata})
+			}
+		}
+		found, ok := foundPackageTrace(line)
+		if !ok {
+			found, ok = traceField(line, "File '", "' exists according to earlier cached lookups.")
+		}
+		if ok {
+			candidate, err := t.relative(found)
+			if err != nil {
+				return err
+			}
+			if firstParty(candidate) && path.Base(candidate) == "package.json" {
+				t.candidates = append(t.candidates, resolutionCandidate{from: t.from, specifier: t.specifier, path: candidate, metadata: true})
+			}
+		}
+		if missingDirectory, ok := traceField(line, "Directory '", "' does not exist, skipping all lookups in it."); t.kind == "module" && ok && t.moduleCandidate != "" {
+			directory, err := t.relative(missingDirectory)
+			if err != nil {
+				return err
+			}
+			if parentDir(t.moduleCandidate) == directory || t.moduleCandidate == directory {
+				t.candidates = append(t.candidates, resolutionCandidate{from: t.from, specifier: t.specifier, path: t.moduleCandidate, skipped: directory})
+			}
+		}
+	}
+	if t.kind == "" {
+		t.listing.WriteString(raw)
+	}
+	return nil
+}
+
+func (t *traceSplitter) finish() (string, []resolutionCandidate, error) {
+	if t.kind != "" {
+		return "", nil, fmt.Errorf("unfinished compiler resolution trace for %q", t.specifier)
+	}
+	return t.listing.String(), t.candidates, nil
 }
 
 // relativeSpecifier is tsgo's IsExternalModuleNameRelative: ".", "..", or a path
