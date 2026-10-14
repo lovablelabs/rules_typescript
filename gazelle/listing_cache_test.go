@@ -1,6 +1,7 @@
 package typescript
 
 import (
+	"cmp"
 	"context"
 	"io/fs"
 	"maps"
@@ -812,4 +813,144 @@ func TestListingPatch_ScopeWalksEndForRootedAndDottedImporters(t *testing.T) {
 			}
 		})
 	}
+}
+
+const aliasFixtureConfig = `{"compilerOptions":{"module":"esnext","moduleResolution":"bundler","jsx":"react-jsx","types":[],"paths":{` +
+	`"#modules/*":["./modules/*"],"#shared/*":["./shared/*"],"#unused/*":["./shared/*"],"#two/*":["./a/*","./b/*"],` +
+	`"#m/*":["./modules/*"],"#m/legal/*":["./modules/legal/*"],"#auth":["./shared/util.ts"]}},` +
+	`"include":["src/**/*","modules/**/*","shared/**/*"]}`
+
+// aliasFixture is patchFixture with paths aliases that existing sources resolve,
+// so the listing's trace shows how each used pattern maps.
+func aliasFixture() map[string]string {
+	files := patchFixture()
+	files["app/package.json"] = `{"name":"app","imports":{"#modules/*":"./modules/*","#lib/*":"./shared/*"}}`
+	files["app/tsconfig.json"] = aliasFixtureConfig
+	files["app/modules/page/P.tsx"] = "export const P = 1;\n"
+	files["app/modules/page/index.ts"] = "export * from './P';\n"
+	files["app/shared/util.ts"] = "export const util = 1;\n"
+	files["app/shared/fmt.ts"] = "import { util } from '#shared/util';\nexport const fmt = util;\n"
+	files["app/src/routes.ts"] = "import { P } from '#modules/page/P';\nimport { m } from '#m/page/P';\nimport { x } from '#two/x';\nexport const routes = [P, m, x];\n"
+	files["app/a/x.ts"] = "export const x = 1;\n"
+	return files
+}
+
+var aliasProjectionRoots = []string{"app/shared/fmt.ts", "app/src/a.ts", "app/src/routes.ts", "app/src/view/v.tsx"}
+
+const aliasPage = "app/modules/legal/terms/Page.tsx"
+
+// routesImporting is routes.ts with one more import, of spec.
+func routesImporting(spec string) string {
+	return "import { P } from '#modules/page/P';\nimport { m } from '#m/page/P';\nimport { x } from '#two/x';\nimport { Page } from '" + spec + "';\nexport const routes = [P, m, x, Page];\n"
+}
+
+// A source imported only through a paths alias sent the whole program back to
+// tsgo: the patch resolved a bare specifier only by copying another importer's.
+func TestListingCache_AliasImportPatchesAsTsgoResolvesIt(t *testing.T) {
+	page := map[string]string{aliasPage: "import { fmt } from '#shared/fmt';\nexport const Page = () => <div>{fmt}</div>;\n"}
+	for _, tc := range []struct {
+		name       string
+		base, edit map[string]string
+		roots      []string
+		cfg        string
+	}{
+		{name: "an added page under a config that inherits its paths from another directory", base: map[string]string{
+			"app/nested/deeper/tsconfig.json": `{"extends":"../../tsconfig.json","include":["../../src/**/*","../../modules/**/*","../../shared/**/*"]}`,
+		}, edit: map[string]string{
+			"app/src/routes.ts": routesImporting("#modules/legal/terms/Page"),
+		}, cfg: "app/nested/deeper/tsconfig.json"},
+		{name: "an alias that found nothing finds an added file", base: map[string]string{
+			"app/src/later.ts": "import { Page } from '#modules/legal/terms/Page';\nexport const later = Page;\n",
+		}},
+		{name: "an added page in a new directory imported only through an alias", edit: map[string]string{
+			"app/src/routes.ts": routesImporting("#modules/legal/terms/Page"),
+		}},
+		{name: "an alias import of a directory's index", edit: map[string]string{
+			"app/src/a.ts": "import { b } from './b';\nimport { P } from '#modules/page';\nexport const a = b + P;\n",
+		}},
+		{name: "a changed source gains an alias import no other source writes", edit: map[string]string{
+			"app/src/c.ts": "import { fmt } from '#shared/fmt';\nexport const c = fmt;\n",
+		}},
+		{name: "an added page under a files list", edit: map[string]string{
+			"app/src/routes.ts": routesImporting("#modules/legal/terms/Page"),
+		}, roots: append(slices.Clone(aliasProjectionRoots), aliasPage)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := aliasFixture()
+			maps.Copy(files, tc.base)
+			l := newListingRuns(t, files)
+			cfg := cmp.Or(tc.cfg, "app/tsconfig.json")
+			var base []string
+			if tc.roots != nil {
+				base = aliasProjectionRoots
+			}
+			l.project(cfg, base)
+			writeWorkspace(t, l.root, page)
+			writeWorkspace(t, l.root, tc.edit)
+			got := l.project(cfg, tc.roots)
+			if l.runs != 1 {
+				t.Fatalf("the edit listed the program again (%d runs): %v", l.runs, lastPatchRefusal.Load())
+			}
+			want := l.freshProject(cfg, tc.roots)
+			if diff := listingDifference(got, want); diff != "" {
+				t.Errorf("the patched listing differs from tsgo's:\n%s", diff)
+			}
+		})
+	}
+}
+
+// An alias whose resolution the trace does not pin down goes back to tsgo.
+func TestListingCache_AliasImportTheTraceDoesNotProveListsAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name, spec, why string
+	}{
+		{"an alias that resolves nowhere falls through to package imports", "#modules/legal/gone/Page", "finds nothing"},
+		{"a pattern with a fallback substitution", "#two/y", "fallback substitution"},
+		{"two patterns match the specifier", "#m/legal/terms/Page", "more than one paths pattern"},
+		{"a pattern no traced resolution used", "#unused/util", "no traced resolution"},
+		{"an exact key whose substitution names a file", "#auth", "exact paths key"},
+		{"a specifier only the package imports map names", "#lib/util", "no importer in the same scope"},
+		{"an alias with a TypeScript extension", "#modules/legal/terms/Page.tsx", "TypeScript extension"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newListingRuns(t, aliasFixture())
+			l.list("app/tsconfig.json")
+			writeWorkspace(t, l.root, map[string]string{
+				aliasPage:           "export const Page = 1;\n",
+				"app/b/y.ts":        "export const y = 1;\n",
+				"app/src/routes.ts": routesImporting(tc.spec),
+			})
+			got := l.list("app/tsconfig.json")
+			if l.runs != 2 {
+				t.Fatalf("the edit was patched instead of listed again (%d runs)", l.runs)
+			}
+			if why, _ := lastPatchRefusal.Load().(string); !strings.Contains(why, tc.why) {
+				t.Errorf("listed again because %q, want %q", why, tc.why)
+			}
+			if diff := listingDifference(got, l.fresh("app/tsconfig.json")); diff != "" {
+				t.Errorf("the relisted program differs from tsgo's:\n%s", diff)
+			}
+		})
+	}
+}
+
+// Through a whole run: a new source imported only through an alias patches
+// every listing, none is listed again, and tsgo's own listing agrees.
+func TestListingCache_AliasImportedAddListsNothingAgain(t *testing.T) {
+	requireTsgo(t)
+	tree := fastPathTree()
+	tree["app/c.ts"] = "import { b } from '@app/b';\nexport const c = b;\n"
+	root := writeTree(t, tree)
+	cache := t.TempDir()
+	primeFastPath(t, root, cache, "-ts_verbose")
+	writeWorkspace(t, root, map[string]string{
+		"app/f.ts": "export const f = 6;\n",
+		"app/d.ts": "import { f } from '@app/f';\nexport const d = f;\n",
+	})
+	same := requireAsCacheless(t, root, "an alias-imported add")
+	out := recordGazelle(t, root, cache, "-ts_fastpath=off", "-ts_listing_patch_verify")
+	if m := listingCacheLine.FindStringSubmatch(out); m == nil || m[1] == "0" || m[2] != "0" || m[3] != "0" {
+		t.Errorf("an alias-imported add listed a program again instead of patching it:\n%s", out)
+	}
+	same()
 }

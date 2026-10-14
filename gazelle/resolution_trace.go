@@ -115,10 +115,13 @@ func foundPackageTrace(line string) (string, bool) {
 }
 
 // resolutionFacts is what every module resolution in a listing said about how
-// relative specifiers resolve, so patchListing can resolve a new one the same way.
+// relative and paths-mapped specifiers resolve, so patchListing can resolve a
+// new one the same way.
 type resolutionFacts struct {
 	Kinds, RelativeTargets []string
 	RootDirs               bool
+	// pattern\x00substitution\x00base for each traced paths substitution, and its candidates' target file types.
+	Substitutions, SubstitutionTargets []string
 }
 
 func (f *resolutionFacts) add(list *[]string, value string) {
@@ -158,6 +161,8 @@ type traceSplitter struct {
 	sawCandidate                                                 bool
 	kind, specifier, from, previous, jsonModule, moduleCandidate string
 	block, blockStart                                            int
+	// The paths pattern and substitution whose candidate the next candidate line announces.
+	pattern, substitution, substituted string
 }
 
 func newTraceSplitter(root string, facts *resolutionFacts) *traceSplitter {
@@ -197,6 +202,7 @@ func (t *traceSplitter) line(raw string) error {
 				return nil
 			}
 			t.moduleCandidate, t.sawCandidate = "", false
+			t.pattern, t.substitution, t.substituted = "", "", ""
 			t.blockStart = len(t.candidates)
 			if m := start; m != nil {
 				t.kind, t.specifier = "module", internString(m[1])
@@ -266,6 +272,13 @@ func (t *traceSplitter) line(raw string) error {
 			if !t.sawCandidate && relativeSpecifier(t.specifier) {
 				facts.add(&facts.RelativeTargets, m[2])
 			}
+			if t.substitution != "" {
+				if base, ok := substitutionBase(candidate, t.substituted); ok {
+					facts.add(&facts.Substitutions, t.pattern+"\x00"+t.substitution+"\x00"+base)
+					facts.add(&facts.SubstitutionTargets, m[2])
+				}
+				t.substitution = ""
+			}
 			t.sawCandidate = true
 			// This announcement precedes file probes; only a later skipped
 			// directory establishes where a cold tree fits in their order.
@@ -273,6 +286,16 @@ func (t *traceSplitter) line(raw string) error {
 		}
 	}
 	if t.kind == "module" {
+		if value, ok := traceField(line, "Module name '", "'."); ok {
+			if i := strings.LastIndex(value, "', matched pattern '"); i >= 0 && value[:i] == t.specifier {
+				t.pattern = internString(value[i+len("', matched pattern '"):])
+			}
+		}
+		if value, ok := traceField(line, "Trying substitution '", "'."); ok && t.pattern != "" {
+			if i := strings.LastIndex(value, "', candidate module location: '"); i >= 0 {
+				t.substitution, t.substituted = internString(value[:i]), value[i+len("', candidate module location: '"):]
+			}
+		}
 		if strings.Contains(line, "odule resolution kind") {
 			facts.add(&facts.Kinds, line)
 		}
@@ -325,6 +348,20 @@ func (t *traceSplitter) finish() (string, []resolutionCandidate, error) {
 		return "", nil, fmt.Errorf("unfinished compiler resolution trace for %q", t.specifier)
 	}
 	return t.listing.String(), t.candidates, nil
+}
+
+// substitutionBase is the directory a substituted path resolved against: the
+// candidate without the path's normalised tail, "" for the repository root.
+func substitutionBase(candidate, substituted string) (string, bool) {
+	tail := path.Clean(substituted)
+	if tail == "." || path.IsAbs(tail) || tail == ".." || strings.HasPrefix(tail, "../") {
+		return "", false
+	}
+	if candidate == tail {
+		return "", true
+	}
+	base, ok := strings.CutSuffix(candidate, "/"+tail)
+	return base, ok && base != ""
 }
 
 // relativeSpecifier is tsgo's IsExternalModuleNameRelative: ".", "..", or a path

@@ -600,6 +600,11 @@ func (d *stateHasher) resolutionFacts(f resolutionFacts) {
 	d.strs(f.Kinds)
 	d.strs(f.RelativeTargets)
 	d.bool(f.RootDirs)
+	// Only when present: a program without paths keeps the bytes its records hold.
+	if len(f.Substitutions) > 0 || len(f.SubstitutionTargets) > 0 {
+		d.strs(f.Substitutions)
+		d.strs(f.SubstitutionTargets)
+	}
 }
 
 func (d *stateHasher) candidate(c resolutionCandidate) {

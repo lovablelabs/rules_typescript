@@ -238,7 +238,7 @@ func TestResolveRecord_StateDigestClassifiesEveryField(t *testing.T) {
 		{reflect.TypeFor[emissionGraph](), []string{"roots", "outputs", "rules", "files", "lock"},
 			[]string{"versions", "epoch", "listEpoch", "outputsGeneration", "rulesGeneration", "outputIndex", "registered", "crawled", "crawledPkgs", "lastTouched"}},
 		{reflect.TypeFor[program](), []string{"Listing", "candidates", "resolution", "config", "dir", "refused", "manifest", "key"}, []string{"bySource", "moduleEdges", "byDir"}},
-		{reflect.TypeFor[resolutionFacts](), []string{"Kinds", "RelativeTargets", "RootDirs"}, nil},
+		{reflect.TypeFor[resolutionFacts](), []string{"Kinds", "RelativeTargets", "RootDirs", "Substitutions", "SubstitutionTargets"}, nil},
 		{reflect.TypeFor[programInput](), []string{"config", "program", "discoveryErr", "refresh"}, nil},
 		{reflect.TypeFor[tsConfig](), []string{"protos", "protoIdentities", "protoEnabled", "foreignManifest", "updateOnly", "programs", "lock", "lockLoaded"}, nil},
 		{reflect.TypeFor[protoStore](), []string{"graphPath", "graph", "roots", "recursive", "identities", "observations", "runtimeImports"}, nil},
