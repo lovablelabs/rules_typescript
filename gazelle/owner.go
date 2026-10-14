@@ -29,6 +29,7 @@ func firstParty(f string) bool {
 
 // record keeps a listing; a program naming a first-party file is a package.
 func (s *programStore) record(p *program) {
+	s.importFacts.program(p)
 	s.programs[p.dir] = p
 	delete(s.packages, p.dir)
 	files := map[string]bool{}

@@ -40,12 +40,29 @@ const (
 	runRecordMagic = "rules_typescript gazelle run record v3"
 	// Set by the run that spawns a recording run: where it leaves its candidate.
 	runRecordCandidateEnv = "RULES_TYPESCRIPT_GAZELLE_RUN_RECORD_CANDIDATE"
+	// A test hook: a file each process appends the path it took to.
+	runTraceEnv = "RULES_TYPESCRIPT_GAZELLE_TRACE"
 	// git's racy-clean rule: a stamp this close to the run's start may hide a
 	// same-size rewrite within one timestamp tick.
 	racyWindow = 2 * time.Second
 )
 
 var processStart = time.Now()
+
+// traceRun notes under runTraceEnv which path produced this process's output.
+func traceRun(path string) {
+	file := os.Getenv(runTraceEnv)
+	if file == "" {
+		return
+	}
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("typescript: trace: %v", err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, path)
+}
 
 // runInputs collects what a recording run reads; nil in any other run.
 var runInputs = func() *inputSet {
@@ -57,9 +74,11 @@ var runInputs = func() *inputSet {
 
 // inputSet holds each input's line as the run first saw it.
 type inputSet struct {
-	mu         sync.Mutex
-	files      map[string]string
-	dirs       map[string]*dirSnapshot
+	mu    sync.Mutex
+	files map[string]string
+	dirs  map[string]*dirSnapshot
+	// named are the sources among files read by a name the extension was given.
+	named      map[string]bool
 	pending    sync.WaitGroup
 	incomplete string
 	key        string
@@ -79,7 +98,15 @@ type dirSnapshot struct {
 
 var snapshotSlots = make(chan struct{}, 4*runtime.GOMAXPROCS(0))
 
-func noteRead(path string) {
+// noteRead notes a read the extension makes by a name it was given; a source's
+// existence read so is named, which no listing or edge accounts for.
+func noteRead(path string) { noteInput(path, true) }
+
+// noteSourceRead notes a read the listings' patch or Resolve's edges make of a
+// source they reach.
+func noteSourceRead(path string) { noteInput(path, false) }
+
+func noteInput(path string, named bool) {
 	// A projection is its listing's own, derived from configs noted apart, and gone when the run ends.
 	if isProjection(path) {
 		return
@@ -94,6 +121,12 @@ func noteRead(path string) {
 	}
 	in.mu.Lock()
 	_, seen := in.files[path]
+	if named && programCandidate(path) {
+		if in.named == nil {
+			in.named = map[string]bool{}
+		}
+		in.named[path] = true
+	}
 	in.mu.Unlock()
 	if seen {
 		return
@@ -128,6 +161,21 @@ func lstatInput(path string) (fs.FileInfo, error) {
 
 func readInput(path string) ([]byte, error) {
 	noteRead(path)
+	return os.ReadFile(path)
+}
+
+func statSourceInput(path string) (fs.FileInfo, error) {
+	noteSourceRead(path)
+	return os.Stat(path)
+}
+
+func lstatSourceInput(path string) (fs.FileInfo, error) {
+	noteSourceRead(path)
+	return os.Lstat(path)
+}
+
+func readSourceInput(path string) ([]byte, error) {
+	noteSourceRead(path)
 	return os.ReadFile(path)
 }
 
@@ -594,6 +642,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 			if runRecordMode == "verify" {
 				os.Exit(verifyReplay(fs, file, rec))
 			}
+			traceRun("run record")
 			os.Stdout.Write(rec.stdout)
 			os.Stderr.Write(rec.stderr)
 			if listingVerbose {

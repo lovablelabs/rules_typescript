@@ -52,7 +52,7 @@ func scanFile(abs string) (incremental.Scanned, bool) {
 		src, ok := v.(incremental.Scanned)
 		return src, ok
 	}
-	data, err := readInput(abs)
+	data, err := readSourceInput(abs)
 	var src incremental.Scanned
 	if err == nil {
 		src, err = incremental.Scan(abs, data)
@@ -1058,12 +1058,12 @@ func (r *relativeResolver) line(format string, a ...any) {
 }
 
 func (r *relativeResolver) isFile(abs string) bool {
-	info, err := statInput(abs)
+	info, err := statSourceInput(abs)
 	return err == nil && !info.IsDir()
 }
 
 func (r *relativeResolver) isDir(abs string) bool {
-	info, err := statInput(abs)
+	info, err := statSourceInput(abs)
 	return err == nil && info.IsDir()
 }
 
@@ -1515,7 +1515,7 @@ func (t *patcher) filesListChanges() (added, removed []string, ok bool) {
 		if !patchableSource(f) || rootStem(f) == "" {
 			return nil, nil, t.fail("a root the files list gained is not a TypeScript source: " + f)
 		}
-		if info, err := lstatInput(t.abs(f)); err != nil || !info.Mode().IsRegular() {
+		if info, err := lstatSourceInput(t.abs(f)); err != nil || !info.Mode().IsRegular() {
 			return nil, nil, t.fail("a root the files list gained is not a regular file")
 		}
 		added = append(added, f)

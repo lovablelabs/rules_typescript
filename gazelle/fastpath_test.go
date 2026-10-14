@@ -1,15 +1,19 @@
 package typescript
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bazelbuild/rules_go/go/runfiles"
 
 	"github.com/mikn/rules_typescript/gazelle/incremental"
 )
@@ -126,8 +130,17 @@ func TestFastPath_DeclinedEditsRunTheFullPass(t *testing.T) {
 		name, code string
 		do         func(t *testing.T, root string)
 	}{
-		{"a new source", declineInputs, editFile("app/f.ts", "export const f = 6;\n")},
-		{"a deleted source", declineInputs, removeFile("app/e.ts")},
+		{"a new test source", declineNotSource, editFile("app/f.test.ts", "export const f = 6;\n")},
+		{"a new source beside a file of its stem", declineNotSource, editFile("app/b.tsx", "export const bx = 6;\n")},
+		{"a new source that makes its package an app", declineNotSource, editFile("app/main.ts", "export const m = 6;\n")},
+		{"a new source in a new directory", declineInputs, editFile("app/sub/f.ts", "export const f = 6;\n")},
+		{"a new source beside a source no program lists", declineInputs, editFile("extra/y.ts", "export const y = 6;\n")},
+		{"a new source importing another rule's source", declineWalkConditional, editFile("app/f.ts", "import { x } from '../lib/x';\nexport const f = x;\n")},
+		{"a deleted source still imported", declineListingShape, removeFile("app/b.ts")},
+		{"a deleted source and a BUILD edit", declineInputs, func(t *testing.T, root string) {
+			removeFile("app/e.ts")(t, root)
+			writeFile(t, filepath.Join(root, "app/BUILD.bazel"), "")
+		}},
 		{"a BUILD edit", declineInputs, editFile("app/BUILD.bazel", "")},
 		{"a tsconfig edit", declineInputs, editFile("app/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["a.ts","b.ts"]}`)},
 		{"a removed import", declineEdgeRemoved, editFile("app/c.ts", "export const c = 3;\n")},
@@ -339,4 +352,180 @@ func TestFastPath_ARunThatReplaysResolveKeepsItsFacts(t *testing.T) {
 		t.Errorf("an import after a run that replayed Resolve was not replayed and verified: %v\n%s", err, out)
 	}
 	same()
+}
+
+// tracedGazelle runs the binary and returns its log and the paths each of its
+// processes took, from the trace hook.
+func tracedGazelle(t *testing.T, root string, args ...string) (string, []string) {
+	t.Helper()
+	trace := filepath.Join(t.TempDir(), "trace")
+	binary, err := runfiles.Rlocation(os.Getenv("TS_GAZELLE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, append([]string{"-repo_root=" + root}, args...)...)
+	command.Dir = root
+	command.Env = append(os.Environ(), "BUILD_WORKSPACE_DIRECTORY="+root, runTraceEnv+"="+trace)
+	out, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gazelle %q: %v\n%s", args, err, out)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return string(out), strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// A source gained, renamed or deleted inside a package changes only that
+// rule's srcs: the fast path writes that one edit, byte for byte the full
+// pass's, without running it.
+func TestFastPath_AGainedRenamedOrDeletedSourceNoLongerForcesAFullPass(t *testing.T) {
+	requireTsgo(t)
+	keptTest := map[string]string{
+		"app/sub/k.test.ts": "import { d } from '../d';\nexport const k = d;\n",
+		"app/BUILD.bazel":   "ts_test(\n    name = \"app_test\",\n    srcs = [\n        \"e.test.ts\",\n        \"sub/k.test.ts\",  # keep\n    ],\n)\n",
+	}
+	for _, edit := range []struct {
+		name string
+		tree map[string]string
+		do   func(t *testing.T, root string)
+	}{
+		{"a new source one source imports", nil, func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "app/f.ts"), "export const f = 6;\n")
+			writeFile(t, filepath.Join(root, "app/c.ts"), "import { b } from './b';\nimport { f } from './f';\nexport const c = b + f;\n")
+		}},
+		{"a new source the include roots", nil, editFile("app/f.ts", "import { b } from './b';\nexport const f = b;\n")},
+		{"new sources whose names a byte sort orders otherwise", nil, func(t *testing.T, root string) {
+			for _, name := range []string{"a-b.ts", "a.b.ts", "A2.ts", "b10.ts", "b9.ts"} {
+				writeFile(t, filepath.Join(root, "app", name), "export const n = 1;\n")
+			}
+		}},
+		{"a package's one source gains a sibling", map[string]string{"lib/y.ts": ""}, editFile("lib/w.ts", "export const w = 1;\n")},
+		{"new sources in two packages", nil, func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "app/f.ts"), "export const f = 6;\n")
+			writeFile(t, filepath.Join(root, "lib/w.ts"), "export const w = 1;\n")
+		}},
+		{"a new source a test imports", nil, func(t *testing.T, root string) {
+			writeFile(t, filepath.Join(root, "app/f.ts"), "export const f = 6;\n")
+			writeFile(t, filepath.Join(root, "app/e.test.ts"), "import { d } from './d';\nimport { f } from './f';\nexport const t = d + f;\n")
+		}},
+		{"a source renamed with its importers", nil, func(t *testing.T, root string) {
+			renameFile(t, root, "app/b.ts", "app/bee.ts")
+			writeFile(t, filepath.Join(root, "app/a.ts"), "import { b } from './bee';\nimport { x } from '../lib/x';\nexport const a = b + x;\n")
+			writeFile(t, filepath.Join(root, "app/c.ts"), "import { b } from './bee';\nexport const c = b;\n")
+		}},
+		{"a renamed source keeps its import of another rule", nil, func(t *testing.T, root string) { renameFile(t, root, "app/a.ts", "app/aa.ts") }},
+		{"a source deleted and inlined by its importers", nil, func(t *testing.T, root string) {
+			removeFile("app/b.ts")(t, root)
+			writeFile(t, filepath.Join(root, "app/a.ts"), "const b = 1;\nimport { x } from '../lib/x';\nexport const a = b + x;\n")
+			writeFile(t, filepath.Join(root, "app/c.ts"), "const b = 1;\nexport const c = b;\n")
+		}},
+		{"a deleted source only a test imported", nil, func(t *testing.T, root string) {
+			removeFile("app/d.ts")(t, root)
+			writeFile(t, filepath.Join(root, "app/e.test.ts"), "const d = 4;\nexport const t = d;\n")
+		}},
+		{"a leaf source deleted", nil, removeFile("app/e.ts")},
+		{"a new source beside a files list a kept test source adds", keptTest, editFile("app/f.ts", "export const f = 6;\n")},
+		{"a source renamed beside a files list a kept test source adds", keptTest, func(t *testing.T, root string) {
+			renameFile(t, root, "app/e.ts", "app/ee.ts")
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			tree := fastPathTree()
+			for name, body := range edit.tree {
+				if body == "" {
+					delete(tree, name)
+				} else {
+					tree[name] = body
+				}
+			}
+			root := writeTree(t, tree)
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			edit.do(t, root)
+			same := requireAsCacheless(t, root, edit.name)
+			out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache)
+			if !slices.Equal(paths, []string{"fast path edit"}) {
+				t.Errorf("%s: the run took %q, want the fast path's BUILD edit and no full pass:\n%s", edit.name, paths, out)
+			}
+			same()
+		})
+	}
+}
+
+func renameFile(t *testing.T, root, from, to string) {
+	t.Helper()
+	if err := os.Rename(filepath.Join(root, from), filepath.Join(root, to)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The fast path's BUILD edit outside the racy window leaves a record of the
+// edited tree, so the next run on it replays instead of running in full.
+func TestFastPath_TheRunAfterAWrittenBuildEditNoLongerRunsInFull(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, fastPathTree())
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	writeFile(t, filepath.Join(root, "app/f.ts"), "export const f = 6;\n")
+	time.Sleep(pastRacyWindow)
+	same := requireAsCacheless(t, root, "a new source")
+	if _, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache); !slices.Equal(paths, []string{"fast path edit"}) {
+		t.Fatalf("the new source took %q, want the fast path's BUILD edit", paths)
+	}
+	same()
+	if out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache); !slices.Equal(paths, []string{"run record"}) {
+		t.Errorf("the run after the edit took %q, want the record's replay:\n%s", paths, out)
+	}
+	same()
+}
+
+// -ts_fastpath=verify writes the edit, then checks it against the full pass:
+// facts that miss an exclude make the edit wrong, and verify puts the BUILD
+// file back and removes the record.
+func TestFastPath_VerifyLeavesNoWrongBuildEditBehind(t *testing.T) {
+	requireTsgo(t)
+	tree := fastPathTree()
+	tree["app/BUILD.bazel"] = "# gazelle:exclude f.ts\n"
+	root := writeTree(t, tree)
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	matches, err := filepath.Glob(filepath.Join(cache, runRecordName+"-*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("want one run record, have %v (%v)", matches, err)
+	}
+	rec := loadRunRecord(matches[0])
+	if rec == nil {
+		t.Fatalf("%s does not load as a run record", matches[0])
+	}
+	facts, err := decodeImportFacts(rec.facts)
+	if err != nil || len(facts.Excludes) != 1 {
+		t.Fatalf("the record's facts hold no exclude pattern (%v)", err)
+	}
+	facts.Excludes = nil
+	if rec.facts, err = facts.encode(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := rec.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, matches[0], string(data))
+	before, err := os.ReadFile(filepath.Join(root, "app/BUILD.bazel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "app/f.ts"), "export const f = 6;\n")
+	out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
+	if err == nil || !strings.Contains(out, "fast path: the full pass writes BUILD files the fast path does not") {
+		t.Errorf("verify passed an edit the full pass does not write: %v\n%s", err, out)
+	}
+	if after, err := os.ReadFile(filepath.Join(root, "app/BUILD.bazel")); err != nil || !bytes.Equal(after, before) {
+		t.Errorf("verify left the edit it failed in app/BUILD.bazel (%v):\n%s", err, after)
+	}
+	if _, err := os.Stat(matches[0]); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("verify kept the record it failed: %v", err)
+	}
 }
