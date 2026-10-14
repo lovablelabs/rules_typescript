@@ -655,6 +655,37 @@ func (s *programStore) reconcileCompilerProgram(c *config.Config, p *program, di
 	return listCompilerProgram(c.RepoRoot, cfg, tsgo, append(effective.Exclude, slices.Compact(outputs)...))
 }
 
+// relativeFiles are repository-relative files as a config in dir names them.
+func relativeFiles(repoRoot, dir string, files []string) ([]string, error) {
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		rel, err := filepath.Rel(dir, filepath.Join(repoRoot, filepath.FromSlash(file)))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, filepath.ToSlash(rel))
+	}
+	return out, nil
+}
+
+// writeProjection writes a projection config under a fresh name in dir, its
+// contents made from that name, and returns the path.
+func writeProjection(dir string, contents func(name string) map[string]any) (string, error) {
+	file, err := os.CreateTemp(dir, ".gazelle-tsconfig-*.json")
+	if err != nil {
+		return "", err
+	}
+	err = json.NewEncoder(file).Encode(contents(file.Name()))
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(file.Name())
+		return "", err
+	}
+	return file.Name(), nil
+}
+
 func listCompilerProgram(repoRoot, cfg, tsgo string, exclude []string, roots ...string) (*program, error) {
 	return listCompilerProgramContext(context.Background(), repoRoot, cfg, tsgo, exclude, roots...)
 }
@@ -669,36 +700,26 @@ func listCompilerProgramContext(ctx context.Context, repoRoot, cfg, tsgo string,
 		projectionConfigs.Lock()
 		defer projectionConfigs.Unlock()
 		dir := filepath.Join(repoRoot, filepath.FromSlash(parentDir(cfg)))
-		files := make([]string, 0, len(roots))
-		for _, root := range roots {
-			rel, err := filepath.Rel(dir, filepath.Join(repoRoot, filepath.FromSlash(root)))
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, filepath.ToSlash(rel))
+		files, err := relativeFiles(repoRoot, dir, roots)
+		if err != nil {
+			return nil, err
 		}
 		// The compiler rejects source arguments with -p; an adjacent config preserves path defaults.
-		file, err := os.CreateTemp(dir, ".gazelle-tsconfig-*.json")
+		name, err := writeProjection(dir, func(name string) map[string]any {
+			projection := map[string]any{"extends": "./" + path.Base(cfg)}
+			if len(roots) > 0 {
+				projection["files"], projection["include"] = files, []string{}
+			}
+			if len(exclude) > 0 {
+				projection["exclude"] = append(slices.Clone(exclude), path.Base(name))
+			}
+			return projection
+		})
 		if err != nil {
 			return nil, err
 		}
-		defer os.Remove(file.Name())
-		projection := map[string]any{"extends": "./" + path.Base(cfg)}
-		if len(roots) > 0 {
-			projection["files"], projection["include"] = files, []string{}
-		}
-		if len(exclude) > 0 {
-			projection["exclude"] = append(slices.Clone(exclude), path.Base(file.Name()))
-		}
-		err = json.NewEncoder(file).Encode(projection)
-		closeErr := file.Close()
-		if err != nil {
-			return nil, err
-		}
-		if closeErr != nil {
-			return nil, closeErr
-		}
-		project = file.Name()
+		defer os.Remove(name)
+		project = name
 	}
 	// --pretty false: a FORCE_COLOR in the environment would otherwise colour the diagnostics.
 	p, err := runListingContext(ctx, repoRoot, tsgo, cfg, []string{"-p", project, "--noEmit", "--listFilesOnly", "--explainFiles",
@@ -929,11 +950,22 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	id := listingKey(repoRoot, tsgo, subject, args)
 	if p, patched := loadListing(id, subject); p != nil {
 		if patched && listingPatchVerify {
-			verifyPatchedListing(ctx, repoRoot, tsgo, subject, args, p)
+			verifyListing(ctx, repoRoot, tsgo, subject, args, p, "patched")
 		}
 		return p, nil
 	}
-	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
+	run := args
+	narrowed, remove, ok := narrowFilesList(id, repoRoot, tsgo, subject, args)
+	if ok {
+		run = narrowed
+	}
+	p, err := uncachedListing(ctx, repoRoot, tsgo, subject, run)
+	if ok {
+		remove()
+		if err == nil && listingPatchVerify {
+			verifyListing(ctx, repoRoot, tsgo, subject, args, p, "narrowed")
+		}
+	}
 	if err == nil {
 		saveListing(id, repoRoot, subject, args, p)
 		if _, kept := loadedListings.Load(id.key); kept {

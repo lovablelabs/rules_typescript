@@ -539,6 +539,75 @@ func TestListingCache_FilesListPatchesFromAnotherFamilyEntry(t *testing.T) {
 	}
 }
 
+// A cold run listed a files list over its config as tsgo was handed it, and tsgo
+// explains each root of a files list by a scan of the whole list: minutes for
+// thousands of roots. A list adding roots to its config's listing from the run
+// is listed through the config's include instead, where tsgo roots the same files.
+func TestListingCache_FilesListOverItsConfigListsThroughTheInclude(t *testing.T) {
+	inInclude := []string{"app/src/a.ts", "app/src/b.ts", "app/src/c.ts", "app/src/lib/d.ts", "app/src/lib/index.ts", "app/src/view/v.tsx", "app/src/view/w.tsx"}
+	outside := map[string]string{"app/scripts/s.ts": "import { b } from '../src/b';\nexport const s = b;\n"}
+	for _, tc := range []struct {
+		name     string
+		edit     map[string]string
+		roots    []string
+		narrowed bool
+		unlisted bool
+	}{
+		{name: "a root the include does not match", edit: outside, roots: append(slices.Clone(inInclude), "app/scripts/s.ts"), narrowed: true},
+		{name: "a script tsgo does not root", roots: append(slices.Clone(inInclude), "app/tool.mjs"), narrowed: true},
+		{name: "a root the config excludes", edit: map[string]string{
+			"app/tsconfig.json": strings.Replace(patchFixtureConfig, `"include"`, `"exclude":["src/view/w.tsx"],"include"`, 1),
+		}, roots: inInclude, narrowed: true},
+		{name: "no listing of the config's own in the run", edit: outside, roots: append(slices.Clone(inInclude), "app/scripts/s.ts"), unlisted: true},
+		{name: "a dropped root", edit: outside, roots: []string{"app/scripts/s.ts", "app/src/a.ts", "app/src/c.ts"}},
+		{name: "a twin of a root with an extension the include ranks below the root's",
+			edit:  map[string]string{"app/src/b.d.ts": "export declare const b: number;\n"},
+			roots: append(slices.Clone(inInclude), "app/src/b.d.ts"), narrowed: true},
+		{name: "a twin of a root with an extension the include ranks above the root's", edit: map[string]string{
+			"app/src/b.tsx":     "export const b = 1;\n",
+			"app/tsconfig.json": strings.Replace(patchFixtureConfig, `"include"`, `"exclude":["src/b.ts"],"include"`, 1),
+		}, roots: append(slices.Clone(inInclude), "app/src/b.tsx")},
+		{name: "a config with files of its own", edit: map[string]string{
+			"app/scripts/s.ts":  outside["app/scripts/s.ts"],
+			"app/scripts/t.ts":  "export const t = 1;\n",
+			"app/tsconfig.json": strings.Replace(patchFixtureConfig, `"include"`, `"files":["scripts/s.ts"],"include"`, 1),
+		}, roots: append(slices.Clone(inInclude), "app/scripts/s.ts", "app/scripts/t.ts")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newListingRuns(t, patchFixture())
+			writeWorkspace(t, l.root, tc.edit)
+			var narrowed bool
+			uncachedListing = func(ctx context.Context, repoRoot, tsgo, subject string, args []string) (*program, error) {
+				l.runs++
+				for _, arg := range args {
+					if data, err := os.ReadFile(arg); isProjection(arg) && err == nil && !strings.Contains(string(data), `"include"`) {
+						narrowed = true
+					}
+				}
+				return runListingUncached(ctx, repoRoot, tsgo, subject, args)
+			}
+			listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+			sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
+			if !tc.unlisted {
+				if _, err := listCompilerProgram(l.root, "app/tsconfig.json", l.tsgo, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := listCompilerProgram(l.root, "app/tsconfig.json", l.tsgo, nil, tc.roots...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pendingWrites.Wait()
+			if narrowed != tc.narrowed {
+				t.Errorf("listed through the include: %t, want %t", narrowed, tc.narrowed)
+			}
+			if diff := listingDifference(got, l.freshProject("app/tsconfig.json", tc.roots)); diff != "" {
+				t.Errorf("the files list's listing differs from tsgo's:\n%s", diff)
+			}
+		})
+	}
+}
+
 // A walk up from a rooted importer looped on path.Dir("/") == "/".
 func TestListingPatch_ScopeWalksEndForRootedAndDottedImporters(t *testing.T) {
 	for _, tc := range []struct {

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -158,6 +159,95 @@ func splitFilesList(repoRoot, dir string, data []byte) (base []byte, files []str
 		return nil, nil, false
 	}
 	return base, files, true
+}
+
+// narrowFilesList writes a projection tsgo roots as it roots id's files list: the
+// config's include plus the files the list adds to the config's listing from this
+// run. tsgo scans the whole files list to explain each root, quadratic in its length.
+func narrowFilesList(id listingID, repoRoot, tsgo, subject string, args []string) (narrowed []string, remove func(), ok bool) {
+	i := slices.IndexFunc(args, isProjection)
+	if id.files == nil || i < 0 {
+		return nil, nil, false
+	}
+	data, err := os.ReadFile(args[i])
+	if err != nil {
+		return nil, nil, false
+	}
+	var projection struct {
+		Extends string    `json:"extends"`
+		Files   []string  `json:"files"`
+		Include *[]string `json:"include"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&projection) != nil || projection.Extends != "./"+path.Base(subject) || projection.Include == nil || len(*projection.Include) > 0 {
+		return nil, nil, false
+	}
+	own := slices.Clone(args)
+	own[i] = subject
+	v, listed := loadedListings.Load(listingKey(repoRoot, tsgo, subject, own).key)
+	if !listed {
+		return nil, nil, false
+	}
+	resolved, err := tsconfig.Resolve(filepath.Join(repoRoot, filepath.FromSlash(subject)))
+	// The new files list would replace the config's own.
+	if err != nil || resolved.Files != nil {
+		return nil, nil, false
+	}
+	listedFiles := setOf(id.files)
+	roots := v.(*cachedListing).Listing.Roots
+	ranks := map[string][]extensionRank{}
+	for _, root := range roots {
+		if !listedFiles[root] {
+			return nil, nil, false
+		}
+		if stem, rank, ranked := rankExtension(root); ranked {
+			ranks[stem] = append(ranks[stem], rank)
+		}
+	}
+	isRoot := setOf(roots)
+	added := slices.DeleteFunc(slices.Clone(id.files), func(file string) bool { return isRoot[file] })
+	for _, file := range added {
+		if stem, rank, ranked := rankExtension(file); ranked && slices.ContainsFunc(ranks[stem], rank.outranks) {
+			return nil, nil, false
+		}
+	}
+	dir := filepath.Dir(args[i])
+	files, err := relativeFiles(repoRoot, dir, added)
+	if err != nil || len(files) == 0 {
+		return nil, nil, false
+	}
+	name, err := writeProjection(dir, func(string) map[string]any {
+		return map[string]any{"extends": "./" + path.Base(subject), "files": files}
+	})
+	if err != nil {
+		return nil, nil, false
+	}
+	narrowed = slices.Clone(args)
+	narrowed[i] = name
+	return narrowed, func() { os.Remove(name) }, true
+}
+
+// tsgo's include drops a match that a listed file of its stem outranks; stems
+// compare lower-cased, as a case-insensitive file system does.
+var extensionGroups = [][]string{{".ts", ".tsx", ".d.ts", ".js", ".jsx"}, {".cts", ".d.cts", ".cjs"}, {".mts", ".d.mts", ".mjs"}}
+
+type extensionRank struct{ group, priority int }
+
+func (r extensionRank) outranks(other extensionRank) bool {
+	return r.group == other.group && r.priority < other.priority
+}
+
+func rankExtension(rel string) (stem string, rank extensionRank, ok bool) {
+	for group, extensions := range extensionGroups {
+		for priority, ext := range extensions {
+			// .d.ts ends in .ts too, so the longest extension that matches wins.
+			if before, found := strings.CutSuffix(rel, ext); found && (!ok || len(before) < len(stem)) {
+				stem, rank, ok = before, extensionRank{group, priority}, true
+			}
+		}
+	}
+	return strings.ToLower(stem), rank, ok
 }
 
 func isProjection(arg string) bool {
