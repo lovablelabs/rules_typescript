@@ -392,6 +392,7 @@ use_repo(
     "tsgo_linux_amd64",
     "tsgo_linux_arm64",
     "tsgo_source",
+    "typescript_go_release",
 )
 
 # Toolchain registration is the CONSUMER's responsibility — consumers add:

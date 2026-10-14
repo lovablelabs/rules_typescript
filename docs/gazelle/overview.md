@@ -93,6 +93,17 @@ it listed or why it was not, its diagnostics, how many are packages, and the
 `.ts`/`.tsx`/`.mts`/`.cts` files no program lists, per directory and in total:
 `bazel run //:gazelle -- -ts_verbose`.
 
+When the toolchain's tsgo is a release (a `package.json` beside it, or beside
+its `lib` directory, names `typescript` or an `@typescript/` package) of the
+same version as the typescript-go Gazelle links in, each listing runs in the
+Gazelle process instead (after gazelle-rs's in-process listing): the same
+command line, output and exit status, with every file parsed once for all the
+run's listings. A source-built tsgo, another version, or a command line it does
+not run (a tsconfig with `incremental` or `composite`, for one) goes to tsgo,
+and `-ts_verbose` says why. `-ts_listing_inproc=verify` also lists each through
+tsgo and fails on any difference in what the run reads from the two;
+`-ts_listing_inproc=off` always runs tsgo.
+
 `-ts_listing_cache=<dir>` keeps each listing across runs, reused while every
 file, probe, config and include directory it read is unchanged. A full,
 recursive `fix` or `diff` run of a binary whose only language is TypeScript

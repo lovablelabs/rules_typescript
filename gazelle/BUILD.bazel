@@ -20,6 +20,7 @@ go_library(
         "emission.go",
         "fastpath.go",
         "generate.go",
+        "inprocess.go",
         "keep.go",
         "labels.go",
         "language.go",
@@ -56,6 +57,7 @@ go_library(
     },
     deps = [
         "//gazelle/incremental",
+        "//gazelle/tsgolisting:listing",
         "//ts/tools/explainfiles",
         "//ts/tools/jsonc",
         "//ts/tools/tsconfig",
@@ -82,6 +84,7 @@ go_test(
         "emission_test.go",
         "fastpath_test.go",
         "generate_test.go",
+        "inprocess_test.go",
         "keep_test.go",
         "kinds_surface_test.go",
         "labels_test.go",
@@ -118,6 +121,7 @@ go_test(
     shard_count = 8,
     deps = [
         "//gazelle/incremental",
+        "//gazelle/tsgolisting:listing",
         "@com_github_bazelbuild_buildtools//build",
         "@gazelle//config",
         "@gazelle//label",
