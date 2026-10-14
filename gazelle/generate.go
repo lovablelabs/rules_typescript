@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"fmt"
+	"iter"
 	"log"
 	"maps"
 	"path"
@@ -957,6 +958,56 @@ type edgeIndex struct {
 	byFrom map[string][]explainfiles.Edge
 }
 
+type dirIndex struct {
+	files []string
+	dirs  []candidateDir
+}
+
+type candidateDir struct {
+	dir   string
+	files []string
+}
+
+// Files' first-party program candidates by directory, sorted; rebuilt when Files is replaced or resized, and never written.
+func (p *program) candidatesByDir() *dirIndex {
+	if ix := p.byDir; ix != nil && len(ix.files) == len(p.Files) && (len(p.Files) == 0 || &ix.files[0] == &p.Files[0]) {
+		return ix
+	}
+	byDir := map[string][]string{}
+	for _, file := range p.Files {
+		if firstParty(file) && programCandidate(file) {
+			dir := parentDir(file)
+			byDir[dir] = append(byDir[dir], file)
+		}
+	}
+	ix := &dirIndex{files: p.Files, dirs: make([]candidateDir, 0, len(byDir))}
+	for _, dir := range slices.Sorted(maps.Keys(byDir)) {
+		ix.dirs = append(ix.dirs, candidateDir{dir, byDir[dir]})
+	}
+	p.byDir = ix
+	return ix
+}
+
+// under yields root and the directories below it; "web-x" sorts between "web" and "web/x".
+func (ix *dirIndex) under(root string) iter.Seq[candidateDir] {
+	if root == "" {
+		return slices.Values(ix.dirs)
+	}
+	return func(yield func(candidateDir) bool) {
+		byDir := func(d candidateDir, dir string) int { return strings.Compare(d.dir, dir) }
+		if i, found := slices.BinarySearchFunc(ix.dirs, root, byDir); found && !yield(ix.dirs[i]) {
+			return
+		}
+		prefix := root + "/"
+		i, _ := slices.BinarySearchFunc(ix.dirs, prefix, byDir)
+		for ; i < len(ix.dirs) && strings.HasPrefix(ix.dirs[i].dir, prefix); i++ {
+			if !yield(ix.dirs[i]) {
+				return
+			}
+		}
+	}
+}
+
 func sourceEdges(byFrom map[string][]explainfiles.Edge, files ...[]string) []explainfiles.Edge {
 	from := map[string]bool{}
 	for _, list := range files {
@@ -1011,23 +1062,18 @@ func packageScopeSources(args language.GenerateArgs, tc *tsConfig, res language.
 		return nil
 	}
 	scopes := map[string]bool{}
-	// Programs share most files, and a directory's files share its scope.
-	files := map[string]bool{}
+	authored := func(file string) bool { return !s.generatedProgramFile(args.Config, s.index, file, true) }
+	// Programs share most directories, and a directory's files share its scope.
 	dirs := map[string]bool{}
 	for _, programs := range []map[string]*program{s.programs, s.vitestPrograms} {
 		for _, p := range programs {
-			for _, file := range p.Files {
-				if files[file] {
+			// owner(scope) is an ancestor of the file's directory, so only files under args.Rel can name it.
+			for d := range p.candidatesByDir().under(args.Rel) {
+				if dirs[d.dir] || !slices.ContainsFunc(d.files, authored) {
 					continue
 				}
-				files[file] = true
-				// owner(scope) is an ancestor of the file's directory, so only files under args.Rel can name it.
-				if dirs[parentDir(file)] || !within(parentDir(file), args.Rel) || !firstParty(file) || !programCandidate(file) ||
-					s.generatedProgramFile(args.Config, s.index, file, true) {
-					continue
-				}
-				dirs[parentDir(file)] = true
-				scope := s.packageScope(args.Config, parentDir(file))
+				dirs[d.dir] = true
+				scope := s.packageScope(args.Config, d.dir)
 				if scope != "" && s.inputIdentity(args.Config, s.index, scope) == authoredInput && owner(scope) == args.Rel {
 					scopes[scope] = true
 				}

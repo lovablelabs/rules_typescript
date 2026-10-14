@@ -42,6 +42,7 @@ type program struct {
 	refused    string
 	manifest   bool
 	bySource   *edgeIndex
+	byDir      *dirIndex
 	// key names the cached listing the program was read from; "" when none was.
 	key string
 	// candidateEdge's index of Edges; built on first use, so Edges must not change after.
