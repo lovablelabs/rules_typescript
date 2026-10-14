@@ -534,7 +534,8 @@ func internString(s string) string {
 	if v, ok := listingStrings.Load(s); ok {
 		return v.(string)
 	}
-	v, _ := listingStrings.LoadOrStore(strings.Clone(s), strings.Clone(s))
+	kept := strings.Clone(s)
+	v, _ := listingStrings.LoadOrStore(kept, kept)
 	return v.(string)
 }
 

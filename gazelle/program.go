@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"os"
@@ -690,15 +691,39 @@ func listCompilerProgram(repoRoot, cfg, tsgo string, exclude []string, roots ...
 	return listCompilerProgramContext(context.Background(), repoRoot, cfg, tsgo, exclude, roots...)
 }
 
-// Held exclusively while a projection config exists, and shared by every prefetched
-// listing, so no concurrent listing can read a projection.
+// A listing whose include names .json files could root another listing's
+// projection config, so it holds this exclusively; a projection shares it.
 var projectionConfigs sync.RWMutex
+
+func holdProjections(repoRoot, cfg string, projection bool) (release func()) {
+	switch {
+	case includesJSON(repoRoot, cfg):
+		projectionConfigs.Lock()
+		return projectionConfigs.Unlock
+	case projection:
+		projectionConfigs.RLock()
+		return projectionConfigs.RUnlock
+	}
+	return func() {}
+}
+
+// includesJSON is whether an include spec of cfg matches .json files, which
+// tsgo's include expansion does only for a spec ending in .json.
+func includesJSON(repoRoot, cfg string) bool {
+	r, err := tsconfig.Resolve(filepath.Join(repoRoot, filepath.FromSlash(cfg)))
+	if err != nil {
+		return true
+	}
+	return r.Include != nil && slices.ContainsFunc(*r.Include, func(spec string) bool {
+		return strings.HasSuffix(strings.ToLower(spec), ".json")
+	})
+}
 
 func listCompilerProgramContext(ctx context.Context, repoRoot, cfg, tsgo string, exclude []string, roots ...string) (*program, error) {
 	project := cfg
-	if len(roots) > 0 || len(exclude) > 0 {
-		projectionConfigs.Lock()
-		defer projectionConfigs.Unlock()
+	projection := len(roots) > 0 || len(exclude) > 0
+	defer holdProjections(repoRoot, cfg, projection)()
+	if projection {
 		dir := filepath.Join(repoRoot, filepath.FromSlash(parentDir(cfg)))
 		files, err := relativeFiles(repoRoot, dir, roots)
 		if err != nil {
@@ -739,6 +764,33 @@ func (s *programStore) withSources(c *config.Config, p *program, sources []strin
 	if p.refused != "" {
 		return p
 	}
+	roots, added := s.rootsWith(c, p, sources)
+	if !added {
+		return p
+	}
+	tsgo, err := s.binary()
+	if err != nil {
+		log.Fatalf("typescript: %s: %v", p.config, err)
+	}
+	listed, err := s.listRoots(c.RepoRoot, p, tsgo, roots)
+	if err != nil {
+		log.Fatalf("typescript: %v", err)
+	}
+	return listed
+}
+
+func (s *programStore) listRoots(repoRoot string, p *program, tsgo string, roots []string) (*program, error) {
+	if p.manifest {
+		return listManifestRoots(repoRoot, p.config, tsgo, roots)
+	}
+	if listed, taken, err := s.takeSpeculation(repoRoot, p.config, tsgo, roots); taken {
+		return listed, err
+	}
+	return listCompilerProgram(repoRoot, p.config, tsgo, nil, roots...)
+}
+
+// rootsWith is p's roots with every source p does not list, and whether there was one.
+func (s *programStore) rootsWith(c *config.Config, p *program, sources []string) ([]string, bool) {
 	listedFiles := make(map[string]bool, len(p.Files))
 	for _, file := range p.Files {
 		listedFiles[file] = true
@@ -751,25 +803,40 @@ func (s *programStore) withSources(c *config.Config, p *program, sources []strin
 		}
 	}
 	if len(missing) == 0 {
-		return p
-	}
-	tsgo, err := s.binary()
-	if err != nil {
-		log.Fatalf("typescript: %s: %v", p.config, err)
+		return nil, false
 	}
 	roots := append(slices.Clone(p.Roots), missing...)
 	slices.Sort(roots)
-	roots = slices.Compact(roots)
-	var listed *program
-	if p.manifest {
-		listed, err = listManifestRoots(c.RepoRoot, p.config, tsgo, roots)
-	} else {
-		listed, err = listCompilerProgram(c.RepoRoot, p.config, tsgo, nil, roots...)
+	return slices.Compact(roots), true
+}
+
+// speculateSources starts the listing GenerateRules will ask of pkg's program
+// alongside the one Configure lists next, its kept sources': srcs adds a listed
+// declaration's JavaScript twin, which only that listing roots.
+func (s *programStore) speculateSources(c *config.Config, p *program, pkg string, kept []string) {
+	if !s.fullWalk || p.refused != "" || p.manifest || p.config == "" {
+		return
 	}
+	tsgo, err := s.findBinary()
 	if err != nil {
-		log.Fatalf("typescript: %v", err)
+		return
 	}
-	return listed
+	sources := slices.Clone(kept)
+	for _, file := range p.Files {
+		twin := javaScriptTwin(file)
+		if twin == "" || !firstParty(twin) || parentDir(twin) != pkg && !dirIsAncestorOf(pkg, parentDir(twin)) {
+			continue
+		}
+		// Only a prediction: the listing is taken only for the roots srcs gives.
+		if info, err := os.Lstat(filepath.Join(c.RepoRoot, filepath.FromSlash(twin))); err == nil && info.Mode().IsRegular() {
+			sources = append(sources, twin)
+		}
+	}
+	roots, added := s.rootsWith(c, p, sources)
+	if keptRoots, _ := s.rootsWith(c, p, kept); !added || slices.Equal(roots, keptRoots) {
+		return
+	}
+	s.speculate(c.RepoRoot, p.config, tsgo, roots)
 }
 
 func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg string,
@@ -987,11 +1054,29 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 		dieWithParent(cmd)
 	}
 	cmd.Dir = repoRoot
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	runErr := cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", subject, err)
+	}
 	var facts resolutionFacts
-	listing, candidates, err := splitTrace(repoRoot, stdout.String(), &facts)
+	split := newTraceSplitter(repoRoot, &facts)
+	runErr := cmd.Start()
+	if runErr == nil {
+		if err := eachLine(stdout, split.line); err != nil {
+			// Nothing reads the pipe tsgo still writes to, so it would never exit.
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, fmt.Errorf("%s: %w", subject, err)
+		}
+		runErr = cmd.Wait()
+	}
+	if ctx.Err() != nil {
+		// A cancelled listing stopped part way, so it is not one to keep.
+		return nil, fmt.Errorf("%s: %w", subject, context.Cause(ctx))
+	}
+	listing, candidates, err := split.finish()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
@@ -1012,7 +1097,7 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 		return p, nil
 	case len(p.Diagnostics) == 0:
 		return nil, fmt.Errorf("%s: tsgo %s failed (%v) with no diagnostic:\n%s%s",
-			subject, strings.Join(args, " "), runErr, stdout.String(),
+			subject, strings.Join(args, " "), runErr, listing,
 			stderr.String())
 	case len(p.Files) > 0, noInputs(p):
 		return p, nil
@@ -1020,6 +1105,39 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 	p.refused = fmt.Sprintf("tsgo %v: %s", runErr,
 		strings.Join(p.Diagnostics, "\n"))
 	return p, nil
+}
+
+// eachLine hands fn each line r yields, newline kept, as tsgo writes them: r is
+// read in chunks each copied into one string, which the lines are substrings of.
+func eachLine(r io.Reader, fn func(line string) error) error {
+	buf := make([]byte, 0, 1<<20)
+	for {
+		read := len(buf)
+		n, readErr := r.Read(buf[read:cap(buf)])
+		buf = buf[:read+n]
+		// What came before this read holds no newline: it was the end of the last.
+		if end := bytes.LastIndexByte(buf[read:], '\n') + 1; end > 0 {
+			end += read
+			for chunk := string(buf[:end]); chunk != ""; {
+				line := chunk[:strings.IndexByte(chunk, '\n')+1]
+				chunk = chunk[len(line):]
+				if err := fn(line); err != nil {
+					return err
+				}
+			}
+			buf = buf[:copy(buf, buf[end:])]
+		} else if len(buf) == cap(buf) {
+			buf = slices.Grow(buf, cap(buf))
+		}
+		switch {
+		case errors.Is(readErr, io.EOF) && len(buf) > 0:
+			return fn(string(buf))
+		case errors.Is(readErr, io.EOF):
+			return nil
+		case readErr != nil:
+			return readErr
+		}
+	}
 }
 
 func noInputs(p *program) bool {

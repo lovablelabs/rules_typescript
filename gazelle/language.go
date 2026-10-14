@@ -164,7 +164,9 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 		l.observeSources([]string{tsconfigIn(base)})
 	}
 	if p := l.programs.programs[rel]; p != nil {
-		p = l.programs.withKeptSources(c, p, rel, recordedDirInfo)
+		kept := l.programs.keptProgramSources(c, rel, recordedDirInfo)
+		l.programs.speculateSources(c, p, rel, kept)
+		p = l.programs.withSources(c, p, kept)
 		l.programs.record(p)
 		l.observeProgram(p)
 	}

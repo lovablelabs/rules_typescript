@@ -1,14 +1,18 @@
 package typescript
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -766,5 +770,69 @@ func TestProgram_InstallMissing(t *testing.T) {
 		"layoutVersion: 5\n")
 	if got := installMissing(root); got != "" {
 		t.Errorf("installed: %q, want nothing to say", got)
+	}
+}
+
+// tsgo prints a large program's resolution trace over seconds, and the trace
+// was decoded only once tsgo exited. A trace that breaks off still running shows
+// whether decoding keeps up with it.
+func TestProgram_TheTraceIsDecodedWhileTsgoRuns(t *testing.T) {
+	root := t.TempDir()
+	out := filepath.Join(root, "trace.out")
+	trace := fmt.Sprintf("======== Resolving module './b' from '%s'. ========\n======== Module name './c' was not resolved. ========\n", filepath.Join(root, "pkg/a.ts"))
+	if err := os.WriteFile(out, []byte(trace), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "tsgo-still-running")
+	if err := os.WriteFile(bin, []byte(fmt.Sprintf("#!/bin/sh\ncat %q\nexec sleep 20\n", out)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err := listProgram(root, "pkg/tsconfig.json", bin)
+	if err == nil || !strings.Contains(err.Error(), "unrecognised compiler resolution boundary") {
+		t.Fatalf("err = %v, want the malformed boundary", err)
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("the malformed trace failed the listing after %v, when tsgo exited, not as it was printed", took.Round(time.Second))
+	}
+}
+
+// tsgo's output reaches the decode in reads that end anywhere, a line among them
+// longer than the read buffer.
+func TestProgram_LinesSplitAcrossReadsComeOutWhole(t *testing.T) {
+	long := strings.Repeat("x", 1<<20+1)
+	for _, tc := range []struct {
+		name, text string
+	}{
+		{"lines", "a\nbb\nccc\n"},
+		{"a last line without a newline", "a\nbb"},
+		{"a line longer than the buffer", "a\n" + long + "\nb\n"},
+		{"empty lines", "\n\na\n\n"},
+		{"nothing", ""},
+	} {
+		for _, reader := range []struct {
+			name string
+			wrap func(io.Reader) io.Reader
+		}{
+			{"one byte at a time", iotest.OneByteReader},
+			{"data with EOF", iotest.DataErrReader},
+			{"half reads", iotest.HalfReader},
+		} {
+			t.Run(tc.name+"/"+reader.name, func(t *testing.T) {
+				var got []string
+				err := eachLine(reader.wrap(strings.NewReader(tc.text)), func(line string) error {
+					got = append(got, line)
+					return nil
+				})
+				if want := strings.SplitAfter(tc.text, "\n"); err != nil || !slices.Equal(got, slices.DeleteFunc(want, func(s string) bool { return s == "" })) {
+					t.Errorf("lines = %d (err %v), want %d as written", len(got), err, len(want))
+				}
+			})
+		}
+	}
+	readErr := errors.New("pipe broke")
+	err := eachLine(io.MultiReader(strings.NewReader("a\n"), iotest.ErrReader(readErr)), func(string) error { return nil })
+	if !errors.Is(err, readErr) {
+		t.Errorf("err = %v, want the read error", err)
 	}
 }
