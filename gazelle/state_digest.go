@@ -45,6 +45,7 @@ type stateHasher struct {
 	ids         map[any]int
 	programSums map[*program][sha256.Size]byte
 	ruleBodies  map[*rule.Rule]ruleBody
+	digest      [sha256.Size]byte
 	// Why the state cannot stand for a replay, or "".
 	opaque string
 }
@@ -80,16 +81,17 @@ func (s *programStore) stateDigest(generated []generatedPackage, indexed []impor
 	return hex.EncodeToString(sum[:]), ""
 }
 
+// The buffer only batches small writes into SHA-256; a replay makes one hasher
+// per rule, program and listing, so a larger one costs more to allocate than it saves.
 func newHasher() *stateHasher {
 	h := sha256.New()
-	return &stateHasher{h: h, w: bufio.NewWriterSize(h, 64<<10)}
+	return &stateHasher{h: h, w: bufio.NewWriterSize(h, 512)}
 }
 
 func (d *stateHasher) sum() [sha256.Size]byte {
 	d.w.Flush()
-	var sum [sha256.Size]byte
-	d.h.Sum(sum[:0])
-	return sum
+	d.h.Sum(d.digest[:0])
+	return d.digest
 }
 
 func (d *stateHasher) refuse(why string) {
@@ -99,8 +101,10 @@ func (d *stateHasher) refuse(why string) {
 }
 
 func (d *stateHasher) int(n int) {
-	var b [binary.MaxVarintLen64]byte
-	d.w.Write(b[:binary.PutVarint(b[:], int64(n))])
+	if d.w.Available() < binary.MaxVarintLen64 {
+		d.w.Flush()
+	}
+	d.w.Write(binary.AppendVarint(d.w.AvailableBuffer(), int64(n)))
 }
 
 func (d *stateHasher) bool(v bool) {
