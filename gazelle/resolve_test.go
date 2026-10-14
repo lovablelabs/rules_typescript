@@ -3036,9 +3036,14 @@ func newMemberLinkFixture(t *testing.T, use string) memberLinkFixture {
 		roots = append(roots, "shape.d.ts")
 		librarySources = append(librarySources, "//consumer:shape.d.ts")
 	}
+	const npmDep = "@npm//packages/shared:nested-value"
+	var sharedDeps []string
+	if use == "borrowed npm" {
+		sharedDeps = []string{npmDep}
+	}
 	buildIndex(t, c,
 		indexedRule{kind: "ts_compile", name: "lib", pkg: "lib", srcs: librarySources, deps: []string{"//lib:node_modules/shared"}},
-		indexedRule{kind: "ts_compile", name: "shared", pkg: "packages/shared", srcs: []string{"index.ts"}},
+		indexedRule{kind: "ts_compile", name: "shared", pkg: "packages/shared", srcs: []string{"index.ts"}, deps: sharedDeps},
 	)
 	for _, pkg := range []string{"lib", "consumer"} {
 		link := rule.NewRule("node_modules_member", "node_modules/shared")
@@ -3067,7 +3072,11 @@ func newMemberLinkFixture(t *testing.T, use string) memberLinkFixture {
 	if use == "declaration root" {
 		deps[dep] = dependencyRequirement{edges: []explainfiles.Edge{importEdge("consumer/shape.d.ts", "shared", "packages/shared/index.ts")}}
 	}
-	if strings.HasPrefix(use, "own") || use == "other importer" || use == "declaration root" {
+	if use == "borrowed npm" {
+		r.SetAttr("deps", []string{"//lib", dep, npmDep})
+		deps[npmDep] = dependencyRequirement{edges: []explainfiles.Edge{importEdge("packages/shared/index.ts", "nested-value", "packages/shared/node_modules/nested-value/index.d.ts")}}
+	}
+	if strings.HasPrefix(use, "own") || slices.Contains([]string{"other importer", "declaration root", "borrowed npm"}, use) {
 		want = append(want, dep)
 	}
 	sourceOwner := func(key string) emissionMode {
@@ -3080,7 +3089,7 @@ func newMemberLinkFixture(t *testing.T, use string) memberLinkFixture {
 	return memberLinkFixture{c: c, r: r, from: label.New("", "consumer", "consumer"), roots: roots, deps: deps, sourceOwner: sourceOwner, want: want}
 }
 
-var memberLinkUses = []string{"borrowed", "borrowed alias", "own", "own alias", "other importer", "declaration root"}
+var memberLinkUses = []string{"borrowed", "borrowed alias", "borrowed npm", "own", "own alias", "other importer", "declaration root"}
 
 func TestRemoveSuppliedProgramInputsKeepsMemberLinkOwnership(t *testing.T) {
 	for _, use := range memberLinkUses {
