@@ -19,6 +19,7 @@ go_library(
         "ctime_other.go",
         "emission.go",
         "fastpath.go",
+        "finish_early.go",
         "generate.go",
         "inprocess.go",
         "keep.go",
@@ -66,6 +67,7 @@ go_library(
         "@gazelle//label",
         "@gazelle//language",
         "@gazelle//language/proto",
+        "@gazelle//merger",
         "@gazelle//repo",
         "@gazelle//resolve",
         "@gazelle//rule",
@@ -130,6 +132,14 @@ go_test(
         "@gazelle//rule",
         "@io_bazel_rules_go//go/runfiles",
     ],
+)
+
+# e2e/gazelle_054 runs these over Gazelle 0.54's update loop.
+filegroup(
+    name = "test_srcs",
+    testonly = True,
+    srcs = glob(["*_test.go"]),
+    visibility = ["//visibility:public"],
 )
 
 gazelle_binary(

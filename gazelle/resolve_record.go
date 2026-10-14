@@ -66,9 +66,9 @@ type resolveRecorder struct {
 	generated        []generatedPackage
 	indexed          []importAnswer
 	started          bool
-	// replay is the record a hit writes back; verify the one a full pass is checked against.
-	replay, verify *resolveRecord
-	state          string
+	// replay is the record a hit writes back.
+	replay *resolveRecord
+	state  string
 	// Why this run writes no record, or "".
 	why string
 	// The directories and listings read before the first Resolve, which the state digest covers.
@@ -110,21 +110,29 @@ func (rec *resolveRecorder) noteBuildRead(path string) {
 	}
 }
 
+// resolveRecordFile is where this run's record lives, keyed by everything a
+// run is asked to do except where its caches live and how it is checked or profiled.
+func resolveRecordFile(fs *flag.FlagSet, c *config.Config) (file, key, cache string, err error) {
+	if cache, err = filepath.Abs(listingCacheDir); err != nil {
+		return "", "", "", fmt.Errorf("-ts_listing_cache: %w", err)
+	}
+	key = recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_fastpath", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
+	return filepath.Join(cache, resolveRecordName+"-"+key[:16]), key, cache, nil
+}
+
 // startResolveRecord readies a record for a run a run record could stand for,
 // and makes the run note the extension's reads if nothing else does.
 func startResolveRecord(fs *flag.FlagSet, c *config.Config, s *programStore) error {
 	if resolveRecordMode == "off" || !recordableRun(fs, c, s.fullWalk) {
 		return nil
 	}
-	cache, err := filepath.Abs(listingCacheDir)
+	file, key, cache, err := resolveRecordFile(fs, c)
 	if err != nil {
-		return fmt.Errorf("-ts_listing_cache: %w", err)
+		return err
 	}
 	if err := os.MkdirAll(cache, 0o755); err != nil {
 		return fmt.Errorf("-ts_listing_cache: %w", err)
 	}
-	// Everything a run is asked to do except where its caches live and how it is checked or profiled.
-	key := recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_fastpath", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
 	if runInputs == nil {
 		runInputs = &inputSet{files: map[string]string{}, dirs: map[string]*dirSnapshot{}, key: key, repoRoot: c.RepoRoot, cache: cache, buildNames: c.ValidBuildFileNames}
 		if exe, err := os.Executable(); err == nil {
@@ -134,11 +142,102 @@ func startResolveRecord(fs *flag.FlagSet, c *config.Config, s *programStore) err
 	for _, name := range []string{".bazelignore", "REPO.bazel"} {
 		noteRead(filepath.Join(c.RepoRoot, name))
 	}
-	s.resolution = &resolveRecorder{
-		file: filepath.Join(cache, resolveRecordName+"-"+key[:16]), key: key, cache: cache,
-		buildNames: c.ValidBuildFileNames, buildBodies: map[string]string{},
-	}
+	s.resolution = &resolveRecorder{file: file, key: key, cache: cache, buildNames: c.ValidBuildFileNames, buildBodies: map[string]string{}}
 	return nil
+}
+
+// resolveVerifyEnv names the file a verify's replaying child marks when it replays.
+const resolveVerifyEnv = "RULES_TYPESCRIPT_GAZELLE_RESOLVE_RECORD_VERIFY"
+
+func noteVerifiedReplay() {
+	if file := os.Getenv(resolveVerifyEnv); file != "" {
+		if err := os.WriteFile(file, []byte("replayed"), 0o644); err != nil {
+			log.Fatalf("typescript: resolve record: %v", err)
+		}
+	}
+}
+
+// gateOnResolveVerify runs a replay and a full pass with the record off as
+// children: only the replay's own output shows what it wrote to the tree.
+func gateOnResolveVerify(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
+	if resolveRecordMode != "verify" || !recordableRun(fs, c, fullWalk) {
+		return nil
+	}
+	file, _, _, err := resolveRecordFile(fs, c)
+	if err != nil {
+		return err
+	}
+	os.Exit(verifyResolveRecord(fs, file))
+	return nil
+}
+
+func verifyResolveRecord(fs *flag.FlagSet, file string) int {
+	marker, err := os.CreateTemp("", "resolve-record-verify-")
+	if err == nil {
+		err = marker.Close()
+	}
+	if err != nil {
+		log.Printf("typescript: resolve record: %v", err)
+		return 1
+	}
+	defer os.Remove(marker.Name())
+	off := []string{"-ts_resolve_record=off", "-ts_run_record=off"}
+	noCandidate := runRecordCandidateEnv + "="
+	code, stdout, stderr := runSelf(argsWith(fs, "-ts_resolve_record=on", "-ts_run_record=off"), resolveVerifyEnv+"="+marker.Name(), noCandidate)
+	if mark, _ := os.ReadFile(marker.Name()); string(mark) != "replayed" {
+		log.Print("typescript: resolve record: not verified; the record did not replay")
+		return code
+	}
+	diffMode := flagValue(fs, "mode") == "diff"
+	full := slices.Concat(off, []string{"-mode=diff"})
+	var want []byte
+	if diffMode {
+		full, want = off, stdout
+	}
+	fullCode, fullStdout, fullStderr := runSelfTo(io.Discard, io.Discard, argsWith(fs, full...), noCandidate)
+	why := ""
+	switch {
+	case !bytes.Equal(fullStdout, want) && diffMode:
+		why = "prints another diff than the replay:\n" + string(fullStdout)
+	case !bytes.Equal(fullStdout, want):
+		files := diffedFiles(fullStdout)
+		if len(files) == 0 {
+			files = []string{"BUILD files"}
+		}
+		why = "would write " + strings.Join(files, ", ") + " otherwise than the replay:\n" + string(fullStdout)
+	case fullCode != code:
+		why = fmt.Sprintf("exits %d where the replay exits %d", fullCode, code)
+	case !slices.Equal(extensionLines(fullStderr), extensionLines(stderr)):
+		why = fmt.Sprintf("logs otherwise than the replay:\n--- replay\n%s--- full pass\n%s", stderr, fullStderr)
+	}
+	if why == "" {
+		log.Print("typescript: resolve record: verified; a full pass with the record off writes and logs what the replay did")
+		return code
+	}
+	os.Remove(file)
+	log.Printf("typescript: resolve record: a full pass with the record off %s; the record is removed", why)
+	if !diffMode {
+		if repaired, _, _ := runSelf(argsWith(fs, off...), noCandidate); repaired != 0 {
+			log.Printf("typescript: resolve record: the full pass that rewrites the replay's BUILD files exits %d", repaired)
+		}
+	}
+	return 1
+}
+
+func diffedFiles(diff []byte) []string {
+	var files []string
+	for line := range strings.SplitSeq(string(diff), "\n") {
+		if name, ok := strings.CutPrefix(line, "+++ "); ok && strings.TrimSpace(name) != "" {
+			files = append(files, strings.Fields(name)[0])
+		}
+	}
+	return files
+}
+
+// extensionLines is this extension's lines of a log, which a replay writes
+// back; Gazelle's own lines from inside Resolve it does not.
+func extensionLines(logged []byte) []string {
+	return slices.DeleteFunc(logLines(logged), func(line string) bool { return !strings.Contains(line, "typescript: ") })
 }
 
 func (rec *resolveRecorder) noteGenerated(args language.GenerateArgs, res language.GenerateResult) {
@@ -170,14 +269,11 @@ func (rec *resolveRecorder) begin(s *programStore) bool {
 	rec.generated, rec.indexed = nil, nil
 	if rec.why == "" {
 		if old := loadResolveRecord(rec.file); old != nil && old.Key == rec.key && old.State == rec.state && old.readsHold(rec.buildNames, rec.cache) {
-			if resolveRecordMode == "verify" {
-				rec.verify = old
-			} else {
-				rec.replay = old
-				old.noteReplayedReads()
-				s.importFacts.replayed(old.Facts)
-				return true
-			}
+			rec.replay = old
+			old.noteReplayedReads()
+			s.importFacts.replayed(old.Facts)
+			noteVerifiedReplay()
+			return true
 		}
 	}
 	rec.walkListings = map[string]bool{}
@@ -311,21 +407,12 @@ func (rec *resolveRecorder) applyReplay(s *programStore) {
 	}
 }
 
-// finish runs at the end of AfterResolvingDeps of a run that did the work:
-// it checks a verified record, or writes this run's.
+// finish runs at the end of AfterResolvingDeps of a run that did the work
+// and writes its record.
 func (rec *resolveRecorder) finish(s *programStore) {
 	resolvePhase.Store(nil)
 	log.SetOutput(rec.stderr)
-	logged := rec.log.Bytes()
-	if old := rec.verify; old != nil {
-		if why := old.differs(s.captureTracked(), logged); why != "" {
-			os.Remove(rec.file)
-			log.Fatalf("typescript: resolve record: the full pass %s; the record is removed", why)
-		}
-		log.Print("typescript: resolve record: verified; the full pass writes and logs what the record does")
-		return
-	}
-	next, why := rec.candidate(s, logged)
+	next, why := rec.candidate(s, rec.log.Bytes())
 	if why == "" {
 		var b bytes.Buffer
 		if err := gob.NewEncoder(&b).Encode(next); err != nil {
@@ -350,25 +437,6 @@ func (s *programStore) captureTracked() []recordedFile {
 		files[i] = recordedFile{Pkg: pkgs[i], Content: bzl.Format(f.File)}
 	})
 	return files
-}
-
-func (r *resolveRecord) differs(files []recordedFile, logged []byte) string {
-	want := map[string][]byte{}
-	for _, f := range r.Files {
-		want[f.Pkg] = f.Content
-	}
-	if len(want) != len(files) {
-		return fmt.Sprintf("holds %d BUILD files where the record has %d", len(files), len(want))
-	}
-	for _, f := range files {
-		if !bytes.Equal(want[f.Pkg], f.Content) {
-			return "writes " + orRepoRoot(f.Pkg) + " otherwise than the record"
-		}
-	}
-	if got, want := slices.Sorted(slices.Values(phaseLines(logged))), slices.Sorted(slices.Values(r.Log)); !slices.Equal(got, want) {
-		return fmt.Sprintf("logs otherwise than the record:\n--- record\n%s\n--- full pass\n%s", strings.Join(want, "\n"), strings.Join(got, "\n"))
-	}
-	return ""
 }
 
 // phaseLines is the extension's own lines of a phase's log, in order.

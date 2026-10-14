@@ -398,6 +398,14 @@ func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 	if l.programs == nil || l.programs.emission == nil {
 		return
 	}
+	if e := l.programs.early; e != nil {
+		if !e.done {
+			written := l.programs.captureTracked()
+			l.finishRules()
+			l.programs.requireWritten(written)
+		}
+		return
+	}
 	if rec := l.programs.resolution; rec != nil && rec.started {
 		if rec.replay != nil {
 			rec.applyReplay(l.programs)
@@ -405,6 +413,12 @@ func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 		}
 		defer rec.finish(l.programs)
 	}
+	l.finishRules()
+}
+
+// finishRules is what AfterResolvingDeps does to every resolved rule: the
+// emission graph's runtime closure, emit, package scopes and source exports.
+func (l *tsLang) finishRules() {
 	l.programs.ruleListsMayChange()
 	g := l.programs.emission
 	repo := l.programs.repoConfig.RepoName

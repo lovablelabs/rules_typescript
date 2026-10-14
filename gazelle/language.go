@@ -50,7 +50,8 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 		"a directory that keeps tsgo listings across runs, each reused while everything it read is unchanged")
 	fs.StringVar(&resolveRecordMode, "ts_resolve_record", "on",
 		"with -ts_listing_cache on a full fix or diff run: on writes back the last run's resolved BUILD files when "+
-			"Resolve would start from the same state; verify runs Resolve anyway and fails on any difference; off always resolves")
+			"Resolve would start from the same state; verify replays them, then fails, drops the record and resolves in full if a "+
+			"full pass with the record off would write, diff or log otherwise; off always resolves")
 	fs.StringVar(&runRecordMode, "ts_run_record", "on",
 		"with -ts_listing_cache on a full fix or diff run: on exits at once when every input matches the last run that changed nothing; "+
 			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
@@ -71,6 +72,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 
 func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	listingVerbose = getConfig(c).programs.verbose
+	if gazelleWritesFirst() {
+		getConfig(c).programs.early = &earlyFinish{}
+	}
 	store := getConfig(c).protos
 	if store.graphPath != "" {
 		graphFile, err := runfiles.Rlocation(store.graphPath)
@@ -134,6 +138,9 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	s := getConfig(c).programs
 	// Only the process that does the work gets past the gate, so a replay decodes nothing.
 	if err := gateOnRunRecord(fs, c, s.fullWalk); err != nil {
+		return err
+	}
+	if err := gateOnResolveVerify(fs, c, s.fullWalk); err != nil {
 		return err
 	}
 	if listingCacheDir != "" && parallelMode != "off" && s.fullWalk {
@@ -425,6 +432,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 		}
 	}
 	s.resolution.noteGenerated(args, res)
+	s.early.noteGenerated(args, res)
 	return res
 }
 
@@ -467,9 +475,20 @@ func (l *tsLang) Resolve(
 	from label.Label,
 ) {
 	s := getConfig(c).programs
+	if s.early != nil {
+		if !s.early.done {
+			l.finishBeforeWriting(ix)
+		}
+		return
+	}
 	if s.resolution.begin(s) {
 		return
 	}
+	l.resolveRule(c, ix, r, imports, from)
+}
+
+func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, imports any, from label.Label) {
+	s := getConfig(c).programs
 	s.ruleListsMayChange()
 	liveRule := r
 	r = canonicalRule(c, r)

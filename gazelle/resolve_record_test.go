@@ -200,7 +200,7 @@ func TestResolveRecord_VerifyFailsOnAForgedRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_verbose", "-ts_run_record=off", "-ts_resolve_record=verify")
-	if err == nil || !strings.Contains(out, "resolve record: the full pass writes app/sub otherwise") {
+	if err == nil || !strings.Contains(out, "resolve record: a full pass with the record off would write app/sub/BUILD.bazel otherwise than the replay") {
 		t.Fatalf("verify passed a record a full pass contradicts (%v):\n%s", err, out)
 	}
 	if out := resolveGazelle(t, root, cache); resolveReplayed(out) {
@@ -234,7 +234,7 @@ func TestResolveRecord_StateDigestClassifiesEveryField(t *testing.T) {
 		{reflect.TypeFor[programStore](), []string{"repoConfig", "emission", "inputs", "completePrograms", "index", "tsgoFlag", "verbose", "tsgo", "skipped",
 			"programs", "configs", "packages", "generatedPackages", "visited", "files", "walked", "bases", "extended", "foreign",
 			"foreignSaid", "vitestPrograms", "compilerPrograms", "wranglerConfigs", "installChecked", "regularFiles", "fullWalk",
-			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "prefetch", "resolution", "importFacts"}},
+			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "prefetch", "resolution", "importFacts", "early"}},
 		{reflect.TypeFor[emissionGraph](), []string{"roots", "outputs", "rules", "files", "lock"},
 			[]string{"versions", "epoch", "listEpoch", "outputsGeneration", "rulesGeneration", "outputIndex", "registered", "crawled", "crawledPkgs", "lastTouched"}},
 		{reflect.TypeFor[program](), []string{"Listing", "candidates", "resolution", "config", "dir", "refused", "manifest", "key"}, []string{"bySource", "moduleEdges"}},
