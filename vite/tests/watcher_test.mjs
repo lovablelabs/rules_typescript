@@ -396,6 +396,130 @@ test('fs.watch fallback stops reporting after stop()', async () => {
   assert.deepEqual(batches, []);
 });
 
+/** Records every event a watch the BazelWatcher opens receives, as [watched path, reported name]. */
+function recordWakes() {
+  const nativeWatch = fs.watch;
+  const woken = [];
+  fs.watch = (file, ...args) => {
+    const handle = nativeWatch(file, ...args);
+    handle.on('change', (_event, name) => woken.push([file, String(name)]));
+    return handle;
+  };
+  return { woken, nativeWatch, restore: () => { fs.watch = nativeWatch; } };
+}
+
+test('a link-count change to a symlinked file wakes no watch, while edits, replacement and a removed sibling link still rebuild', async () => {
+  if (process.platform !== 'linux') skip('only inotify is known to report a link-count change');
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const bin = newBazelBin();
+  const external = fs.mkdtempSync(path.join(tmpRoot, 'cache-'));
+  const target = path.join(external, 'value.js');
+  fs.writeFileSync(target, 'export const value = 1;');
+  const linked = path.join(bin, 'linked.js');
+  const second = path.join(bin, 'second.js');
+  fs.symlinkSync(target, linked);
+  fs.symlinkSync(target, second);
+  const batches = [];
+  const watcher = new BazelWatcher({
+    bazelBin: bin,
+    debounceMs: 20,
+    recursiveWatch: false,
+    onRebuild: (changed) => batches.push([...changed]),
+  });
+  const { woken, nativeWatch, restore } = recordWakes();
+  let linkCountEvents = 0;
+  const control = nativeWatch(target, () => linkCountEvents++);
+  const edited = async (what) => {
+    await waitUntil(what, () => batches.some((batch) => batch.includes(linked)));
+    batches.length = 0;
+  };
+  try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    woken.length = 0;
+    const staged = path.join(fs.mkdtempSync(path.join(tmpRoot, 'action-')), 'value.js');
+    fs.linkSync(target, staged);
+    fs.unlinkSync(staged);
+    await waitUntil('the link-count event', () => linkCountEvents > 0);
+    await sleep(100);
+    assert.deepEqual(woken, [], 'a link-count change woke a watch');
+    assert.deepEqual(batches, [], 'a link-count change was reported as a rebuild');
+
+    fs.writeFileSync(target, 'export const value = 2;');
+    await edited('the edit behind the link');
+    fs.writeFileSync(target + '.tmp', 'export const value = 3;');
+    fs.renameSync(target + '.tmp', target);
+    await edited('the target replaced by rename');
+    fs.unlinkSync(second);
+    await waitUntil('the removed second link', () => batches.some((batch) => batch.includes(second)));
+    batches.length = 0;
+    fs.writeFileSync(target, 'export const value = 4;');
+    await edited('an edit after another link into the directory went away');
+  } finally {
+    control.close();
+    await watcher.stop();
+    restore();
+  }
+});
+
+test('a metadata-only change to a bazel-bin file is not a rebuild', async () => {
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const bin = newBazelBin();
+  const plain = path.join(bin, 'plain.js');
+  fs.writeFileSync(plain, 'export const plain = 1;');
+  const batches = [];
+  const watcher = new BazelWatcher({
+    bazelBin: bin,
+    debounceMs: 20,
+    recursiveWatch: false,
+    onRebuild: (changed) => batches.push([...changed]),
+  });
+  const { woken, restore } = recordWakes();
+  try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    woken.length = 0;
+    fs.chmodSync(plain, 0o600);
+    await waitUntil('the attribute event', () => woken.some(([, name]) => name === 'plain.js'));
+    await sleep(100);
+    assert.deepEqual(batches, [], 'a mode change was reported as a rebuild');
+  } finally {
+    await watcher.stop();
+    restore();
+  }
+});
+
+test('a replaced target directory keeps reporting edits behind its links', async () => {
+  if (process.platform === 'darwin') skip('darwin watches each link itself');
+  if (!(await fsWatchDeliversEvents())) skip(NO_FS_EVENTS);
+  const bin = newBazelBin();
+  const external = fs.mkdtempSync(path.join(tmpRoot, 'cache-'));
+  const targets = path.join(external, 'targets');
+  fs.mkdirSync(targets);
+  fs.writeFileSync(path.join(targets, 'value.js'), 'export const value = 1;');
+  const linked = path.join(bin, 'linked.js');
+  fs.symlinkSync(path.join(targets, 'value.js'), linked);
+  const batches = [];
+  const watcher = new BazelWatcher({
+    bazelBin: bin,
+    debounceMs: 20,
+    recursiveWatch: false,
+    onRebuild: (changed) => batches.push([...changed]),
+  });
+  try {
+    await startArmed(() => watcher.start(), bin, batches, 20);
+    const next = path.join(external, 'next');
+    fs.mkdirSync(next);
+    fs.writeFileSync(path.join(next, 'value.js'), 'export const value = 2;');
+    fs.renameSync(targets, path.join(external, 'retired'));
+    fs.renameSync(next, targets);
+    await waitUntil('the swapped directory', () => batches.some((batch) => batch.includes(linked)));
+    batches.length = 0;
+    fs.writeFileSync(path.join(targets, 'value.js'), 'export const value = 3;');
+    await waitUntil('an edit in the new directory', () => batches.some((batch) => batch.includes(linked)));
+  } finally {
+    await watcher.stop();
+  }
+});
+
 // ── Vite's own watcher: the path the plugin takes ────────────────────────────
 
 test("an injected source is added to, filtered, and left open by stop()", async () => {
