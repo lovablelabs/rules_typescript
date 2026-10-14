@@ -140,7 +140,7 @@ func TestKeptManifestRootsPreserveDiscoveryIdentityAndCompilerFlags(t *testing.T
 	s := getConfig(c).programs
 	s.tsgoFlag = bin
 	original := &program{config: "app/package.json", dir: "app", manifest: true, Listing: explainfiles.Listing{Files: []string{"app/index.ts"}, Roots: []string{"app/index.ts"}}}
-	listed := s.withSources(c, original, []string{"app/extra.ts", "app/extra.ts", "app/index.ts"})
+	listed := s.withSources(c, original, []string{"app/extra.ts", "app/extra.ts", "app/index.ts"}, "", false)
 	if listed.config != original.config || listed.dir != original.dir || !listed.manifest {
 		t.Fatalf("manifest discovery identity changed: %+v", listed)
 	}

@@ -763,10 +763,12 @@ func listCompilerProgramContext(ctx context.Context, repoRoot, cfg, tsgo string,
 }
 
 func (s *programStore) withKeptSources(c *config.Config, p *program, pkg string, dirInfo ...func(string) (walk.DirInfo, error)) *program {
-	return s.withSources(c, p, s.keptProgramSources(c, pkg, dirInfo...))
+	return s.withSources(c, p, s.keptProgramSources(c, pkg, dirInfo...), pkg, false)
 }
 
-func (s *programStore) withSources(c *config.Config, p *program, sources []string) *program {
+// withSources is p rooting every source it does not list; with withSrcs the
+// sources include package srcsOf's srcs beside its kept ones.
+func (s *programStore) withSources(c *config.Config, p *program, sources []string, srcsOf string, withSrcs bool) *program {
 	if p.refused != "" {
 		return p
 	}
@@ -782,6 +784,7 @@ func (s *programStore) withSources(c *config.Config, p *program, sources []strin
 	if err != nil {
 		log.Fatalf("typescript: %v", err)
 	}
+	s.importFacts.rooted(listed, p, srcsOf, withSrcs)
 	return listed
 }
 
@@ -872,7 +875,7 @@ func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg str
 			if p.manifest || p.refused != "" {
 				return nil
 			}
-			return s.withSources(c, p, sources)
+			return s.withSources(c, p, sources, pkg, true)
 		}
 	}
 	p := s.compilerPrograms[cfg]
@@ -893,7 +896,7 @@ func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg str
 		}
 		s.compilerPrograms[cfg] = p
 	}
-	return s.withSources(c, p, sources)
+	return s.withSources(c, p, sources, pkg, true)
 }
 
 func compilerClosureError(p *program, consumer, selected string) error {

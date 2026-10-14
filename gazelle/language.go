@@ -143,6 +143,7 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if err := gateOnResolveVerify(fs, c, s.fullWalk); err != nil {
 		return err
 	}
+	traceRun("full pass")
 	if listingCacheDir != "" && parallelMode != "off" && s.fullWalk {
 		predecodes.start(listingCacheDir, parallelMode == "verify")
 	}
@@ -150,7 +151,18 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		return err
 	}
 	if runInputs != nil && fastPathMode != "off" {
-		s.importFacts = newImportFactsRecorder()
+		s.importFacts = newImportFactsRecorder(func() (outputs, generated []string) {
+			if s.emission != nil {
+				outputs = slices.Sorted(maps.Keys(s.emission.outputs))
+			}
+			for pkg := range s.generatedPackages {
+				if s.walked[pkg] {
+					generated = append(generated, pkg)
+				}
+			}
+			slices.Sort(generated)
+			return outputs, generated
+		})
 	}
 	return nil
 }
@@ -160,6 +172,7 @@ func (l *tsLang) KnownDirectives() []string {
 }
 
 func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
+	getConfig(c).programs.importFacts.configured(rel, f)
 	getConfig(c).programs.ruleListsMayChange()
 	getConfig(c).programs.touchPackage(rel)
 	configureTsConfig(c, rel, f, recordedDirInfo)
@@ -179,7 +192,7 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	if p := l.programs.programs[rel]; p != nil {
 		kept := l.programs.keptProgramSources(c, rel, recordedDirInfo)
 		l.programs.speculateSources(c, p, rel, kept)
-		p = l.programs.withSources(c, p, kept)
+		p = l.programs.withSources(c, p, kept, rel, false)
 		l.programs.record(p)
 		l.observeProgram(p)
 	}

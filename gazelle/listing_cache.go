@@ -126,13 +126,18 @@ func listingKey(repoRoot, tsgo, subject string, args []string) listingID {
 	id.key = hex.EncodeToString(h.Sum(nil))
 	if id.files != nil {
 		id.family = id.key
-		f := sha256.New()
-		for _, file := range id.files {
-			fmt.Fprintf(f, "%s\n", file)
-		}
-		id.key += "-" + hex.EncodeToString(f.Sum(nil))
+		id.key += "-" + filesListDigest(id.files)
 	}
 	return id
+}
+
+// filesListDigest names a files list within its family's keys.
+func filesListDigest(files []string) string {
+	h := sha256.New()
+	for _, file := range files {
+		fmt.Fprintf(h, "%s\n", file)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // splitFilesList is a projection without its files list, and the list's files
@@ -270,16 +275,21 @@ var loadedListings sync.Map
 // remember interns p and keeps its strings in the entry, which the run then reuses.
 func remember(key string, entry *cachedListing, p *program) *program {
 	internProgram(p)
+	entry.take(p)
+	loadedListings.Store(key, entry)
+	kept := programFromEntry(entry, p.config)
+	kept.key = key
+	return kept
+}
+
+// take makes p's listing, resolutions and candidates the entry's.
+func (entry *cachedListing) take(p *program) {
 	entry.Listing = p.Listing
 	entry.Candidates = make([]cachedCandidate, 0, len(p.candidates))
 	for _, c := range p.candidates {
 		entry.Candidates = append(entry.Candidates, c.cached())
 	}
 	entry.Resolution = p.resolution
-	loadedListings.Store(key, entry)
-	kept := programFromEntry(entry, p.config)
-	kept.key = key
-	return kept
 }
 
 // loadListing is the cached listing for id, and whether it was patched.

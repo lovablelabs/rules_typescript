@@ -19,6 +19,7 @@ go_library(
         "ctime_other.go",
         "emission.go",
         "fastpath.go",
+        "fastpath_edit.go",
         "finish_early.go",
         "generate.go",
         "inprocess.go",
