@@ -23,6 +23,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 
+	"github.com/microsoft/typescript-go/shim/listing"
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 	"github.com/mikn/rules_typescript/ts/tools/tsconfig"
 )
@@ -131,7 +132,10 @@ func (s *programStore) binary() (string, error) {
 		return "", err
 	}
 	s.tsgo = abs
-	s.say("listing programs with %s (%s)", abs, how)
+	s.say("listing programs with %s (%s), %s", abs, how, listingHow(abs))
+	if _, err := inProcessCompiler(abs); err != nil && listingInProcessMode == "verify" && !s.verbose {
+		log.Printf("typescript: -ts_listing_inproc=verify: nothing to verify, listing through tsgo: %v", err)
+	}
 	return abs, nil
 }
 
@@ -1048,7 +1052,23 @@ var uncachedListing = runListingUncached
 
 func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, args []string,
 ) (*program, error) {
-	args = append(append([]string{}, args...), "--traceResolution", "--locale", "en")
+	args = slices.Concat(args, []string{"--traceResolution", "--locale", "en"})
+	if compiler, _ := inProcessCompiler(tsgo); compiler != nil {
+		p, err := listInProcess(ctx, compiler, repoRoot, subject, args)
+		if !errors.Is(err, listing.ErrUnsupported) {
+			if err == nil && listingInProcessMode == "verify" {
+				verifyInProcess(ctx, repoRoot, tsgo, subject, args, p)
+			}
+			return p, err
+		}
+		if listingVerbose {
+			log.Printf("typescript: %s: listing through tsgo: %v", subject, err)
+		}
+	}
+	return listThroughTsgo(ctx, repoRoot, tsgo, subject, args)
+}
+
+func listThroughTsgo(ctx context.Context, repoRoot, tsgo, subject string, args []string) (*program, error) {
 	cmd := exec.CommandContext(ctx, tsgo, args...)
 	if ctx.Done() != nil {
 		dieWithParent(cmd)
@@ -1062,7 +1082,7 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 	}
 	var facts resolutionFacts
 	split := newTraceSplitter(repoRoot, &facts)
-	runErr := cmd.Start()
+	runErr := startTsgo(cmd)
 	if runErr == nil {
 		if err := eachLine(stdout, split.line); err != nil {
 			// Nothing reads the pipe tsgo still writes to, so it would never exit.
@@ -1076,15 +1096,20 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 		// A cancelled listing stopped part way, so it is not one to keep.
 		return nil, fmt.Errorf("%s: %w", subject, context.Cause(ctx))
 	}
-	listing, candidates, err := split.finish()
+	return programOfOutput(split, subject, args, runErr, stderr.String())
+}
+
+// programOfOutput is the program in what split took from tsgo's output.
+func programOfOutput(split *traceSplitter, subject string, args []string, runErr error, stderr string) (*program, error) {
+	text, candidates, err := split.finish()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
-	l, err := explainfiles.Parse(listing)
+	l, err := explainfiles.Parse(text)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
-	p := &program{Listing: *l, candidates: candidates, resolution: facts, config: subject}
+	p := &program{Listing: *l, candidates: candidates, resolution: *split.facts, config: subject}
 	internProgram(p)
 	for i := range p.candidates {
 		candidate := &p.candidates[i]
@@ -1097,8 +1122,8 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 		return p, nil
 	case len(p.Diagnostics) == 0:
 		return nil, fmt.Errorf("%s: tsgo %s failed (%v) with no diagnostic:\n%s%s",
-			subject, strings.Join(args, " "), runErr, listing,
-			stderr.String())
+			subject, strings.Join(args, " "), runErr, text,
+			stderr)
 	case len(p.Files) > 0, noInputs(p):
 		return p, nil
 	}

@@ -520,7 +520,7 @@ func recordKey(magic string, fs *flag.FlagSet, c *config.Config, skip ...string)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func checkRecordMode(flag, mode string) error {
+func checkModeFlag(flag, mode string) error {
 	switch mode {
 	case "on", "verify", "off":
 		return nil

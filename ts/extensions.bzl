@@ -4,7 +4,7 @@ source-built compiler."""
 load("@gazelle//:deps.bzl", "go_repository")
 load("//npm:lazy.bzl", "lockfile_registries")
 load("//npm/private:npm_translate_lock.bzl", "workspace_registries")
-load("//ts/private:go_mod.bzl", "go_repo_name", "tsgo_source_modules")
+load("//ts/private:go_mod.bzl", "go_repo_name", "parse_go_mod", "tsgo_source_modules")
 load(
     "//ts/private:toolchain.bzl",
     "TSGO_PLATFORMS",
@@ -28,6 +28,11 @@ load("//ts/private/actions:lint.bzl", "lint_config_repo")
 _DEFAULT_TSGO_LOCK = Label("//ts/private/tsgo:pnpm-lock.yaml")
 _TSGO_SOURCE_GO_MOD = Label("//ts/private/tsgo_source:go.mod")
 _TSGO_SOURCE_GO_SUM = Label("//ts/private/tsgo_source:go.sum")
+_LISTING_GO_MOD = Label("//gazelle/tsgolisting:go.mod")
+
+# Gazelle lists in process through the release's own source: none of the
+# compiler's patches, whose listings differ from the release binary's.
+_TSGO_RELEASE_REPO = "typescript_go_release"
 _TSGO_SOURCE_PATCHES = [
     Label("//ts/private/tsgo_source:isolated-declarations-bound-expando.patch"),
     Label("//ts/private/tsgo_source:module-augmentation-include-reason.patch"),
@@ -91,9 +96,17 @@ def _tsgo_source(module_ctx):
     tool = source.tool
     for module in source.modules:
         patches = _TSGO_SOURCE_PATCHES if module.path == tool.module else []
+
+        # Gazelle links typescript-go in, beside whatever copy of golang.org/x/sync
+        # and the like a binary's other languages bring: under their own importmap
+        # the two link as separate packages instead of conflicting.
+        directives = [] if module.path == tool.module else [
+            "gazelle:importmap_prefix rules_typescript_tsgo/" + module.path,
+        ]
         go_repository(
             name = go_repo_name(module.path),
             build_config = "@tsgo_source_modules//:WORKSPACE",
+            build_directives = directives,
             build_file_generation = "on",
             importpath = module.path,
             patch_args = ["-p1"],
@@ -101,6 +114,25 @@ def _tsgo_source(module_ctx):
             sum = module.sum,
             version = module.version,
         )
+    listed = parse_go_mod(module_ctx.read(_LISTING_GO_MOD)).requires.get(tool.module)
+    if listed != tool.version:
+        fail("{} requires {} {} and {} requires {}; the two go.mod files pin one typescript-go.".format(
+            _LISTING_GO_MOD,
+            tool.module,
+            listed,
+            _TSGO_SOURCE_GO_MOD,
+            tool.version,
+        ))
+    release = [m for m in source.modules if m.path == tool.module][0]
+    go_repository(
+        name = _TSGO_RELEASE_REPO,
+        build_config = "@tsgo_source_modules//:WORKSPACE",
+        build_directives = ["gazelle:go_visibility //visibility:public"],
+        build_file_generation = "on",
+        importpath = release.path,
+        sum = release.sum,
+        version = release.version,
+    )
     tsgo_source_repo(
         name = "tsgo_source",
         binary = "@{}//{}:{}".format(

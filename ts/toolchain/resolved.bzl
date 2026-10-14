@@ -36,6 +36,10 @@ def _tsgo_resolved_impl(ctx):
         outputs.append(out)
         if file == compiler:
             executable = out
+    if toolchain.tsgo_info.manifest:
+        manifest = ctx.actions.declare_file(ctx.label.name + "/package.json")
+        ctx.actions.symlink(output = manifest, target_file = toolchain.tsgo_info.manifest)
+        outputs.append(manifest)
     return [
         toolchain,
         platform_common.TemplateVariableInfo({toolchain.variable: executable.path}),

@@ -1,0 +1,27 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+# gazelle:prefix github.com/microsoft/typescript-go/shim/listing
+# gazelle:resolve_regexp go ^github\.com/microsoft/typescript-go/(internal/.+)$ @typescript_go_release//$1
+
+go_library(
+    name = "listing",
+    srcs = ["listing.go"],
+    importpath = "github.com/microsoft/typescript-go/shim/listing",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@typescript_go_release//internal/ast",
+        "@typescript_go_release//internal/collections",
+        "@typescript_go_release//internal/compiler",
+        "@typescript_go_release//internal/core",
+        "@typescript_go_release//internal/diagnostics",
+        "@typescript_go_release//internal/execute/tsc",
+        "@typescript_go_release//internal/locale",
+        "@typescript_go_release//internal/parser",
+        "@typescript_go_release//internal/tsoptions",
+        "@typescript_go_release//internal/tspath",
+        "@typescript_go_release//internal/vfs",
+        "@typescript_go_release//internal/vfs/osvfs",
+    ],
+)
+
+exports_files(["go.mod"])

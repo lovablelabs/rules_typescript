@@ -27,6 +27,7 @@ TsgoToolchainInfo = provider(
     fields = {
         "tsgo_binary": "File: The tsgo CLI binary.",
         "files": "depset of Files: The compiler and its runtime data.",
+        "manifest": "File or None: the package.json of the release the binary comes from.",
     },
 )
 
@@ -86,6 +87,7 @@ def _tsgo_toolchain_impl(ctx):
         tsgo_info = TsgoToolchainInfo(
             tsgo_binary = binary,
             files = files,
+            manifest = ctx.file.manifest,
         ),
         # Standard fields consumed by @toolchain_utils//toolchain:resolved.bzl.
         executable = binary,
@@ -101,6 +103,11 @@ tsgo_toolchain = rule(
     implementation = _tsgo_toolchain_impl,
     attrs = {
         "data": attr.label(allow_files = True, cfg = "exec"),
+        "manifest": attr.label(
+            doc = "The release's package.json, whose version Gazelle compares with the typescript-go it links in.",
+            allow_single_file = True,
+            cfg = "exec",
+        ),
         "tsgo_binary": attr.label(
             doc = "The tsgo CLI binary.",
             mandatory = True,
@@ -262,6 +269,7 @@ def declare_tsgo_toolchains(name, repo_prefix = None):
             name = "{}_impl".format(toolchain_name),
             tsgo_binary = "@{}_{}//:tsgo".format(repo_prefix, platform),
             data = "@{}_{}//:libs".format(repo_prefix, platform),
+            manifest = "@{}_{}//:package.json".format(repo_prefix, platform),
             tags = ["manual"],
         )
         native.toolchain(
@@ -422,7 +430,7 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-exports_files(["lib/{binary}"])
+exports_files(["lib/{binary}", "package.json"])
 """.format(binary = binary))
 
 tsgo_toolchain_repo = repository_rule(

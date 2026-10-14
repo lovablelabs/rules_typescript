@@ -59,6 +59,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 			"is a source edit whose new imports the rules already resolve; verify then runs the full pass and fails on any difference; off never does")
 	fs.BoolVar(&listingPatchVerify, "ts_listing_patch_verify", false,
 		"also list with tsgo every stale listing patched and every files list listed through its config's include, and fail on any difference")
+	fs.StringVar(&listingInProcessMode, "ts_listing_inproc", "on",
+		"on: list in this process through the typescript-go linked in when tsgo is a release of the same TypeScript version, "+
+			"else through tsgo; verify: also list each through tsgo and fail on any difference; off: always list through tsgo")
 	fs.StringVar(&parallelMode, "ts_parallel", "on",
 		"with -ts_listing_cache on a full recursive run, on: decode the cached listings on a worker pool ahead of the walk; "+
 			"off: decode each when the walk reaches it; verify: read each again when the walk reaches it and exit on any difference")
@@ -113,16 +116,19 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 			return fmt.Errorf("-ts_tsgo: %w", err)
 		}
 	}
-	if err := checkRecordMode("ts_run_record", runRecordMode); err != nil {
+	if err := checkModeFlag("ts_run_record", runRecordMode); err != nil {
 		return err
 	}
-	if err := checkRecordMode("ts_resolve_record", resolveRecordMode); err != nil {
+	if err := checkModeFlag("ts_resolve_record", resolveRecordMode); err != nil {
 		return err
 	}
-	if err := checkRecordMode("ts_parallel", parallelMode); err != nil {
+	if err := checkModeFlag("ts_listing_inproc", listingInProcessMode); err != nil {
 		return err
 	}
-	if err := checkRecordMode("ts_fastpath", fastPathMode); err != nil {
+	if err := checkModeFlag("ts_parallel", parallelMode); err != nil {
+		return err
+	}
+	if err := checkModeFlag("ts_fastpath", fastPathMode); err != nil {
 		return err
 	}
 	s := getConfig(c).programs
