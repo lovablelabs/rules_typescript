@@ -7835,3 +7835,38 @@ func TestBorrowedHelpersCannotBecomeTestRoots(t *testing.T) {
 		t.Fatal("redundant execution-root subset survived helper removal")
 	}
 }
+
+func TestCandidatesByDir_UnderKeepsTheWholeTreeAndOnlyCandidates(t *testing.T) {
+	p := &program{}
+	p.Files = []string{"main.ts", "web/a.ts", "web-x/b.ts", "web/sub/d.tsx", "web/sub/e.json", "webapp/f.ts",
+		"src/lib/j.ts", "assets/logo.json", "node_modules/g/index.d.ts", "../h.ts", "other/i.ts"}
+	under := func(root string) []string {
+		var got []string
+		for d := range p.candidatesByDir().under(root) {
+			got = append(got, d.dir)
+		}
+		return got
+	}
+	for _, tc := range []struct {
+		name, root string
+		want       []string
+	}{
+		{"the root scope yields every first-party candidate directory and no other", "", []string{"", "other", "src/lib", "web", "web-x", "web/sub", "webapp"}},
+		{"a sibling sorting between web and web/ does not end web's tree", "web", []string{"web", "web/sub"}},
+		{"a directory with no candidate of its own still yields its tree", "src", []string{"src/lib"}},
+		{"a root no source lies under yields nothing", "missing", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := under(tc.root); !slices.Equal(got, tc.want) {
+				t.Errorf("under(%q) = %q, want %q", tc.root, got, tc.want)
+			}
+		})
+	}
+	t.Run("a program whose Files is replaced is indexed again", func(t *testing.T) {
+		under("")
+		p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(f string) bool { return strings.HasPrefix(f, "web") })
+		if got, want := under(""), []string{"", "other", "src/lib"}; !slices.Equal(got, want) {
+			t.Errorf("under(\"\") after narrowing Files = %q, want %q", got, want)
+		}
+	})
+}
