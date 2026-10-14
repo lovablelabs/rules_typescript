@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/gob"
 	"fmt"
@@ -38,7 +39,7 @@ func refuse(reason string) *program {
 	return nil
 }
 
-const patchStateVersion = 2
+const patchStateVersion = 3
 
 type cachedSource struct {
 	Specs []string
@@ -82,7 +83,9 @@ type patchConfig struct {
 	IncludeDir, ExcludeDir string
 	ModuleSuffixes         bool
 	// Why no root may be added or removed without tsgo; empty when one may.
-	Refused string
+	Refused  string
+	Paths    []tsconfig.Path
+	PathsDir string
 }
 
 // recordPatchState keeps each read's stat line, each include root's name digest,
@@ -133,6 +136,9 @@ func newPatchConfig(project *tsconfig.Resolved, projectDir string) *patchConfig 
 	}
 	options := readPatchOptions(project.Configs)
 	c := &patchConfig{IncludeDir: project.IncludeDir, ExcludeDir: project.ExcludeDir, ModuleSuffixes: options.suffixes}
+	if project.Paths != nil {
+		c.Paths, c.PathsDir = *project.Paths, project.PathsDir
+	}
 	switch {
 	case project.Files != nil:
 		c.Refused = "a files list names roots"
@@ -958,8 +964,8 @@ func (t *patcher) reresolve(id int) bool {
 		return true
 	}
 	c := cands[0]
-	if c.kind == explainfiles.TypeReference || !relativeSpecifier(c.specifier) {
-		return t.fail("a probe of a type reference or bare specifier changed")
+	if c.kind == explainfiles.TypeReference {
+		return t.fail("a probe of a type reference changed")
 	}
 	k := importKey{c.from, c.specifier}
 	if old := cands[len(cands)-1].resolved; old != "" {
@@ -972,7 +978,13 @@ func (t *patcher) reresolve(id int) bool {
 	}
 	delete(t.blocks, id)
 	t.blocksOf[k] = slices.DeleteFunc(t.blocksOf[k], func(b int) bool { return b == id })
-	return t.resolveNew(c.from, c.specifier, false)
+	if relativeSpecifier(c.specifier) {
+		return t.resolveRelative(c.from, c.specifier)
+	}
+	if done, why := t.resolveAlias(c.from, c.specifier); !done {
+		return t.fail("a probe of a bare specifier changed and " + cmp.Or(why, "no paths pattern maps it"))
+	}
+	return true
 }
 
 func (t *patcher) addBlock(from, text string, cands []resolutionCandidate, edge *explainfiles.Edge) {
@@ -1003,7 +1015,14 @@ func (t *patcher) resolveNew(from, text string, implicit bool) bool {
 	if relativeSpecifier(text) {
 		return t.resolveRelative(from, text)
 	}
-	return t.reuseBare(from, text, implicit)
+	why := ""
+	if !implicit {
+		var done bool
+		if done, why = t.resolveAlias(from, text); done {
+			return true
+		}
+	}
+	return t.reuseBare(from, text, implicit, why)
 }
 
 // resolveRelative resolves a relative specifier as tsgo's bundler resolution
@@ -1029,23 +1048,110 @@ func (t *patcher) resolveRelative(from, text string) bool {
 	if !ok {
 		return false
 	}
-	_, cands, err := splitResolutionTrace(t.root, trace)
-	if err != nil {
-		return t.fail("a written resolution trace did not parse: " + err.Error())
-	}
-	var edge *explainfiles.Edge
-	if resolved != "" {
-		switch {
-		case !firstParty(resolved):
-			return t.fail("a relative specifier resolved outside the first-party tree")
-		case rootStem(resolved) == "":
-			return t.fail("a relative specifier resolved to a file that is not TypeScript")
-		}
-		edge = &explainfiles.Edge{Kind: explainfiles.Import, From: from, To: resolved, Specifier: text}
+	cands, edge, why := t.traced(from, text, trace, resolved)
+	if why != "" {
+		return t.fail(why)
 	}
 	t.addBlock(from, text, cands, edge)
 	return true
 }
+
+// traced is the candidates a written trace records and the edge to what it resolved.
+func (t *patcher) traced(from, text, trace, resolved string) ([]resolutionCandidate, *explainfiles.Edge, string) {
+	_, cands, err := splitResolutionTrace(t.root, trace)
+	if err != nil {
+		return nil, nil, "a written resolution trace did not parse: " + err.Error()
+	}
+	if resolved == "" {
+		return cands, nil, ""
+	}
+	switch {
+	case !firstParty(resolved):
+		return nil, nil, "a specifier resolved outside the first-party tree"
+	case rootStem(resolved) == "":
+		return nil, nil, "a specifier resolved to a file that is not TypeScript"
+	}
+	return cands, &explainfiles.Edge{Kind: explainfiles.Import, From: from, To: resolved, Specifier: text}, ""
+}
+
+// resolveAlias is tsgo's tryLoadModuleUsingPaths when one pattern with one
+// extensionless substitution finds a file; why is "" when no pattern matches.
+func (t *patcher) resolveAlias(from, text string) (done bool, why string) {
+	facts, cfg := t.entry.Resolution, t.entry.Config
+	if len(cfg.Paths) == 0 {
+		return false, ""
+	}
+	var matched []tsconfig.Path
+	for _, p := range cfg.Paths {
+		if p.Key == text && !strings.Contains(p.Key, "*") {
+			return false, "an exact paths key names the specifier"
+		}
+		prefix, suffix, star := strings.Cut(p.Key, "*")
+		if star && !strings.Contains(suffix, "*") && len(text) >= len(prefix)+len(suffix) &&
+			strings.HasPrefix(text, prefix) && strings.HasSuffix(text, suffix) {
+			matched = append(matched, p)
+		}
+	}
+	switch {
+	case len(matched) == 0:
+		return false, ""
+	case len(matched) > 1:
+		return false, "more than one paths pattern matches the specifier"
+	case len(matched[0].Values) != 1:
+		return false, "the paths pattern has a fallback substitution"
+	case len(facts.Kinds) != 1 || !strings.HasSuffix(facts.Kinds[0], "'Bundler'."):
+		return false, "the program does not resolve with bundler alone"
+	case cfg.ModuleSuffixes:
+		return false, "moduleSuffixes redirect a substituted candidate"
+	case len(facts.SubstitutionTargets) != 1:
+		return false, "no single substituted resolution to follow"
+	}
+	pattern, substitution := matched[0].Key, matched[0].Values[0]
+	prefix, suffix, _ := strings.Cut(pattern, "*")
+	substituted := strings.Replace(substitution, "*", text[len(prefix):len(text)-len(suffix)], 1)
+	tail := strings.TrimPrefix(substituted, "./")
+	switch {
+	case strings.Contains(substitution, "${") || strings.Contains(substituted, "\\") || path.IsAbs(substituted):
+		return false, "a paths substitution is rooted or names ${configDir}"
+	case tail == "" || path.Clean(tail) != tail || tail == ".." || strings.HasPrefix(tail, "../"):
+		return false, "a substituted candidate is not a plain path below the paths directory"
+	}
+	if slices.ContainsFunc(moduleExtensions, func(ext string) bool { return strings.HasSuffix(tail, ext) }) {
+		return false, "a substituted candidate has a JavaScript, JSON or TypeScript extension"
+	}
+	base, ok := t.rel(cfg.PathsDir)
+	if !ok {
+		return false, "the paths directory is outside the repository"
+	}
+	if base == "." {
+		base = ""
+	}
+	if !slices.Contains(facts.Substitutions, pattern+"\x00"+substitution+"\x00"+base) {
+		return false, "no traced resolution substituted the paths pattern as its config says: " + pattern
+	}
+	candidate := filepath.Join(cfg.PathsDir, filepath.FromSlash(tail))
+	r := relativeResolver{t: t, targets: facts.SubstitutionTargets[0]}
+	r.line("======== Resolving module '%s' from '%s'. ========", text, t.abs(from))
+	r.line("'paths' option is specified, looking for a pattern to match module name '%s'.", text)
+	r.line("Module name '%s', matched pattern '%s'.", text, pattern)
+	r.line("Trying substitution '%s', candidate module location: '%s'.", substitution, substituted)
+	trace, resolved, why := r.load(text, candidate, false)
+	switch {
+	case why != "":
+		return false, why
+	case resolved == "":
+		return false, "a substituted candidate finds nothing, so tsgo goes on to other lookups"
+	}
+	cands, edge, why := t.traced(from, text, trace, resolved)
+	if why != "" {
+		return false, why
+	}
+	t.addBlock(from, text, cands, edge)
+	return true, ""
+}
+
+// moduleExtensions are the endings tsgo's RemoveFileExtension strips, longest first.
+var moduleExtensions = []string{".d.mts", ".d.cts", ".d.ts", ".mjs", ".cjs", ".mts", ".cts", ".json", ".tsx", ".ts", ".jsx", ".js"}
 
 type relativeResolver struct {
 	t       *patcher
@@ -1077,25 +1183,36 @@ func (r *relativeResolver) resolve(from, text string) (string, string, bool) {
 	if _, ok := t.rel(candidate); !ok {
 		return "", "", t.fail("a relative specifier leaves the repository")
 	}
+	r.line("======== Resolving module '%s' from '%s'. ========", text, fromAbs)
+	trace, resolved, why := r.load(text, candidate, trailing)
+	if why != "" {
+		return "", "", t.fail(why)
+	}
+	return trace, resolved, true
+}
+
+// load is tsgo's nodeLoadModuleByRelativeName for one candidate: the trace so
+// far with its lines, what it resolved, and what it does not model.
+func (r *relativeResolver) load(text, candidate string, trailing bool) (string, string, string) {
+	t := r.t
 	shown := candidate
 	if trailing {
 		shown += "/"
 	}
-	r.line("======== Resolving module '%s' from '%s'. ========", text, fromAbs)
 	r.line("Loading module as file / folder, candidate module location '%s', target file types: %s.", shown, r.targets)
 	extensions := map[string]bool{}
 	for name := range strings.SplitSeq(r.targets, ", ") {
 		extensions[name] = true
 	}
 	resolved := ""
-	finish := func() (string, string, bool) {
+	finish := func() (string, string, string) {
 		if resolved == "" {
 			r.line("======== Module name '%s' was not resolved. ========", text)
-			return r.trace.String(), "", true
+			return r.trace.String(), "", ""
 		}
 		r.line("======== Module name '%s' was successfully resolved to '%s'. ========", text, resolved)
 		rel, _ := t.rel(resolved)
-		return r.trace.String(), rel, true
+		return r.trace.String(), rel, ""
 	}
 	if !trailing {
 		if parent := filepath.Dir(candidate); !r.isDir(parent) {
@@ -1113,7 +1230,7 @@ func (r *relativeResolver) resolve(from, text string) (string, string, bool) {
 	}
 	manifest := filepath.Join(candidate, "package.json")
 	if r.isFile(manifest) {
-		return "", "", t.fail("a relative specifier names a directory with a package.json")
+		return "", "", "a specifier names a directory with a package.json"
 	}
 	r.line("File '%s' does not exist.", manifest)
 	resolved = r.fromFile(extensions, filepath.Join(candidate, "index"))
@@ -1123,7 +1240,7 @@ func (r *relativeResolver) resolve(from, text string) (string, string, bool) {
 func (r *relativeResolver) fromFile(extensions map[string]bool, candidate string) string {
 	if base := filepath.Base(candidate); strings.Contains(base, ".") {
 		extensionless := candidate
-		for _, ext := range []string{".d.mts", ".d.cts", ".d.ts", ".mjs", ".cjs", ".mts", ".cts", ".json", ".tsx", ".ts", ".jsx", ".js"} {
+		for _, ext := range moduleExtensions {
 			if before, ok := strings.CutSuffix(candidate, ext); ok {
 				extensionless = before
 				break
@@ -1241,7 +1358,7 @@ func upDir(dir string) (string, bool) {
 
 // reuseBare copies another importer's resolution of a bare specifier: with the same
 // format, package scope and node_modules, only its package.json walk differs.
-func (t *patcher) reuseBare(from, text string, implicit bool) bool {
+func (t *patcher) reuseBare(from, text string, implicit bool, aliasRefusal string) bool {
 	if t.specOwners == nil {
 		t.specOwners = map[string][]string{}
 		for file, src := range t.sources {
@@ -1272,6 +1389,9 @@ func (t *patcher) reuseBare(from, text string, implicit bool) bool {
 			continue
 		}
 		return t.copyResolution(owner, from, text)
+	}
+	if aliasRefusal != "" {
+		return t.fail("a bare specifier no importer in the same scope resolves: " + text + " (" + aliasRefusal + ")")
 	}
 	return t.fail("a bare specifier no importer in the same scope resolves: " + text)
 }
