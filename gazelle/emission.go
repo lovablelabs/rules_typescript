@@ -387,6 +387,12 @@ func (s *programStore) recordEmissionConsumers(c *config.Config, pkg string) {
 func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 	defer func() {
 		logListingCache()
+		if in := runInputs; in != nil && l.programs != nil {
+			facts := l.programs.importFacts.seal()
+			in.mu.Lock()
+			in.facts = facts
+			in.mu.Unlock()
+		}
 		writeRunCandidate()
 	}()
 	if l.programs == nil || l.programs.emission == nil {

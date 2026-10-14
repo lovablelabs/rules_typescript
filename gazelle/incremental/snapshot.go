@@ -173,6 +173,9 @@ type StatCache struct{ lines sync.Map }
 // Line is path's fingerprint line, "absent" when it does not exist.
 func (c *StatCache) Line(path string) string { return c.line(path) }
 
+// EntryLine is path's stat line read now, past any cache.
+func EntryLine(path string) string { return entryLine(path) }
+
 func (c *StatCache) line(path string) string {
 	if c == nil {
 		return entryLine(path)

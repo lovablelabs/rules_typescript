@@ -506,17 +506,26 @@ func (t *patcher) rel(abs string) (string, bool) {
 // files and a changed files list, keeping every resolution whose probes still
 // find what they found.
 func patchListing(entry *cachedListing, subject string, filesList []string) *program {
+	p, why := tryPatchListing(entry, subject, filesList)
+	if p == nil {
+		return refuse(why)
+	}
+	return p
+}
+
+// tryPatchListing is patchListing returning why it refused, for callers that patch concurrently.
+func tryPatchListing(entry *cachedListing, subject string, filesList []string) (*program, string) {
 	if entry.PatchVersion != patchStateVersion || entry.Sources == nil || entry.Config == nil ||
 		len(entry.ReadLines) != len(entry.Reads) || len(entry.DirDigests) != len(entry.Dirs) {
-		return refuse("no patch state")
+		return nil, "no patch state"
 	}
 	t := &patcher{entry: entry, root: entry.Root, filesList: filesList, dirty: map[int]bool{}, scopes: map[string]string{}, nms: map[string]string{}}
 	p := t.patch(subject)
 	if p == nil {
-		return refuse(t.refusal)
+		return nil, t.refusal
 	}
 	listingPatched.Add(1)
-	return p
+	return p, ""
 }
 
 func (t *patcher) patch(subject string) *program {

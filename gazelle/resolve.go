@@ -407,20 +407,29 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 		}
 	}
 	deps := map[string]dependencyRequirement{}
+	normalized := func(dep string) string {
+		if lbl, err := parseLabel(dep); dep != "" && err == nil {
+			return relativeLabel(lbl, c.RepoName, from.Pkg).String()
+		}
+		return dep
+	}
 	addDep := func(dep string, unconditional bool, edges ...explainfiles.Edge) {
 		if dep == "" {
 			return
 		}
-		if lbl, err := parseLabel(dep); err == nil {
-			dep = relativeLabel(lbl, c.RepoName, from.Pkg).String()
-		}
+		dep = normalized(dep)
 		required := deps[dep]
 		required.edges = append(required.edges, edges...)
 		required.unconditional = required.unconditional || unconditional || slices.ContainsFunc(edges, func(edge explainfiles.Edge) bool { return slices.Contains(typeEdges, edge) })
 		deps[dep] = required
 	}
+	facts := tc.programs.importFacts.beginResolve()
+	defer facts.end()
 	for _, dep := range imps.deps {
 		addDep(dep, true)
+		if facts != nil && dep != "" {
+			facts.unconditional(normalized(dep))
+		}
 	}
 	configImporters := map[string]bool{}
 	configUsesPool := false
@@ -465,7 +474,8 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 			retainScope(scope, spec.Imp)
 		}
 	}
-	walk := func(p *program, edges []explainfiles.Edge, candidates []resolutionCandidate, configFiles map[string]bool) {
+	walk := func(p *program, edges []explainfiles.Edge, initial []string, candidates []resolutionCandidate, configFiles map[string]bool) {
+		walked := facts.beginWalk(p, initial, configFiles != nil, normalized)
 		addEdgeDep := func(e explainfiles.Edge, dep string, storeSource bool) bool {
 			if dep == "" {
 				return false
@@ -539,7 +549,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 			store bool
 		}
 		reached := map[reachedFile]bool{}
-		for len(queue) > 0 {
+		for popped := 0; len(queue) > 0; popped++ {
 			e, store := queue[0].edge, queue[0].store
 			queue = queue[1:]
 			if linkedMember && (sourceMember || isDeclarationFile(e.From)) && configFiles == nil && strings.HasPrefix(e.From, from.Pkg+"/") &&
@@ -556,7 +566,10 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					addEdgeDep(e, tc.lock.edgeLabel(e, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))), true)
 				}
 			} else if firstParty(e.From) || configFiles == nil && e.Kind == explainfiles.TypeReference && !firstParty(e.To) {
-				dep, direct := edgeDep(c, ix, tc, e, from, reported, srcs, configFiles, sourceOwner...)
+				dep, direct, owned := edgeDep(c, ix, tc, e, from, reported, srcs, configFiles, sourceOwner...)
+				if popped < len(edges) && configFiles == nil {
+					walked.outcome(e.To, dep, direct, owned)
+				}
 				source = direct
 				store = addEdgeDep(e, dep, false) && source
 				if tc.lock != nil {
@@ -597,17 +610,28 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 				}
 			}
 		}
+		if walked != nil {
+			plain, viaStore := map[string]bool{}, map[string]bool{}
+			for key := range reached {
+				if key.store {
+					viaStore[key.file] = true
+				} else {
+					plain[key.file] = true
+				}
+			}
+			walked.end(plain, viaStore)
+		}
 	}
-	walk(imps.program, imps.edges, imps.candidates, nil)
+	walk(imps.program, imps.edges, imps.sources, imps.candidates, nil)
 	var typeCandidates []resolutionCandidate
 	if imps.program != nil {
 		typeCandidates = imps.program.ownedCandidates([]string{imps.program.config})
 	}
-	walk(imps.program, typeEdges, typeCandidates, nil)
+	walk(imps.program, typeEdges, nil, typeCandidates, nil)
 	if imps.config != "" {
 		files := map[string]bool{}
 		if tc.programs.requireInput(c, ix, imps.config, from.String()) == generatedInput {
-			if dep, _ := edgeDep(c, ix, tc, explainfiles.Edge{From: imps.config, To: imps.config}, from, reported, nil, files); dep != "" {
+			if dep, _, _ := edgeDep(c, ix, tc, explainfiles.Edge{From: imps.config, To: imps.config}, from, reported, nil, files); dep != "" {
 				addDep(dep, true)
 			}
 		} else {
@@ -623,7 +647,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					}
 				}
 			}
-			walk(p, sourceEdges(p.edgesBySource(), []string{imps.config}), candidates, files)
+			walk(p, sourceEdges(p.edgesBySource(), []string{imps.config}), []string{imps.config}, candidates, files)
 		}
 		files[imps.config] = true
 		// An emitted owner publishes a rewritten scope that staging the authored File would replace.
@@ -1542,7 +1566,7 @@ func configSrcPackage(tc *tsConfig, file, configDir string) string {
 
 func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 	e explainfiles.Edge, from label.Label, reported map[string]bool, srcs map[string]sourceInput, configFiles map[string]bool,
-	sourceOwner ...func(string) emissionMode) (dep string, source bool) {
+	sourceOwner ...func(string) emissionMode) (dep string, source, owned bool) {
 	s := tc.programs
 	readsSources := func(owner string) bool {
 		mode := sourceOwner[0](owner)
@@ -1553,7 +1577,7 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 	}
 	if !firstParty(e.To) {
 		if npmPackageName(e.To) == "" {
-			return "", false
+			return "", false, false
 		}
 		if tc.lock == nil {
 			if !s.noLockSaid {
@@ -1561,9 +1585,9 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 				log.Printf("typescript: no %s at the repository root, so no hub "+
 					"declares an npm package; npm imports get no dep", pnpmLockfileName)
 			}
-			return "", false
+			return "", false, false
 		}
-		return tc.lock.edgeLabel(e, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))), false
+		return tc.lock.edgeLabel(e, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))), false, false
 	}
 	spec := resolve.ImportSpec{Lang: languageName, Imp: e.To}
 	// Stage the declared File; its owner supplies any declared runtime closure.
@@ -1573,12 +1597,12 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 				configFiles[e.To] = true
 			}
 			owner, _ := generatedDep(c, ix, tc, e.To, from)
-			return owner, false
+			return owner, false, false
 		}
 	}
 	generated, generatedOwner := generatedDep(c, ix, tc, e.To, from)
 	if generatedOwner {
-		return generated, false
+		return generated, false, false
 	}
 	producer, pkg := s.outputProducer(e.To)
 	generatedFile := producer != nil
@@ -1588,10 +1612,10 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 			if lbl, ok := tc.lock.memberView(e.Specifier, e.From, from.Pkg, tc.programs.nearestManifest(c, parentDir(e.From))); ok {
 				if configFiles == nil && len(sourceOwner) > 0 {
 					if key, owner := programDependencyTarget(c, from, lbl); owner != nil {
-						return lbl, readsSources(key)
+						return lbl, readsSources(key), false
 					}
 				}
-				return lbl, configFiles != nil
+				return lbl, configFiles != nil, false
 			}
 		}
 		if configFiles != nil && !isDeclarationFile(e.To) {
@@ -1600,15 +1624,16 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 		owner, held := generated, generated != ""
 		if !held {
 			owner, held = ruleHolding(c, ix, spec, from, sourceRole)
+			owned = held
 		}
 		if held {
 			if owner != "" && configFiles == nil && len(sourceOwner) > 0 {
-				return owner, readsSources(owner)
+				return owner, readsSources(owner), owned
 			}
-			return owner, owner == "" && srcs != nil || configFiles != nil
+			return owner, owner == "" && srcs != nil || configFiles != nil, owned
 		}
 		if configFiles != nil {
-			return "", true
+			return "", true, false
 		}
 	}
 	if srcs != nil && (slices.Contains(tsSourceExtensions, path.Ext(e.To)) ||
@@ -1632,17 +1657,17 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 			}
 			if _, ok := srcLabel(name); !ok {
 				reportEdge(from, e, "file name contains ':'; no Bazel label can name it", reported)
-				return "", false
+				return "", false, false
 			}
 			retainSourceInput(c, from, srcs, e.To, sourceRole)
 			if twin := javaScriptTwin(e.To); twin != "" && !generatedFile && s.exportedTo(c, twin, from) {
 				retainSourceInput(c, from, srcs, twin, sourceRole)
 			}
-			return generated, true
+			return generated, true, false
 		}
 	}
 	reportEdge(from, e, s.whyUnowned(e.To), reported)
-	return "", false
+	return "", false, false
 }
 
 // The listing names a declaration, never its same-stem twin; only an explicit export makes the twin a runtime input.

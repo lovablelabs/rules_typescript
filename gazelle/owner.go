@@ -182,6 +182,13 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 			queue = append(queue, edge.To)
 		}
 	}
+	if s.importFacts != nil {
+		var chosen []candidateKeyText
+		for k := range selected {
+			chosen = append(chosen, candidateKeyText{k.from, k.specifier, k.block})
+		}
+		s.importFacts.selection(p, p.Files, reached, chosen)
+	}
 	p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(file string) bool { return !reached[file] })
 	p.Edges = edges
 	p.moduleEdges = nil

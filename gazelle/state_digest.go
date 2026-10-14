@@ -542,6 +542,8 @@ func programDigest(p *program) [sha256.Size]byte {
 	d.str(p.dir)
 	d.str(p.refused)
 	d.bool(p.manifest)
+	// The listing key names the cache entry a replayed record's import facts refer to.
+	d.str(p.key)
 	return d.sum()
 }
 
@@ -621,6 +623,7 @@ func (d *stateHasher) imports(v any) {
 		d.str("rule")
 		d.program(imps.program)
 		each(d, imps.candidates, d.candidate)
+		d.strs(imps.sources)
 		each(d, imps.edges, d.edge)
 		d.str(imps.config)
 		d.strs(imps.deps)

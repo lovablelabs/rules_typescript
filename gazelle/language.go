@@ -54,6 +54,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 	fs.StringVar(&runRecordMode, "ts_run_record", "on",
 		"with -ts_listing_cache on a full fix or diff run: on exits at once when every input matches the last run that changed nothing; "+
 			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
+	fs.StringVar(&fastPathMode, "ts_fastpath", "on",
+		"with -ts_listing_cache on a full fix or diff run whose run record no longer matches: on replays the record when every change "+
+			"is a source edit whose new imports the rules already resolve; verify then runs the full pass and fails on any difference; off never does")
 	fs.BoolVar(&listingPatchVerify, "ts_listing_patch_verify", false,
 		"also list every patched stale listing with tsgo, and fail on any difference")
 	fs.StringVar(&parallelMode, "ts_parallel", "on",
@@ -119,6 +122,9 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if err := checkRecordMode("ts_parallel", parallelMode); err != nil {
 		return err
 	}
+	if err := checkRecordMode("ts_fastpath", fastPathMode); err != nil {
+		return err
+	}
 	s := getConfig(c).programs
 	// Only the process that does the work gets past the gate, so a replay decodes nothing.
 	if err := gateOnRunRecord(fs, c, s.fullWalk); err != nil {
@@ -127,7 +133,13 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if listingCacheDir != "" && parallelMode != "off" && s.fullWalk {
 		predecodes.start(listingCacheDir, parallelMode == "verify")
 	}
-	return startResolveRecord(fs, c, s)
+	if err := startResolveRecord(fs, c, s); err != nil {
+		return err
+	}
+	if runInputs != nil && fastPathMode != "off" {
+		s.importFacts = newImportFactsRecorder()
+	}
+	return nil
 }
 
 func (l *tsLang) KnownDirectives() []string {

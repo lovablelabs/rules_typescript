@@ -3183,7 +3183,7 @@ func TestResolveEdges_UnownedClosureStopsAtExistingOwners(t *testing.T) {
 			tc.programs.programs["web"].Roots = []string{rootEdge.From}
 			tc.programs.selectProgram(c, tc.programs.programs["web"])
 			if owner == "dependency only" {
-				_, source := edgeDep(c, ix, tc, rootEdge, label.New("", "web", "web_test"), map[string]bool{}, nil, nil)
+				_, source, _ := edgeDep(c, ix, tc, rootEdge, label.New("", "web", "web_test"), map[string]bool{}, nil, nil)
 				if source {
 					t.Fatal("dependency-only resolver selected a direct source")
 				}

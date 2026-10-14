@@ -3,6 +3,7 @@ package typescript
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -36,7 +37,7 @@ var runRecordMode = "on"
 
 const (
 	runRecordName  = "run-record"
-	runRecordMagic = "rules_typescript gazelle run record v2"
+	runRecordMagic = "rules_typescript gazelle run record v3"
 	// Set by the run that spawns a recording run: where it leaves its candidate.
 	runRecordCandidateEnv = "RULES_TYPESCRIPT_GAZELLE_RUN_RECORD_CANDIDATE"
 	// git's racy-clean rule: a stamp this close to the run's start may hide a
@@ -65,6 +66,10 @@ type inputSet struct {
 	repoRoot   string
 	cache      string
 	buildNames []string
+	// facts are the Resolve phase's import facts, sealed when it ends or taken from a replayed resolve record.
+	facts []byte
+	// listings are the reads of listings a replayed resolve record's phase read.
+	listings []recordedListing
 }
 
 type dirSnapshot struct {
@@ -166,14 +171,21 @@ type runRecord struct {
 	dirs, files, reads, roots []string
 	exit                      int
 	stdout, stderr            []byte
+	// facts are the run's import facts and sums its inputs' inputSums, which
+	// the fast path reads when the record no longer matches.
+	facts []byte
+	sums  []uint64
 }
 
 func (r *runRecord) lists() []*[]string { return []*[]string{&r.dirs, &r.files, &r.reads, &r.roots} }
 
 func (r *runRecord) encode() ([]byte, error) {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest,
-		len(r.dirs), len(r.files), len(r.reads), len(r.roots), r.exit, len(r.stdout), len(r.stderr))
+	if len(r.sums) != 0 && len(r.sums) != len(r.dirs)+len(r.files)+len(r.reads)+len(r.roots) {
+		return nil, fmt.Errorf("%d input sums for %d inputs", len(r.sums), len(r.dirs)+len(r.files)+len(r.reads)+len(r.roots))
+	}
+	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest,
+		len(r.dirs), len(r.files), len(r.reads), len(r.roots), r.exit, len(r.stdout), len(r.stderr), len(r.facts), len(r.sums))
 	for _, list := range r.lists() {
 		for _, p := range *list {
 			if strings.ContainsAny(p, "\n\r") {
@@ -185,6 +197,12 @@ func (r *runRecord) encode() ([]byte, error) {
 	}
 	b.Write(r.stdout)
 	b.Write(r.stderr)
+	b.Write(r.facts)
+	sums := make([]byte, 0, 8*len(r.sums))
+	for _, sum := range r.sums {
+		sums = binary.BigEndian.AppendUint64(sums, sum)
+	}
+	b.Write(sums)
 	return b.Bytes(), nil
 }
 
@@ -228,7 +246,7 @@ func loadRunRecord(file string) *runRecord {
 		}
 		return out
 	}
-	counts, tail := numbers(header[4], len(r.lists())), numbers(header[5], 3)
+	counts, tail := numbers(header[4], len(r.lists())), numbers(header[5], 5)
 	if counts == nil || tail == nil {
 		return nil
 	}
@@ -241,10 +259,27 @@ func loadRunRecord(file string) *runRecord {
 			*list = append(*list, p)
 		}
 	}
-	if tail[1] > len(data) || len(data)-tail[1] != tail[2] {
+	if n := tail[4]; n != 0 && n != counts[0]+counts[1]+counts[2]+counts[3] {
 		return nil
 	}
-	r.exit, r.stdout, r.stderr = tail[0], data[:tail[1]], data[tail[1]:]
+	rest := len(data)
+	for _, n := range tail[1:4] {
+		if n > rest {
+			return nil
+		}
+		rest -= n
+	}
+	if rest != 8*tail[4] {
+		return nil
+	}
+	r.exit = tail[0]
+	r.stdout, data = data[:tail[1]:tail[1]], data[tail[1]:]
+	r.stderr, data = data[:tail[2]:tail[2]], data[tail[2]:]
+	r.facts, data = data[:tail[3]:tail[3]], data[tail[3]:]
+	r.sums = make([]uint64, 0, tail[4])
+	for i := range tail[4] {
+		r.sums = append(r.sums, binary.BigEndian.Uint64(data[8*i:]))
+	}
 	return r
 }
 
@@ -342,7 +377,7 @@ func fileLines(files []string, stamps *newest) []string {
 func listingReadLines(reads []string, stamps *newest) []string {
 	lines := make([]string, len(reads))
 	parallel(len(reads), func(i int) {
-		lines[i] = (*incremental.StatCache)(nil).Line(reads[i])
+		lines[i] = incremental.EntryLine(reads[i])
 		if stamps != nil {
 			_, t := fileLine(reads[i])
 			stamps.see(t)
@@ -530,7 +565,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if in := runInputs; in != nil {
 		cache, _ := filepath.Abs(listingCacheDir)
 		in.mu.Lock()
-		in.key, in.repoRoot, in.cache, in.buildNames = recordKey(runRecordMagic, fs, c, "ts_run_record"), c.RepoRoot, cache, c.ValidBuildFileNames
+		in.key, in.repoRoot, in.cache, in.buildNames = recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath"), c.RepoRoot, cache, c.ValidBuildFileNames
 		in.mu.Unlock()
 		if exe, err := os.Executable(); err == nil {
 			noteRead(exe)
@@ -550,18 +585,25 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if err := os.MkdirAll(cache, 0o755); err != nil {
 		return err
 	}
-	key := recordKey(runRecordMagic, fs, c, "ts_run_record")
+	key := recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath")
 	file := filepath.Join(cache, runRecordName+"-"+key[:16])
-	if rec := loadRunRecord(file); rec != nil && rec.key == key && rec.matches(c.ValidBuildFileNames, cache, nil) {
-		if runRecordMode == "verify" {
-			os.Exit(verifyReplay(fs, file, rec))
+	if rec := loadRunRecord(file); rec != nil && rec.key == key {
+		stamps := &newest{}
+		matched, dirs := rec.check(c.ValidBuildFileNames, cache, stamps)
+		if matched {
+			if runRecordMode == "verify" {
+				os.Exit(verifyReplay(fs, file, rec))
+			}
+			os.Stdout.Write(rec.stdout)
+			os.Stderr.Write(rec.stderr)
+			if listingVerbose {
+				log.Print("typescript: run record: replayed; every input is unchanged since a run that changed nothing")
+			}
+			os.Exit(rec.exit)
 		}
-		os.Stdout.Write(rec.stdout)
-		os.Stderr.Write(rec.stderr)
-		if listingVerbose {
-			log.Print("typescript: run record: replayed; every input is unchanged since a run that changed nothing")
+		if dirs != nil {
+			tryFastPath(fs, c, file, rec, dirs, stamps)
 		}
-		os.Exit(rec.exit)
 	}
 	candidate := fmt.Sprintf("%s.candidate.%d", file, os.Getpid())
 	code, stdout, stderr := runSelf(os.Args[1:], runRecordCandidateEnv+"="+candidate)
@@ -576,12 +618,22 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 // matches compares the walk first: most edits change it, and it is the
 // smaller part to read.
 func (r *runRecord) matches(buildNames []string, cache string, stamps *newest) bool {
+	ok, _ := r.check(buildNames, cache, stamps)
+	return ok
+}
+
+// check is matches, and on a mismatch the walked directories' lines as they
+// read now, or nil when they could not be read.
+func (r *runRecord) check(buildNames []string, cache string, stamps *newest) (bool, []string) {
 	dirs, err := dirLines(r.dirs, buildNames, cache, stamps)
-	if err != nil || digestOfWalk(r.dirs, dirs) != r.walkDigest {
-		return false
+	if err != nil {
+		return false, nil
+	}
+	if digestOfWalk(r.dirs, dirs) != r.walkDigest {
+		return false, dirs
 	}
 	digest, _ := r.digests(inputLines{dirs, fileLines(r.files, stamps), listingReadLines(r.reads, stamps), rootLines(r.roots)})
-	return digest == r.digest
+	return digest == r.digest, dirs
 }
 
 // The candidate holds the inputs as the run read them. They still hold only
@@ -704,6 +756,14 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		}
 		return why == ""
 	})
+	for _, l := range in.listings {
+		for i, read := range l.Reads {
+			merge(reads, read, l.ReadLines[i])
+		}
+		for i, dir := range l.Dirs {
+			merge(roots, dir, l.DirDigests[i])
+		}
+	}
 	if why != "" {
 		return nil, why
 	}
@@ -715,6 +775,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		lines.roots = append(lines.roots, roots[root])
 	}
 	rec.digest, rec.walkDigest = rec.digests(lines)
+	rec.sums, rec.facts = inputSums(lines), in.facts
 	return rec, ""
 }
 
@@ -751,7 +812,7 @@ func logLines(log []byte) []string {
 	var out []string
 	for line := range strings.SplitSeq(string(log), "\n") {
 		if line != "" && !strings.Contains(line, "typescript: listing cache") && !strings.Contains(line, "typescript: run record:") &&
-			!strings.Contains(line, "typescript: resolve record:") {
+			!strings.Contains(line, "typescript: resolve record:") && !strings.Contains(line, "typescript: fast path:") {
 			out = append(out, line)
 		}
 	}

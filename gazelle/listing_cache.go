@@ -187,14 +187,18 @@ func remember(key string, entry *cachedListing, p *program) *program {
 	}
 	entry.Resolution = p.resolution
 	loadedListings.Store(key, entry)
-	return programFromEntry(entry, p.config)
+	kept := programFromEntry(entry, p.config)
+	kept.key = key
+	return kept
 }
 
 // loadListing is the cached listing for id, and whether it was patched.
 func loadListing(id listingID, subject string) (*program, bool) {
 	if v, ok := loadedListings.Load(id.key); ok {
 		listingHits.Add(1)
-		return programFromEntry(v.(*cachedListing), subject), false
+		p := programFromEntry(v.(*cachedListing), subject)
+		p.key = id.key
+		return p, false
 	}
 	entry, fresh, err := predecodes.take(id.key)
 	if errors.Is(err, errPredecodeMismatch) {

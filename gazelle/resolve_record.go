@@ -30,7 +30,7 @@ var resolveRecordMode = "on"
 
 const (
 	resolveRecordName  = "resolve-record"
-	resolveRecordMagic = "rules_typescript gazelle resolve record v1"
+	resolveRecordMagic = "rules_typescript gazelle resolve record v2"
 )
 
 // resolveRecord is what one run's Resolve and AfterResolvingDeps left in the
@@ -45,6 +45,8 @@ type resolveRecord struct {
 	Listings []recordedListing
 	Files    []recordedFile
 	Log      []string
+	// Facts are the phase's import facts, which a run that replays the phase hands its run record.
+	Facts []byte
 }
 
 type recordedRead struct{ Path, Line string }
@@ -122,7 +124,7 @@ func startResolveRecord(fs *flag.FlagSet, c *config.Config, s *programStore) err
 		return fmt.Errorf("-ts_listing_cache: %w", err)
 	}
 	// Everything a run is asked to do except where its caches live and how it is checked or profiled.
-	key := recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
+	key := recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_fastpath", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
 	if runInputs == nil {
 		runInputs = &inputSet{files: map[string]string{}, dirs: map[string]*dirSnapshot{}, key: key, repoRoot: c.RepoRoot, cache: cache, buildNames: c.ValidBuildFileNames}
 		if exe, err := os.Executable(); err == nil {
@@ -172,6 +174,8 @@ func (rec *resolveRecorder) begin(s *programStore) bool {
 				rec.verify = old
 			} else {
 				rec.replay = old
+				old.noteReplayedReads()
+				s.importFacts.replayed(old.Facts)
 				return true
 			}
 		}
@@ -411,7 +415,7 @@ func (rec *resolveRecorder) candidate(s *programStore, logged []byte) (*resolveR
 	rec.mu.Lock()
 	maps.Copy(reads, rec.buildBodies)
 	rec.mu.Unlock()
-	next := &resolveRecord{Magic: resolveRecordMagic, Key: rec.key, State: rec.state, Dirs: dirs, Log: phaseLines(logged)}
+	next := &resolveRecord{Magic: resolveRecordMagic, Key: rec.key, State: rec.state, Dirs: dirs, Log: phaseLines(logged), Facts: s.importFacts.seal()}
 	for _, path := range slices.Sorted(maps.Keys(reads)) {
 		next.Reads = append(next.Reads, recordedRead{Path: path, Line: reads[path]})
 	}
@@ -438,4 +442,28 @@ func (rec *resolveRecorder) candidate(s *programStore, logged []byte) (*resolveR
 	}
 	next.Files = s.captureTracked()
 	return next, ""
+}
+
+// noteReplayedReads makes a replaying run's own record read what the replayed
+// phase read, which this run skips: its files, directories and listings.
+func (r *resolveRecord) noteReplayedReads() {
+	in := runInputs
+	if in == nil {
+		return
+	}
+	for _, read := range r.Reads {
+		noteRead(read.Path)
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for _, dir := range r.Dirs {
+		rel, ok := repoRelative(in.repoRoot, dir.Path)
+		if !ok {
+			continue
+		}
+		if _, seen := in.dirs[rel]; !seen {
+			in.dirs[rel] = &dirSnapshot{abs: dir.Path, line: dir.Line}
+		}
+	}
+	in.listings = append(in.listings, r.Listings...)
 }
