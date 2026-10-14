@@ -3,8 +3,10 @@ package typescript
 import (
 	"context"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -223,6 +225,179 @@ func TestListingCache_PatchRefusesWhatItDoesNotModel(t *testing.T) {
 			if diff := listingDifference(got, l.fresh("app/tsconfig.json")); diff != "" {
 				t.Errorf("the relisted program differs from tsgo's:\n%s", diff)
 			}
+		})
+	}
+}
+
+// tsgo resolves a dynamic import again for each "import" its span holds, a
+// comment before it included, which read as an implicit import of the source.
+const twiceResolvedSource = "export const load = () =>\n  // a static import here would cycle\n  import('./c');\n"
+
+// A new or renamed source beside a twice-resolved import listed the program again;
+// a source that resolves an import twice itself must still match tsgo.
+func TestListingCache_AddOrRenameBesideATwiceResolvedImportPatches(t *testing.T) {
+	addE := map[string]string{
+		"app/src/e.ts": "export const e = 5;\n",
+		"app/src/a.ts": "import { b } from './b';\nimport { e } from './e';\nexport const a = b + e;\n",
+	}
+	for _, tc := range []struct {
+		name    string
+		lazy    bool
+		edit    map[string]string
+		rename  [2]string
+		roots   []string
+		patched bool
+	}{
+		{name: "an added source an existing one imports", lazy: true, edit: addE, patched: true},
+		{name: "a renamed source and its importer", lazy: true, rename: [2]string{"app/src/b.ts", "app/src/bee.ts"},
+			edit: map[string]string{"app/src/a.ts": "import { b } from './bee';\nexport const a = b;\n"}, patched: true},
+		{name: "an added root of a files list", lazy: true, edit: addE, roots: append(slices.Clone(projectionRoots), "app/src/e.ts"), patched: true},
+		{name: "a renamed source under a files list", lazy: true, rename: [2]string{"app/src/b.ts", "app/src/bee.ts"},
+			edit: map[string]string{"app/src/a.ts": "import { b } from './bee';\nexport const a = b;\n"}, roots: projectionRoots, patched: true},
+		{name: "an added source that resolves an import twice", edit: map[string]string{
+			"app/src/e.ts": twiceResolvedSource,
+			"app/src/a.ts": addE["app/src/a.ts"],
+		}},
+		{name: "a twice-resolved import edited away", lazy: true, edit: map[string]string{"app/src/lazy.ts": "export const load = () => 1;\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := patchFixture()
+			if tc.lazy {
+				files["app/src/lazy.ts"] = twiceResolvedSource
+			}
+			base, roots := projectionRoots, tc.roots
+			if tc.lazy && roots != nil {
+				base, roots = append(slices.Clone(base), "app/src/lazy.ts"), append(slices.Clone(roots), "app/src/lazy.ts")
+			}
+			l := newListingRuns(t, files)
+			l.listUnder(base, roots)
+			if tc.rename[0] != "" {
+				if err := os.Rename(filepath.Join(l.root, tc.rename[0]), filepath.Join(l.root, tc.rename[1])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeWorkspace(t, l.root, tc.edit)
+			got := l.listUnder(roots, roots)
+			if patched := l.runs == 1; patched != tc.patched {
+				t.Errorf("patched: %t, want %t (%d runs): %v", patched, tc.patched, l.runs, lastPatchRefusal.Load())
+			}
+			want := l.fresh("app/tsconfig.json")
+			if roots != nil {
+				want = l.freshProject("app/tsconfig.json", roots)
+			}
+			if diff := listingDifference(got, want); diff != "" {
+				t.Errorf("the listing differs from tsgo's:\n%s", diff)
+			}
+		})
+	}
+}
+
+// listUnder lists the fixture's program through the cache, as a files list
+// projection of roots when wanted names one.
+func (l *listingRuns) listUnder(roots, wanted []string) *program {
+	if wanted != nil {
+		return l.project("app/tsconfig.json", roots)
+	}
+	return l.list("app/tsconfig.json")
+}
+
+// A miscounted resolution made the patch add or keep one tsgo's listing does not
+// hold; tsgo's own listing is the reference for every count the scanner settles.
+func TestListingPatch_MiscountsNoResolutionTsgoRepeats(t *testing.T) {
+	sources := []struct {
+		file, body string
+		counted    bool
+	}{
+		{"app/src/r1.ts", twiceResolvedSource, true},
+		{"app/src/r2.ts", "// a static import here would cycle\nexport const load = async () => await import('./c');\n", true},
+		{"app/src/r3.ts", "export const load = () => import(/* import */ './c');\n", true},
+		{"app/src/r4.ts", "export const load = () => import('./c' /* require */);\n", true},
+		{"app/src/r5.ts", "// import, import\nimport { b } from './b';\nexport const r = b;\n", true},
+		{"app/src/r6.ts", "export const x = // import\n  import('./c');\n", true},
+		{"app/src/r7.ts", "export type T = /* import */ typeof import('./c');\n", true},
+		{"app/src/r8.ts", "export const load = () => import('./c').then((m) => m);\n", true},
+		{"app/src/r9.ts", "export const load = () => import('./import-me');\n", false},
+		{"app/src/r10.ts", "declare const api: { import(s: string): void };\nexport const x = api.import('./c');\n", false},
+	}
+	files := patchFixture()
+	files["app/src/import-me.ts"] = "export const m = 1;\n"
+	for _, s := range sources {
+		files[s.file] = s.body
+	}
+	p := newListingRuns(t, files).list("app/tsconfig.json")
+	for _, s := range sources {
+		scanned, err := incremental.Scan(s.file, []byte(s.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if scanned.Counted != s.counted {
+			t.Errorf("%s: counted %t, want %t", s.file, scanned.Counted, s.counted)
+		}
+		if !scanned.Counted {
+			continue
+		}
+		blocks := map[string]map[int]bool{}
+		for _, c := range p.candidates {
+			if c.from == s.file {
+				if blocks[c.specifier] == nil {
+					blocks[c.specifier] = map[int]bool{}
+				}
+				blocks[c.specifier][c.block] = true
+			}
+		}
+		for _, text := range slices.Sorted(maps.Keys(blocks)) {
+			if n := scanned.Resolutions[text]; n != len(blocks[text]) {
+				t.Errorf("%s %q: counted %d resolutions, tsgo traced %d", s.file, text, n, len(blocks[text]))
+			}
+		}
+		for text := range scanned.Resolutions {
+			if blocks[text] == nil {
+				t.Errorf("%s %q: counted, tsgo traced none", s.file, text)
+			}
+		}
+	}
+}
+
+var listingCacheLine = regexp.MustCompile(`listing cache \d+ hit\(s\), (\d+) patched, (\d+) new, (\d+) stale`)
+
+// The same edits through a whole run: the stale listing patched, none listed
+// again, and the BUILD files a cache-less run writes.
+func TestListingCache_AddOrRenameBesideATwiceResolvedImportListsNothingAgain(t *testing.T) {
+	requireTsgo(t)
+	for _, edit := range []struct {
+		name string
+		do   func(t *testing.T, root string)
+	}{
+		{"an added source an existing one imports", func(t *testing.T, root string) {
+			writeWorkspace(t, root, map[string]string{
+				"app/f.ts": "export const f = 6;\n",
+				"app/d.ts": "import { f } from './f';\nexport const d = f;\n",
+			})
+		}},
+		{"a renamed source and its importers", func(t *testing.T, root string) {
+			if err := os.Rename(filepath.Join(root, "app/b.ts"), filepath.Join(root, "app/bee.ts")); err != nil {
+				t.Fatal(err)
+			}
+			writeWorkspace(t, root, map[string]string{
+				"app/a.ts": "import { b } from './bee';\nimport { x } from '../lib/x';\nexport const a = b + x;\n",
+				"app/c.ts": "import { b } from './bee';\nexport const c = b;\n",
+			})
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			tree := fastPathTree()
+			tree["app/lazy.ts"] = twiceResolvedSource
+			root := writeTree(t, tree)
+			cache := t.TempDir()
+			primeFastPath(t, root, cache, "-ts_verbose")
+			edit.do(t, root)
+			same := requireAsCacheless(t, root, edit.name)
+			out := recordGazelle(t, root, cache, "-ts_fastpath=off")
+			if m := listingCacheLine.FindStringSubmatch(out); m == nil || m[1] == "0" || m[2] != "0" || m[3] != "0" {
+				t.Errorf("%s listed a program again instead of patching it:\n%s", edit.name, out)
+			}
+			same()
 		})
 	}
 }

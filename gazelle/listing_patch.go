@@ -45,24 +45,29 @@ type cachedSource struct {
 	Rest  string
 }
 
-var sourceSpecs sync.Map // absolute path -> cachedSource, or nil when unscannable
+var sourceSpecs sync.Map // absolute path -> incremental.Scanned, or nil when unscannable
 
-func scanSpecs(abs string) (cachedSource, bool) {
+func scanFile(abs string) (incremental.Scanned, bool) {
 	if v, ok := sourceSpecs.Load(abs); ok {
-		src, ok := v.(cachedSource)
+		src, ok := v.(incremental.Scanned)
 		return src, ok
 	}
 	data, err := readInput(abs)
-	var src cachedSource
+	var src incremental.Scanned
 	if err == nil {
-		src.Specs, src.Rest, err = incremental.Specifiers(abs, data)
+		src, err = incremental.Scan(abs, data)
 	}
 	if err != nil {
 		sourceSpecs.Store(abs, nil)
-		return cachedSource{}, false
+		return incremental.Scanned{}, false
 	}
 	sourceSpecs.Store(abs, src)
 	return src, true
+}
+
+func scanSpecs(abs string) (cachedSource, bool) {
+	src, ok := scanFile(abs)
+	return cachedSource{Specs: src.Specs, Rest: src.Rest}, ok
 }
 
 func patchableSource(rel string) bool {
@@ -592,6 +597,9 @@ func (t *patcher) patch(subject string) *program {
 				t.fail("a changed source changed more than its imports")
 				return nil
 			}
+			if !t.resolvedOnce(rel, old, src) {
+				return nil
+			}
 			if !slices.Equal(src.Specs, old.Specs) {
 				edited[rel] = src
 			}
@@ -794,6 +802,53 @@ func (t *patcher) editSource(rel string, now cachedSource) bool {
 	return true
 }
 
+func writtenCounts(specs []string) map[string]int {
+	counts := map[string]int{}
+	for _, spec := range specs {
+		_, text, _ := strings.Cut(spec, ":")
+		counts[text]++
+	}
+	return counts
+}
+
+func (t *patcher) resolutions(f string) (map[string]int, bool) {
+	src, ok := scanFile(t.abs(f))
+	return src.Resolutions, ok && src.Counted
+}
+
+// resolvedOnce is whether the patch can follow a changed source: each import it
+// wrote and writes is resolved once, or the change keeps the imports and their counts.
+func (t *patcher) resolvedOnce(rel string, old, now cachedSource) bool {
+	counts, counted := t.resolutions(rel)
+	if !counted {
+		return t.fail("a changed source has an import whose resolutions are not counted")
+	}
+	listed := func(text string) int { return len(t.blocksOf[importKey{rel, text}]) }
+	onceBefore := func() bool {
+		for text, n := range writtenCounts(old.Specs) {
+			if listed(text) > n {
+				return false
+			}
+		}
+		return true
+	}
+	countsKept := func() bool {
+		for text, n := range counts {
+			if listed(text) != n {
+				return false
+			}
+		}
+		return true
+	}
+	if maps.Equal(counts, writtenCounts(now.Specs)) && onceBefore() {
+		return true
+	}
+	if slices.Equal(old.Specs, now.Specs) && countsKept() {
+		return true
+	}
+	return t.fail("a changed source resolves an import more than once")
+}
+
 // enter adds a file the program now holds; its imports resolve once every edit is applied.
 func (t *patcher) enter(f string) {
 	if t.files[f] {
@@ -817,6 +872,12 @@ func (t *patcher) resolveEntered(f string) bool {
 		return src.Rest == incremental.PlainRest(c[0], c[1])
 	}) {
 		return t.fail("a file entering the program has references, augmentations or pragmas")
+	}
+	switch counts, counted := t.resolutions(f); {
+	case !counted:
+		return t.fail("a file entering the program has an import whose resolutions are not counted")
+	case !maps.Equal(counts, writtenCounts(src.Specs)):
+		return t.fail("a file entering the program resolves an import more than once")
 	}
 	implicit, ok := t.implicitFor(f, src.Rest)
 	if !ok {
@@ -856,15 +917,19 @@ func (t *patcher) implicitFor(f, rest string) (map[string]int, bool) {
 				continue
 			}
 			extra := map[string]int{}
-			written := map[string]int{}
-			for _, spec := range src.Specs {
-				_, text, _ := strings.Cut(spec, ":")
-				written[text]++
-			}
+			written := writtenCounts(src.Specs)
+			// A source resolving a written specifier twice may hold a dynamic import's repeat, so it is no sample.
+			repeats := false
 			for text, n := range resolved[file] {
-				if n > written[text] {
-					extra[text] = n - written[text]
+				switch {
+				case n > 0 && written[text] == 0:
+					extra[text] = n
+				case n > written[text]:
+					repeats = true
 				}
+			}
+			if repeats {
+				continue
 			}
 			class := path.Ext(file) + " " + src.Rest
 			if prior, ok := t.implicit[class]; ok && !maps.Equal(prior, extra) {
