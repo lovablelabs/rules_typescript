@@ -58,7 +58,7 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 		"with -ts_listing_cache on a full fix or diff run whose run record no longer matches: on replays the record when every change "+
 			"is a source edit whose new imports the rules already resolve; verify then runs the full pass and fails on any difference; off never does")
 	fs.BoolVar(&listingPatchVerify, "ts_listing_patch_verify", false,
-		"also list every patched stale listing with tsgo, and fail on any difference")
+		"also list with tsgo every stale listing patched and every files list listed through its config's include, and fail on any difference")
 	fs.StringVar(&parallelMode, "ts_parallel", "on",
 		"with -ts_listing_cache on a full recursive run, on: decode the cached listings on a worker pool ahead of the walk; "+
 			"off: decode each when the walk reaches it; verify: read each again when the walk reaches it and exit on any difference")
