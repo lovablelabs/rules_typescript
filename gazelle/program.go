@@ -85,6 +85,7 @@ type programStore struct {
 	noLockSaid       bool
 	resolution       *resolveRecorder
 	importFacts      *importFactsRecorder
+	early            *earlyFinish
 }
 
 // Every observed package retains configuration, even without a compiler program;

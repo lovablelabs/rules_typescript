@@ -782,13 +782,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 // verifyReplay runs the pass a replay stands for, without any cache, and
 // fails unless it changes nothing and exits and logs as the record does.
 func verifyReplay(fs *flag.FlagSet, file string, rec *runRecord) int {
-	args := slices.Clone(os.Args[1:])
-	at := len(args) - fs.NArg()
-	if at > 0 && args[at-1] == "--" {
-		at--
-	}
-	args = slices.Insert(args, at, "-mode=diff", "-ts_listing_cache=", "-ts_run_record=off")
-	code, stdout, stderr := runSelf(args)
+	code, stdout, stderr := runSelf(argsWith(fs, "-mode=diff", "-ts_listing_cache=", "-ts_run_record=off"))
 	fail := func(why string) int {
 		os.Remove(file)
 		log.Printf("typescript: run record: a full pass without caches %s; the record is removed", why)
@@ -804,6 +798,16 @@ func verifyReplay(fs *flag.FlagSet, file string, rec *runRecord) int {
 	}
 	log.Print("typescript: run record: verified; a full pass without caches changes nothing and logs the same")
 	return 0
+}
+
+// argsWith is this run's arguments with flags added ahead of its directories.
+func argsWith(fs *flag.FlagSet, flags ...string) []string {
+	args := slices.Clone(os.Args[1:])
+	at := len(args) - fs.NArg()
+	if at > 0 && args[at-1] == "--" {
+		at--
+	}
+	return slices.Insert(args, at, flags...)
 }
 
 // logLines is a log's lines without the caches' own, in an order that does
@@ -823,6 +827,11 @@ func logLines(log []byte) []string {
 // runSelf runs this binary with args and returns its exit status and what it
 // wrote, which it also passes through.
 func runSelf(args []string, env ...string) (int, []byte, []byte) {
+	return runSelfTo(os.Stdout, os.Stderr, args, env...)
+}
+
+// runSelfTo is runSelf passing the child's output through to stdout and stderr.
+func runSelfTo(stdoutTo, stderrTo io.Writer, args []string, env ...string) (int, []byte, []byte) {
 	exe, err := os.Executable()
 	if err != nil {
 		log.Fatalf("typescript: run record: %v", err)
@@ -830,7 +839,7 @@ func runSelf(args []string, env ...string) (int, []byte, []byte) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(exe, args...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, &stdout), io.MultiWriter(os.Stderr, &stderr)
+	cmd.Stdout, cmd.Stderr = io.MultiWriter(stdoutTo, &stdout), io.MultiWriter(stderrTo, &stderr)
 	cmd.Env = os.Environ()
 	if rf, err := runfiles.Env(); err == nil {
 		cmd.Env = append(cmd.Env, rf...)

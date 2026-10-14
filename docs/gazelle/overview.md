@@ -132,9 +132,20 @@ reads (by stat, BUILD files by content) are unchanged, writes those back
 instead of resolving: a hand edit to an attribute Gazelle resolves, such as
 deleting a rule's `deps`, leaves that state as it was. An import edit, a new
 file or a BUILD edit Gazelle keeps (a `# keep`, a directive, a new rule)
-resolves in full. `-ts_resolve_record=verify` resolves anyway and fails, and
-drops the record, unless the BUILD files and log match it;
+resolves in full. `-ts_resolve_record=verify` replays the record, then runs a
+full pass with it off in `-mode=diff`, and fails and drops the record unless
+that pass finds nothing more to write (in a `-mode=diff` run: prints the
+replay's diff) and exits and logs as the replay did; a failed `fix` run then
+rewrites the BUILD files with the record off;
 `-ts_resolve_record=off` always resolves.
+
+Gazelle 0.54 writes every BUILD file before it calls `AfterResolvingDeps`,
+where the extension finishes its rules (`emit`, emission-driven `deps`, package
+scopes, source exports) and where a resolve record replays. Under that Gazelle
+the first `Resolve` does all of it instead: it resolves every generated rule,
+merges it into its BUILD file and finishes the rules, or replays the record,
+and Gazelle's own post-resolve merge then has nothing left to change, so every
+`-mode` writes or shows the finished files.
 
 An edit to TypeScript sources alone can still replay the run record, after
 gazelle-rs's import fast path. The record also keeps what its `Resolve` did
