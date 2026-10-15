@@ -151,6 +151,10 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		return err
 	}
 	if runInputs != nil && fastPathMode != "off" {
+		s.buildFacts = newBuildFactsRecorder()
+		runInputs.mu.Lock()
+		runInputs.builds = s.buildFacts
+		runInputs.mu.Unlock()
 		s.importFacts = newImportFactsRecorder(func() (outputs, generated []string) {
 			if s.emission != nil {
 				outputs = slices.Sorted(maps.Keys(s.emission.outputs))
@@ -173,6 +177,7 @@ func (l *tsLang) KnownDirectives() []string {
 
 func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	getConfig(c).programs.importFacts.configured(rel, f)
+	noteDirectiveFiles(c.RepoRoot, rel, f)
 	getConfig(c).programs.ruleListsMayChange()
 	getConfig(c).programs.touchPackage(rel)
 	configureTsConfig(c, rel, f, recordedDirInfo)
@@ -446,6 +451,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 	}
 	s.resolution.noteGenerated(args, res)
 	s.early.noteGenerated(args, res)
+	s.buildFacts.generated(args, res)
 	return res
 }
 

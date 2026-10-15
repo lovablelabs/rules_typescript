@@ -217,7 +217,8 @@ func TestResolveRecord_ReplaysBehindARunRecordMiss(t *testing.T) {
 	primeRunRecord(t, root, cache)
 	editBuild(t, root, "app/sub/BUILD.bazel", dropDeps)
 	same := requireAsCacheless(t, root, "deps deleted")
-	out := recordGazelle(t, root, cache)
+	// The fast path would write the recorded file back before any walk.
+	out := recordGazelle(t, root, cache, "-ts_fastpath=off")
 	if replayed(out) || !resolveReplayed(out) {
 		t.Errorf("a BUILD-only edit did not miss the run record and replay Resolve:\n%s", out)
 	}
@@ -234,7 +235,7 @@ func TestResolveRecord_StateDigestClassifiesEveryField(t *testing.T) {
 		{reflect.TypeFor[programStore](), []string{"repoConfig", "emission", "inputs", "completePrograms", "index", "tsgoFlag", "verbose", "tsgo", "skipped",
 			"programs", "configs", "packages", "generatedPackages", "visited", "files", "walked", "bases", "extended", "foreign",
 			"foreignSaid", "vitestPrograms", "compilerPrograms", "wranglerConfigs", "installChecked", "regularFiles", "fullWalk",
-			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "prefetch", "resolution", "importFacts", "early"}},
+			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "prefetch", "resolution", "importFacts", "buildFacts", "early"}},
 		{reflect.TypeFor[emissionGraph](), []string{"roots", "outputs", "rules", "files", "lock"},
 			[]string{"versions", "epoch", "listEpoch", "outputsGeneration", "rulesGeneration", "outputIndex", "registered", "crawled", "crawledPkgs", "lastTouched"}},
 		{reflect.TypeFor[program](), []string{"Listing", "candidates", "resolution", "config", "dir", "refused", "manifest", "key"}, []string{"bySource", "moduleEdges", "byDir"}},

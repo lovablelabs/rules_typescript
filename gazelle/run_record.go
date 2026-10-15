@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
+	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 
@@ -89,6 +91,8 @@ type inputSet struct {
 	facts []byte
 	// listings are the reads of listings a replayed resolve record's phase read.
 	listings []recordedListing
+	// builds collects the build snapshot written beside the candidate.
+	builds *buildFactsRecorder
 }
 
 type dirSnapshot struct {
@@ -178,6 +182,21 @@ func readSourceInput(path string) ([]byte, error) {
 	noteSourceRead(path)
 	return os.ReadFile(path)
 }
+
+// noteDirectiveFiles notes the files f's directive_file directives name: from
+// Gazelle 0.54 the walk reads them into f's directives, outside the record.
+func noteDirectiveFiles(repoRoot, rel string, f *rule.File) {
+	if runInputs == nil || f == nil || !bytes.Contains(f.Content, []byte("directive_file")) {
+		return
+	}
+	for line := range bytes.SplitSeq(f.Content, []byte("\n")) {
+		if m := directiveFileLine.FindSubmatch(line); m != nil {
+			noteRead(filepath.Join(repoRoot, filepath.FromSlash(rel), filepath.FromSlash(string(m[1]))))
+		}
+	}
+}
+
+var directiveFileLine = regexp.MustCompile(`^\s*#\s*gazelle:directive_file\s+(.*?)\s*$`)
 
 // recordedDirInfo is walk.GetDirInfo for a directory the run depends on. The
 // snapshot is taken off the walk's goroutine, right after Gazelle read it.
@@ -454,6 +473,11 @@ func parallel(n int, do func(i int)) {
 	wg.Wait()
 }
 
+// buildEntry is a dirLine's entry for a BUILD file: its content stands for its stat.
+func buildEntry(name string, mode fs.FileMode, data []byte) string {
+	return fmt.Sprintf("b %s %o %x", name, mode, sha256.Sum256(data))
+}
+
 // dirLine names every entry of dir, and stamps is the latest change among
 // its files. A projection lives only inside one listing and the listing cache
 // outside the inputs, so neither counts; a subdirectory counts by name.
@@ -500,7 +524,7 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 			if err != nil {
 				return "", stamp, err
 			}
-			fmt.Fprintf(&b, "b %s %o %x\n", name, info.Mode(), sha256.Sum256(data))
+			b.WriteString(buildEntry(name, info.Mode(), data) + "\n")
 		default:
 			fmt.Fprintf(&b, "f %s %s\n", name, statLine(info))
 		}
@@ -660,6 +684,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 		promoteRunRecord(candidate, file, key, c.ValidBuildFileNames, cache, stdout, stderr)
 	}
 	os.Remove(candidate)
+	os.Remove(buildSnapshotFile(candidate))
 	os.Exit(code)
 	return nil
 }
@@ -733,6 +758,12 @@ func promoteRunRecord(candidate, file, key string, buildNames []string, cache st
 	}
 	if err != nil {
 		log.Printf("typescript: run record: %v", err)
+		return
+	}
+	if err := os.Rename(buildSnapshotFile(candidate), buildSnapshotFile(file)); errors.Is(err, fs.ErrNotExist) {
+		os.Remove(buildSnapshotFile(file))
+	} else if err != nil {
+		log.Printf("typescript: run record: %v", err)
 	}
 }
 
@@ -756,6 +787,15 @@ func writeRunCandidate() {
 		}
 		if err != nil {
 			why = err.Error()
+		}
+	}
+	if why == "" && in.builds != nil {
+		data, err := in.builds.seal(rec.walkDigest)
+		if err == nil {
+			err = writeAtomically(buildSnapshotFile(os.Getenv(runRecordCandidateEnv)), data)
+		}
+		if err != nil && listingVerbose {
+			log.Printf("typescript: fast path: no build snapshot recorded: %v", err)
 		}
 	}
 	if why != "" && listingVerbose {
@@ -824,7 +864,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		lines.roots = append(lines.roots, roots[root])
 	}
 	rec.digest, rec.walkDigest = rec.digests(lines)
-	rec.sums, rec.facts = inputSums(lines), in.facts
+	rec.sums, rec.facts = inputSums(lines, rec.dirs, in.repoRoot, decodeNameReads(in.facts)), in.facts
 	return rec, ""
 }
 

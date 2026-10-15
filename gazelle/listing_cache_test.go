@@ -37,7 +37,10 @@ func TestListingCache_ReusesUntilAnInputItReadChanges(t *testing.T) {
 		runs++
 		return runListingUncached(ctx, repoRoot, tsgo, subject, args)
 	}
-	t.Cleanup(func() { listingCacheDir, uncachedListing = "", runListingUncached })
+	t.Cleanup(func() {
+		pendingWrites.Wait()
+		listingCacheDir, uncachedListing = "", runListingUncached
+	})
 	list := func() *program {
 		listingNames, listingStats = newListingNames(), &incremental.StatCache{}
 		sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
@@ -95,7 +98,10 @@ func newListingRuns(t *testing.T, files map[string]string) *listingRuns {
 		l.runs++
 		return runListingUncached(ctx, repoRoot, tsgo, subject, args)
 	}
-	t.Cleanup(func() { listingCacheDir, uncachedListing = "", runListingUncached })
+	t.Cleanup(func() {
+		pendingWrites.Wait()
+		listingCacheDir, uncachedListing = "", runListingUncached
+	})
 	return l
 }
 

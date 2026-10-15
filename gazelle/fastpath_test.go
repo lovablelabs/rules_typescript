@@ -141,7 +141,7 @@ func TestFastPath_DeclinedEditsRunTheFullPass(t *testing.T) {
 			removeFile("app/e.ts")(t, root)
 			writeFile(t, filepath.Join(root, "app/BUILD.bazel"), "")
 		}},
-		{"a BUILD edit", declineInputs, editFile("app/BUILD.bazel", "")},
+		{"a BUILD file emptied", declineBuildLoads, editFile("app/BUILD.bazel", "")},
 		{"a tsconfig edit", declineInputs, editFile("app/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["a.ts","b.ts"]}`)},
 		{"a removed import", declineEdgeRemoved, editFile("app/c.ts", "export const c = 3;\n")},
 		{"an import of a source nothing imports", declineSelectionWitness, editFile("app/d.ts", "import { e } from './e';\nexport const d = e;\n")},
@@ -527,5 +527,98 @@ func TestFastPath_VerifyLeavesNoWrongBuildEditBehind(t *testing.T) {
 	}
 	if _, err := os.Stat(matches[0]); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("verify kept the record it failed: %v", err)
+	}
+}
+
+// An entry no part of the run read, by name or by content, cannot change what
+// the run writes: a Go file beside the walk, or a JSON file whose content no
+// listing and no rule reads, moves no BUILD file.
+func TestFastPath_AnEntryNothingReadsTakesTheFastPath(t *testing.T) {
+	requireTsgo(t)
+	tree := fastPathTree()
+	tree["tools/gen.go"] = "package tools\n"
+	tree["app/messages/en.json"] = `{"greeting":"hello"}`
+	newSource := editFile("app/f.ts", "import { b } from './b';\nexport const f = b;\n")
+	for _, edit := range []struct {
+		name, path string
+		do         func(t *testing.T, root string)
+	}{
+		{"a new source beside an edited Go file", "fast path edit", func(t *testing.T, root string) {
+			newSource(t, root)
+			editFile("tools/gen.go", "package tools\n\nconst Gen = 1\n")(t, root)
+		}},
+		{"a new source beside a Go file added and another deleted", "fast path edit", func(t *testing.T, root string) {
+			newSource(t, root)
+			editFile("tools/other.go", "package tools\n")(t, root)
+			removeFile("tools/gen.go")(t, root)
+		}},
+		{"a new source beside an edited JSON its package holds as data", "fast path edit", func(t *testing.T, root string) {
+			newSource(t, root)
+			editFile("app/messages/en.json", `{"greeting":"hello, world"}`)(t, root)
+		}},
+		{"an import beside an edited Go file", "fast path", func(t *testing.T, root string) {
+			editFile("app/d.ts", "import { b } from './b';\nexport const d = b;\n")(t, root)
+			editFile("tools/gen.go", "package tools\n\nconst Gen = 1\n")(t, root)
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, tree)
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			edit.do(t, root)
+			same := requireAsCacheless(t, root, edit.name)
+			out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache)
+			if !slices.Equal(paths, []string{edit.path}) {
+				t.Errorf("%s: the run took %q, want %q and no full pass:\n%s", edit.name, paths, edit.path, out)
+			}
+			same()
+		})
+	}
+}
+
+// An entry the run read keeps the full pass: a JSON a source imports, a file a
+// listing probed for, a JSON whose name joins its package's srcs, a package.json.
+func TestFastPath_AnEntryTheRunReadsStillRunsTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	tree := fastPathTree()
+	tree["tools/gen.go"] = "package tools\n"
+	tree["app/tsconfig.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true},"include":["*.ts"]}`
+	tree["app/data.json"] = `{"d":4}`
+	tree["app/d.ts"] = "import data from './data.json';\nexport const d = data.d;\n"
+	tree["app/messages/de.json"] = `{"greeting":"hallo"}`
+	tree["app/c.ts"] = "import { b } from './b';\nimport '../extra/style.css';\nexport const c = b;\n"
+	newSource := editFile("app/f.ts", "import { b } from './b';\nexport const f = b;\n")
+	for _, edit := range []struct {
+		name, code string
+		do         func(t *testing.T, root string)
+	}{
+		{"a new source beside an edited JSON a source imports", declineNotSource, func(t *testing.T, root string) {
+			newSource(t, root)
+			editFile("app/data.json", `{"d":5}`)(t, root)
+		}},
+		{"a new source beside a JSON its package gains as data", declineInputs, func(t *testing.T, root string) {
+			newSource(t, root)
+			editFile("app/messages/en.json", `{"greeting":"hello"}`)(t, root)
+		}},
+		{"a stylesheet added where an import probed for it", declineNotSource, editFile("extra/style.css", "a {}\n")},
+		{"a new source beside a package.json added next to a Go file", declineInputs, func(t *testing.T, root string) {
+			newSource(t, root)
+			editFile("tools/package.json", `{"name":"tools"}`)(t, root)
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, tree)
+			cache := t.TempDir()
+			primeFastPath(t, root, cache, "-ts_verbose")
+			edit.do(t, root)
+			same := requireAsCacheless(t, root, edit.name)
+			out := recordGazelle(t, root, cache)
+			if want := "fast path: declined (" + edit.code + ")"; !strings.Contains(out, want) {
+				t.Errorf("%s: want %q in the log:\n%s", edit.name, want, out)
+			}
+			same()
+		})
 	}
 }

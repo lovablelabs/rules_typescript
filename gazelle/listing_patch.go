@@ -27,7 +27,7 @@ import (
 
 var listingPatched atomic.Int64
 
-// pendingWrites are patched entries still being written; the run waits for
+// pendingWrites are listing entries still being written; the run waits for
 // them before it ends, so a later run reads either the old entry or the new one.
 var pendingWrites sync.WaitGroup
 
@@ -94,20 +94,21 @@ func recordPatchState(entry *cachedListing, repoRoot string, project *tsconfig.R
 	entry.Root = repoRoot
 	entry.PatchVersion = patchStateVersion
 	entry.ReadLines = make([]string, len(entry.Reads))
-	for i, read := range entry.Reads {
-		entry.ReadLines[i] = listingStats.Line(read)
-	}
+	parallel(len(entry.Reads), func(i int) { entry.ReadLines[i] = listingStats.Line(entry.Reads[i]) })
 	entry.DirDigests = make([]string, len(entry.Dirs))
-	for i, dir := range entry.Dirs {
-		entry.DirDigests[i] = listingNames.Digest(dir)
-	}
+	parallel(len(entry.Dirs), func(i int) { entry.DirDigests[i] = listingNames.Digest(entry.Dirs[i]) })
+	patchable := slices.DeleteFunc(slices.Clone(entry.Listing.Files), func(file string) bool { return !patchableSource(file) })
+	scans := make([]struct {
+		src cachedSource
+		ok  bool
+	}, len(patchable))
+	parallel(len(patchable), func(i int) {
+		scans[i].src, scans[i].ok = scanSpecs(filepath.Join(repoRoot, filepath.FromSlash(patchable[i])))
+	})
 	entry.Sources = map[string]cachedSource{}
-	for _, file := range entry.Listing.Files {
-		if !patchableSource(file) {
-			continue
-		}
-		if src, ok := scanSpecs(filepath.Join(repoRoot, filepath.FromSlash(file))); ok {
-			entry.Sources[file] = src
+	for i, file := range patchable {
+		if scans[i].ok {
+			entry.Sources[file] = scans[i].src
 		}
 	}
 	entry.Config = newPatchConfig(project, projectDir)
@@ -1821,9 +1822,13 @@ func verifyListing(ctx context.Context, repoRoot, tsgo, subject string, args []s
 }
 
 func writeListing(key string, entry *cachedListing) {
+	writeListingFile(filepath.Join(listingCacheDir, key), entry)
+}
+
+func writeListingFile(file string, entry *cachedListing) {
 	var buf bytes.Buffer
 	if gob.NewEncoder(&buf).Encode(entry) != nil {
 		return
 	}
-	writeAtomically(filepath.Join(listingCacheDir, key), buf.Bytes())
+	writeAtomically(file, buf.Bytes())
 }

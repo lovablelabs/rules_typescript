@@ -86,6 +86,7 @@ type programStore struct {
 	noLockSaid       bool
 	resolution       *resolveRecorder
 	importFacts      *importFactsRecorder
+	buildFacts       *buildFactsRecorder
 	early            *earlyFinish
 }
 

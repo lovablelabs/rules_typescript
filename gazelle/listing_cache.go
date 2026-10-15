@@ -327,8 +327,7 @@ func loadListing(id listingID, subject string) (*program, bool) {
 
 func keepPatched(id listingID, entry *cachedListing, p *program) *program {
 	p = remember(id.key, entry, p)
-	// Nothing writes the entry after remember, so encoding it alongside the run is safe.
-	pendingWrites.Go(func() { writeListing(id.key, entry) })
+	writeListingAsync(filepath.Join(listingCacheDir, id.key), entry)
 	return p
 }
 
@@ -356,7 +355,7 @@ func patchFromFamily(id listingID, subject string) (*program, bool) {
 }
 
 func readListing(file string) (*cachedListing, error) {
-	data, err := os.ReadFile(file)
+	data, err := readListingFile(file)
 	if err != nil {
 		return nil, err
 	}
@@ -378,6 +377,11 @@ const familyCandidates = 4
 // familyEntries are the latest entries of id's family, those whose files list
 // differs from id's in TypeScript files alone first, then by fewest files apart.
 func familyEntries(id listingID) []*cachedListing {
+	for file, written := range pendingSaves.Range {
+		if strings.HasPrefix(filepath.Base(file.(string)), id.family+"-") {
+			<-written.(chan struct{})
+		}
+	}
 	dirEntries, err := os.ReadDir(listingCacheDir)
 	if err != nil {
 		return nil
@@ -502,7 +506,28 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 	if os.MkdirAll(listingCacheDir, 0o755) != nil {
 		return
 	}
-	writeListing(id.key, &entry)
+	writeListingAsync(filepath.Join(listingCacheDir, id.key), &entry)
+}
+
+// pendingSaves are the cache files still being written, each with a channel closed once it is on disk.
+var pendingSaves sync.Map
+
+// writeListingAsync writes entry beside the run; nothing may change it afterwards.
+func writeListingAsync(file string, entry *cachedListing) {
+	written := make(chan struct{})
+	pendingSaves.Store(file, written)
+	pendingWrites.Go(func() {
+		defer close(written)
+		defer pendingSaves.CompareAndDelete(file, written)
+		writeListingFile(file, entry)
+	})
+}
+
+func readListingFile(file string) ([]byte, error) {
+	if written, ok := pendingSaves.Load(file); ok {
+		<-written.(chan struct{})
+	}
+	return os.ReadFile(file)
 }
 
 // includeRoots are the directories a config's include globs enumerate: each

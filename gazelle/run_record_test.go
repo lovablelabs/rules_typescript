@@ -225,8 +225,8 @@ func TestRunRecord_VerifyFailsWhenAFullPassLogsOtherwise(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The log is the record's tail: change one byte of its last line naming a config.
-	at := bytes.LastIndex(data, []byte("tsconfig.json"))
+	// Change one byte of the log's last line naming a config; the facts after it name configs too.
+	at := bytes.LastIndex(data, []byte("tsconfig.json: "))
 	if at < 0 {
 		t.Fatalf("the record holds no log naming a config:\n%s", data)
 	}

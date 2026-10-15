@@ -122,6 +122,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		dirInfo = nil
 	}
 	seenDirs := map[string]bool{}
+	facts := s.buildFacts
 	load := func(pkg string) {
 		var ancestors []string
 		for dir := pkg; !seenDirs[dir]; dir = parentDir(dir) {
@@ -137,6 +138,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 				if info, err := dirInfo[0](dir); err == nil {
 					if _, known := s.files[dir]; !known {
 						s.visit(dir, info.RegularFiles)
+						facts.loadedDir(dir)
 					}
 					if f == nil {
 						f = info.File
@@ -146,9 +148,13 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			if f == nil {
 				continue
 			}
+			if s.emission.files[dir] != f {
+				facts.loadedDir(dir)
+			}
 			s.emission.setFile(dir, f)
 			if s.inputs[dir].config == nil {
 				s.inputs[dir] = programInput{config: s.buildConfig(dir)}
+				facts.loadedDir(dir)
 			}
 			if s.emission.registeredRules(dir, f) {
 				continue
@@ -157,6 +163,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 				key := emissionLabel(s.repoConfig.RepoName, dir, ":"+r.Name())
 				if s.emission.rules[key] == nil {
 					s.emission.setRule(key, r)
+					facts.loadedDir(dir)
 				}
 			}
 			s.emission.recordRegistered(dir, f)
@@ -168,24 +175,40 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 	if len(dirInfo) == 0 {
 		return
 	}
-	var queue []string
+	mapped := func(key string) string {
+		if member := s.emission.lock.memberCompilerTarget(s.repoConfig.RepoName, key); member != "" {
+			return member
+		}
+		return key
+	}
+	// origin is the chain of deps an entry was pushed through, or -1; only the BUILD-edit facts read it.
+	type queued struct {
+		key    string
+		origin int32
+	}
+	var queue []queued
+	push := func(key string, origin int32) {
+		queue = append(queue, queued{key, origin})
+		if facts != nil {
+			facts.pushed(mapped(key), origin)
+		}
+	}
+	facts.startCrawl()
+	defer facts.endCrawl()
 	for dir := range seenDirs {
 		if file := s.emission.files[dir]; file != nil {
 			for _, stored := range file.Rules {
 				key := emissionLabel(s.repoConfig.RepoName, dir, ":"+stored.Name())
 				if kind := canonicalRule(s.inputs[dir].config, stored).Kind(); kind == "ts_compile" || kind == "ts_test" || kind == "ts_binary" || kind == "ts_proto_library" {
-					queue = append(queue, key)
+					push(key, -1)
 				}
 			}
 		}
 	}
 	seenTargets := map[string]bool{}
 	for len(queue) > 0 {
-		key := queue[0]
+		key, origin := mapped(queue[0].key), queue[0].origin
 		queue = queue[1:]
-		if member := s.emission.lock.memberCompilerTarget(s.repoConfig.RepoName, key); member != "" {
-			key = member
-		}
 		s.emission.crawlMemo()
 		if seenTargets[key] || s.emission.crawled[key] {
 			continue
@@ -204,6 +227,8 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		}
 		s.emission.crawled[key] = true
 		references, _ := runtimeDependencies(r)
+		deps := len(references)
+		editable := facts != nil && editableAttr(r.Kind(), "deps")
 		references = append(references, r.AttrStrings("source_node_modules")...)
 		switch r.Kind() {
 		case "ts_compile", "ts_test":
@@ -218,10 +243,16 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		case "ts_proto_library":
 			references = append(references, r.AttrString("proto"))
 		}
-		for _, text := range references {
-			if text != "" {
-				queue = append(queue, emissionLabel(s.repoConfig.RepoName, target.Pkg, text))
+		for i, text := range references {
+			if text == "" {
+				continue
 			}
+			next := emissionLabel(s.repoConfig.RepoName, target.Pkg, text)
+			chain := origin
+			if i < deps && editable {
+				chain = facts.hop(key, next, origin)
+			}
+			push(next, chain)
 		}
 	}
 }

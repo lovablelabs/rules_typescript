@@ -72,7 +72,7 @@ func (j *predecodeJob) run(ahead bool) {
 // decodeListing reads key's entry and whether everything it read is unchanged.
 func decodeListing(key string) decodedListing {
 	file := filepath.Join(listingCacheDir, key)
-	data, err := os.ReadFile(file)
+	data, err := readListingFile(file)
 	if err != nil {
 		return decodedListing{err: err}
 	}
