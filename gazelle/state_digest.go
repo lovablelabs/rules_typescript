@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"maps"
+	"path"
 	"slices"
 	"strings"
 
@@ -46,8 +47,68 @@ type stateHasher struct {
 	programSums map[*program][sha256.Size]byte
 	ruleBodies  map[*rule.Rule]ruleBody
 	digest      [sha256.Size]byte
+	outside     map[string]dirScope
 	// Why the state cannot stand for a replay, or "".
 	opaque string
+}
+
+// dirScope is how much of a walked directory the state digest leaves out.
+type dirScope uint8
+
+const (
+	digested dirScope = iota
+	// namesOut leaves out the directory's file names, which after the walk only
+	// dirNames and dirWalked read, and they note it.
+	namesOut
+	// whollyOut has no BUILD file either: no rule, index answer or emission file
+	// names it, so the digest leaves out its configuration and generate call too.
+	whollyOut
+)
+
+// outsideDirs are the walked directories with nothing Resolve reads but their
+// names: no TypeScript source, tsconfig.json or package.json, no program, no
+// generated rule.
+func (s *programStore) outsideDirs(generated []generatedPackage) map[string]dirScope {
+	built, generating := map[string]bool{}, map[string]bool{}
+	for _, g := range generated {
+		built[g.args.Rel] = built[g.args.Rel] || g.args.File != nil
+		// Empty rules only delete from a BUILD file, which a directory left wholly out has not.
+		generating[g.args.Rel] = generating[g.args.Rel] || len(g.res.Gen)+len(g.res.Imports)+len(g.res.RelsToIndex) > 0
+	}
+	programDirs := map[string]bool{}
+	for _, m := range []map[string]*program{s.vitestPrograms, s.compilerPrograms} {
+		for cfg := range m {
+			programDirs[parentDir(cfg)] = true
+		}
+	}
+	outside := map[string]dirScope{}
+	for dir, names := range s.files {
+		input := s.inputs[dir]
+		if len(s.visited[dir]) > 0 || slices.ContainsFunc(names, func(name string) bool { return name == "tsconfig.json" || name == "package.json" }) ||
+			input.program != nil || input.discoveryErr != nil || input.refresh != nil ||
+			s.programs[dir] != nil || programDirs[dir] || generating[dir] {
+			continue
+		}
+		outside[dir] = namesOut
+		if !built[dir] && !s.generatedPackages[dir] && (s.emission == nil || s.emission.files[dir] == nil) {
+			outside[dir] = whollyOut
+		}
+	}
+	return outside
+}
+
+func (d *stateHasher) out(dir string) bool { return d.outside[dir] != digested }
+
+func (d *stateHasher) whollyOut(dir string) bool { return d.outside[dir] == whollyOut }
+
+// sortedEachExcept is sortedEach over the keys out leaves in.
+func sortedEachExcept[V any](d *stateHasher, m map[string]V, out func(string) bool, digest func(V)) {
+	keys := slices.DeleteFunc(slices.Sorted(maps.Keys(m)), out)
+	d.int(len(keys))
+	for _, k := range keys {
+		d.str(k)
+		digest(m[k])
+	}
 }
 
 // ruleBody is a rule's digest apart from the private attributes that point
@@ -58,14 +119,16 @@ type ruleBody struct {
 	opaque string
 }
 
-// stateDigest is the state's digest, or why it cannot stand for a replay.
-func (s *programStore) stateDigest(generated []generatedPackage, indexed []importAnswer) (digest, refused string) {
+// stateDigest is the state's digest, or why it cannot stand for a replay. It
+// leaves out the directories in outside, which a replay checks by what the phase read of them.
+func (s *programStore) stateDigest(generated []generatedPackage, indexed []importAnswer, outside map[string]dirScope) (digest, refused string) {
 	d := newHasher()
+	d.outside = outside
 	d.programSums, d.ruleBodies = s.prehash(generated)
 	d.str("store")
 	d.store(s)
 	d.str("generated")
-	each(d, generated, d.generatedPackage)
+	each(d, slices.DeleteFunc(slices.Clone(generated), func(g generatedPackage) bool { return outside[g.args.Rel] == whollyOut }), d.generatedPackage)
 	d.str("index")
 	each(d, indexed, func(a importAnswer) {
 		d.label(a.label)
@@ -667,8 +730,12 @@ func (d *stateHasher) generatedPackage(g generatedPackage) {
 	d.str(a.Dir)
 	d.str(a.Rel)
 	d.file(a.File)
-	d.strs(a.Subdirs)
-	d.strs(a.RegularFiles)
+	d.strs(slices.DeleteFunc(slices.Clone(a.Subdirs), func(sub string) bool { return d.out(path.Join(a.Rel, sub)) }))
+	if d.out(a.Rel) {
+		d.int(-1)
+	} else {
+		d.strs(a.RegularFiles)
+	}
 	d.strs(a.GenFiles)
 	d.rules(a.OtherEmpty)
 	d.rules(a.OtherGen)
@@ -684,7 +751,7 @@ func (d *stateHasher) generatedPackage(g generatedPackage) {
 func (d *stateHasher) store(s *programStore) {
 	d.config(s.repoConfig)
 	d.emission(s.emission)
-	sortedEach(d, s.inputs, func(input programInput) {
+	sortedEachExcept(d, s.inputs, d.whollyOut, func(input programInput) {
 		d.config(input.config)
 		d.program(input.program)
 		if input.discoveryErr != nil {
@@ -706,16 +773,20 @@ func (d *stateHasher) store(s *programStore) {
 	sortedEach(d, s.configs, d.str)
 	sortedEach(d, s.packages, func(set map[string]bool) { sortedEach(d, set, d.bool) })
 	sortedEach(d, s.generatedPackages, d.bool)
-	sortedEach(d, s.visited, d.strs)
-	sortedEach(d, s.files, d.strs)
-	sortedEach(d, s.walked, d.bool)
+	sortedEachExcept(d, s.visited, d.out, d.strs)
+	sortedEachExcept(d, s.files, d.out, d.strs)
+	sortedEachExcept(d, s.walked, d.whollyOut, d.bool)
 	sortedEach(d, s.bases, d.strs)
 	sortedEach(d, s.extended, d.bool)
 	sortedEach(d, s.foreign, d.str)
 	sortedEach(d, s.foreignSaid, d.bool)
 	sortedEach(d, s.wranglerConfigs, d.str)
 	d.bool(s.installChecked)
-	sortedEach(d, s.regularFiles, d.bool)
+	// A regular-file answer is a noted stat, which the record's reads check.
+	sortedEachExcept(d, s.regularFiles, func(file string) bool {
+		rel, ok := repoRelative(s.repoConfig.RepoRoot, file)
+		return ok && d.out(parentDir(rel))
+	}, d.bool)
 	d.bool(s.fullWalk)
 	sortedEach(d, s.manifests, func(m *manifest) {
 		if m == nil {

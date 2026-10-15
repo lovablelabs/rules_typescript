@@ -39,7 +39,7 @@ var runRecordMode = "on"
 
 const (
 	runRecordName  = "run-record"
-	runRecordMagic = "rules_typescript gazelle run record v3"
+	runRecordMagic = "rules_typescript gazelle run record v4"
 	// Set by the run that spawns a recording run: where it leaves its candidate.
 	runRecordCandidateEnv = "RULES_TYPESCRIPT_GAZELLE_RUN_RECORD_CANDIDATE"
 	// A test hook: a file each process appends the path it took to.
@@ -93,6 +93,8 @@ type inputSet struct {
 	listings []recordedListing
 	// builds collects the build snapshot written beside the candidate.
 	builds *buildFactsRecorder
+	// whole are the inputs the extension read the content of by a name it was given.
+	whole map[string]bool
 }
 
 type dirSnapshot struct {
@@ -104,13 +106,13 @@ var snapshotSlots = make(chan struct{}, 4*runtime.GOMAXPROCS(0))
 
 // noteRead notes a read the extension makes by a name it was given; a source's
 // existence read so is named, which no listing or edge accounts for.
-func noteRead(path string) { noteInput(path, true) }
+func noteRead(path string) { noteInput(path, true, false) }
 
 // noteSourceRead notes a read the listings' patch or Resolve's edges make of a
 // source they reach.
-func noteSourceRead(path string) { noteInput(path, false) }
+func noteSourceRead(path string) { noteInput(path, false, false) }
 
-func noteInput(path string, named bool) {
+func noteInput(path string, named, content bool) {
 	// A projection is its listing's own, derived from configs noted apart, and gone when the run ends.
 	if isProjection(path) {
 		return
@@ -130,6 +132,12 @@ func noteInput(path string, named bool) {
 			in.named = map[string]bool{}
 		}
 		in.named[path] = true
+	}
+	if content {
+		if in.whole == nil {
+			in.whole = map[string]bool{}
+		}
+		in.whole[path] = true
 	}
 	in.mu.Unlock()
 	if seen {
@@ -163,8 +171,11 @@ func lstatInput(path string) (fs.FileInfo, error) {
 	return os.Lstat(path)
 }
 
+// noteWholeRead notes a read of an input's content by a name the extension was given.
+func noteWholeRead(path string) { noteInput(path, true, true) }
+
 func readInput(path string) ([]byte, error) {
-	noteRead(path)
+	noteWholeRead(path)
 	return os.ReadFile(path)
 }
 
@@ -242,6 +253,8 @@ type runRecord struct {
 	// the fast path reads when the record no longer matches.
 	facts []byte
 	sums  []uint64
+	// scans are each read's scanSum, by reads' order; 0 where none stands for it.
+	scans []uint64
 }
 
 func (r *runRecord) lists() []*[]string { return []*[]string{&r.dirs, &r.files, &r.reads, &r.roots} }
@@ -251,8 +264,11 @@ func (r *runRecord) encode() ([]byte, error) {
 	if len(r.sums) != 0 && len(r.sums) != len(r.dirs)+len(r.files)+len(r.reads)+len(r.roots) {
 		return nil, fmt.Errorf("%d input sums for %d inputs", len(r.sums), len(r.dirs)+len(r.files)+len(r.reads)+len(r.roots))
 	}
-	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest,
-		len(r.dirs), len(r.files), len(r.reads), len(r.roots), r.exit, len(r.stdout), len(r.stderr), len(r.facts), len(r.sums))
+	if len(r.scans) != 0 && len(r.scans) != len(r.reads) {
+		return nil, fmt.Errorf("%d scan sums for %d reads", len(r.scans), len(r.reads))
+	}
+	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d %d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest,
+		len(r.dirs), len(r.files), len(r.reads), len(r.roots), r.exit, len(r.stdout), len(r.stderr), len(r.facts), len(r.sums), len(r.scans))
 	for _, list := range r.lists() {
 		for _, p := range *list {
 			if strings.ContainsAny(p, "\n\r") {
@@ -265,9 +281,11 @@ func (r *runRecord) encode() ([]byte, error) {
 	b.Write(r.stdout)
 	b.Write(r.stderr)
 	b.Write(r.facts)
-	sums := make([]byte, 0, 8*len(r.sums))
-	for _, sum := range r.sums {
-		sums = binary.BigEndian.AppendUint64(sums, sum)
+	sums := make([]byte, 0, 8*(len(r.sums)+len(r.scans)))
+	for _, list := range [][]uint64{r.sums, r.scans} {
+		for _, sum := range list {
+			sums = binary.BigEndian.AppendUint64(sums, sum)
+		}
 	}
 	b.Write(sums)
 	return b.Bytes(), nil
@@ -313,7 +331,7 @@ func loadRunRecord(file string) *runRecord {
 		}
 		return out
 	}
-	counts, tail := numbers(header[4], len(r.lists())), numbers(header[5], 5)
+	counts, tail := numbers(header[4], len(r.lists())), numbers(header[5], 6)
 	if counts == nil || tail == nil {
 		return nil
 	}
@@ -329,6 +347,9 @@ func loadRunRecord(file string) *runRecord {
 	if n := tail[4]; n != 0 && n != counts[0]+counts[1]+counts[2]+counts[3] {
 		return nil
 	}
+	if n := tail[5]; n != 0 && n != counts[2] {
+		return nil
+	}
 	rest := len(data)
 	for _, n := range tail[1:4] {
 		if n > rest {
@@ -336,26 +357,37 @@ func loadRunRecord(file string) *runRecord {
 		}
 		rest -= n
 	}
-	if rest != 8*tail[4] {
+	if rest != 8*(tail[4]+tail[5]) {
 		return nil
 	}
 	r.exit = tail[0]
 	r.stdout, data = data[:tail[1]:tail[1]], data[tail[1]:]
 	r.stderr, data = data[:tail[2]:tail[2]], data[tail[2]:]
 	r.facts, data = data[:tail[3]:tail[3]], data[tail[3]:]
-	r.sums = make([]uint64, 0, tail[4])
-	for i := range tail[4] {
-		r.sums = append(r.sums, binary.BigEndian.Uint64(data[8*i:]))
+	words := make([]uint64, tail[4]+tail[5])
+	for i := range words {
+		words[i] = binary.BigEndian.Uint64(data[8*i:])
+	}
+	r.sums = words[:tail[4]:tail[4]]
+	if tail[5] != 0 {
+		r.scans = words[tail[4]:]
 	}
 	return r
 }
 
 func writeAtomically(file string, data []byte) error {
+	return writeAtomicallyWith(file, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+func writeAtomicallyWith(file string, write func(io.Writer) error) error {
 	tmp, err := os.CreateTemp(filepath.Dir(file), filepath.Base(file)+".*")
 	if err != nil {
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if err := write(tmp); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return err
@@ -824,6 +856,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		lines.files = append(lines.files, in.files[file])
 	}
 	reads, roots := map[string]string{}, map[string]string{}
+	scans := map[string]uint64{}
 	var why string
 	merge := func(into map[string]string, path, line string) {
 		if was, ok := into[path]; ok && was != line {
@@ -839,6 +872,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		}
 		for i, read := range entry.Reads {
 			merge(reads, read, entry.ReadLines[i])
+			mergeScan(scans, read, entry.scanOf(i))
 		}
 		for i, dir := range entry.Dirs {
 			merge(roots, dir, entry.DirDigests[i])
@@ -848,6 +882,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 	for _, l := range in.listings {
 		for i, read := range l.Reads {
 			merge(reads, read, l.ReadLines[i])
+			mergeScan(scans, read, l.scanOf(i))
 		}
 		for i, dir := range l.Dirs {
 			merge(roots, dir, l.DirDigests[i])
@@ -857,8 +892,14 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		return nil, why
 	}
 	rec.reads, rec.roots = slices.Sorted(maps.Keys(reads)), slices.Sorted(maps.Keys(roots))
-	for _, read := range rec.reads {
+	rec.scans = make([]uint64, len(rec.reads))
+	for i, read := range rec.reads {
 		lines.reads = append(lines.reads, reads[read])
+		if in.whole[read] {
+			rec.scans[i] = wholeScan
+		} else {
+			rec.scans[i] = scans[read]
+		}
 	}
 	for _, root := range rec.roots {
 		lines.roots = append(lines.roots, roots[root])
@@ -866,6 +907,32 @@ func (in *inputSet) candidate() (*runRecord, string) {
 	rec.digest, rec.walkDigest = rec.digests(lines)
 	rec.sums, rec.facts = inputSums(lines, rec.dirs, in.repoRoot, decodeNameReads(in.facts)), in.facts
 	return rec, ""
+}
+
+func (r *runRecord) scansByRead() map[string]uint64 {
+	scans := map[string]uint64{}
+	if len(r.scans) == len(r.reads) {
+		for i, read := range r.reads {
+			scans[read] = r.scans[i]
+		}
+	}
+	return scans
+}
+
+func (e *cachedListing) scanOf(i int) uint64 {
+	rel, ok := repoRelative(e.Root, e.Reads[i])
+	if !ok || !regularLine(e.ReadLines[i]) {
+		return 0
+	}
+	return e.Sources[rel].Sum
+}
+
+// mergeScan keeps a read's scan sum unless two listings disagree on it.
+func mergeScan(into map[string]uint64, read string, sum uint64) {
+	if was, seen := into[read]; seen && was != sum {
+		sum = 0
+	}
+	into[read] = sum
 }
 
 // verifyReplay runs the pass a replay stands for, without any cache, and

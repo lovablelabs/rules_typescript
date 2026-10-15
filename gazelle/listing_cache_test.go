@@ -149,12 +149,26 @@ func patchFixture() map[string]string {
 // A patched listing must be the listing tsgo prints for the edited tree, and
 // each of these edits used to send the whole program back to tsgo.
 func TestListingCache_PatchedListingEqualsAFreshListing(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		edit  map[string]string
-		drop  []string
-		check func(*program) bool
-	}{
+	// An import added beside code the scan replay distrusts, which the patch reads as before.
+	importBeside := func(code string) (start, edit map[string]string) {
+		return map[string]string{"app/src/a.ts": "import { b } from './b';\n" + code + "\nexport const a = b;\n"},
+			map[string]string{"app/src/a.ts": "import { b } from './b';\nimport { c } from './c';\n" + code + "\nexport const a = b + c;\n"}
+	}
+	type row struct {
+		name        string
+		start, edit map[string]string
+		drop        []string
+		check       func(*program) bool
+	}
+	besides := func(name, code string) row {
+		start, edit := importBeside(code)
+		return row{name: name, start: start, edit: edit}
+	}
+	for _, tc := range []row{
+		besides("an import beside a string that reads like one", `export const doc = "import { x } from 'y'";`),
+		besides("an import beside a namespace alias", "namespace N { export const y = 1; }\nimport y = N.y;\nexport const z = y;"),
+		besides("an import beside a directive below the code", "export const z = 1;\n/// <reference lib=\"es2020\" />"),
+		besides("an import beside a declare module holding an import", "declare module 'virtual' {\n  import { b } from './b';\n  export const v: typeof b;\n}"),
 		{name: "an import with no precedent in its directory", edit: map[string]string{
 			"app/src/a.ts": "import { b } from './b';\nimport { c } from './c';\nexport const a = b + c;\n",
 		}},
@@ -180,7 +194,9 @@ func TestListingCache_PatchedListingEqualsAFreshListing(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			l := newListingRuns(t, patchFixture())
+			tree := patchFixture()
+			maps.Copy(tree, tc.start)
+			l := newListingRuns(t, tree)
 			l.list("app/tsconfig.json")
 			writeWorkspace(t, l.root, tc.edit)
 			for _, rel := range tc.drop {
@@ -205,8 +221,8 @@ func TestListingCache_PatchedListingEqualsAFreshListing(t *testing.T) {
 // What the patch does not model goes back to tsgo rather than guessing.
 func TestListingCache_PatchRefusesWhatItDoesNotModel(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		edit map[string]string
+		name        string
+		start, edit map[string]string
 	}{
 		{name: "a bare specifier no importer resolves", edit: map[string]string{
 			"app/src/a.ts": "import { b } from './b';\nimport { z } from 'zod';\nexport const a = b + z;\n",
@@ -220,9 +236,46 @@ func TestListingCache_PatchRefusesWhatItDoesNotModel(t *testing.T) {
 		{name: "an added file beside a declaration of the same name", edit: map[string]string{
 			"app/src/b.d.ts": "export declare const b: number;\n",
 		}},
+		{name: "a reference directive moved from below the code to the header", start: map[string]string{
+			"app/src/a.ts": "import { b } from './b';\nexport const a = b;\n/// <reference types=\"react\" />\n",
+		}, edit: map[string]string{
+			"app/src/a.ts": "/// <reference types=\"react\" />\nimport { b } from './b';\nexport const a = b;\n",
+		}},
+		{name: "a jsxImportSource pragma moved out of a JSX expression to the header", start: map[string]string{
+			"app/src/view/v.tsx": "import { useState } from 'react';\nexport const V = () => <div>{/** @jsxImportSource preact */ useState}</div>;\n",
+		}, edit: map[string]string{
+			"app/src/view/v.tsx": "/** @jsxImportSource preact */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}},
+		{name: "an upper-case jsxImportSource pragma changed", start: map[string]string{
+			"app/src/view/v.tsx": "/** @JSXImportSource react */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}, edit: map[string]string{
+			"app/src/view/v.tsx": "/** @JSXImportSource preact */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}},
+		{name: "a jsxImportSource pragma on a later line of its comment changed", start: map[string]string{
+			"app/src/view/v.tsx": "/**\n * @jsxRuntime automatic\n * @jsxImportSource react\n */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}, edit: map[string]string{
+			"app/src/view/v.tsx": "/**\n * @jsxRuntime automatic\n * @jsxImportSource preact\n */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}},
+		{name: "two jsxImportSource pragmas swapped", start: map[string]string{
+			"app/src/view/v.tsx": "/** @jsxImportSource preact */\n/** @jsxImportSource react */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}, edit: map[string]string{
+			"app/src/view/v.tsx": "/** @jsxImportSource react */\n/** @jsxImportSource preact */\nimport { useState } from 'react';\nexport const V = () => <div>{useState}</div>;\n",
+		}},
+		{name: "an import.meta in a function removed beside an augmentation", start: map[string]string{
+			"app/src/m.ts": "declare module './b' {\n  export const extra: number;\n}\nfunction f() { return import.meta.url; }\n",
+		}, edit: map[string]string{
+			"app/src/m.ts": "declare module './b' {\n  export const extra: number;\n}\nfunction f() { return 1; }\n",
+		}},
+		{name: "the last export removed before export as namespace beside an augmentation", start: map[string]string{
+			"app/src/m.ts": "declare module './b' {\n  export const extra: number;\n}\nexport {};\nexport as namespace M;\n",
+		}, edit: map[string]string{
+			"app/src/m.ts": "declare module './b' {\n  export const extra: number;\n}\nexport as namespace M;\n",
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			l := newListingRuns(t, patchFixture())
+			tree := patchFixture()
+			maps.Copy(tree, tc.start)
+			l := newListingRuns(t, tree)
 			l.list("app/tsconfig.json")
 			writeWorkspace(t, l.root, tc.edit)
 			got := l.list("app/tsconfig.json")

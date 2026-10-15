@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
@@ -151,8 +152,8 @@ func splitTrace(root, output string, facts *resolutionFacts) (string, []resoluti
 }
 
 // traceSplitter takes tsgo's output a line at a time, keeping the listing's
-// lines and the trace's candidates. What it keeps past the next line is copied
-// or interned, so the output it was handed can be freed as it goes.
+// lines and the trace's candidates. What it keeps past a line is copied or
+// interned: the buffer a line is in is reused once it is handled.
 type traceSplitter struct {
 	root, under                                                  string
 	facts                                                        *resolutionFacts
@@ -163,11 +164,17 @@ type traceSplitter struct {
 	block, blockStart                                            int
 	// The paths pattern and substitution whose candidate the next candidate line announces.
 	pattern, substitution, substituted string
+	rels                               *sync.Map
 }
 
 func newTraceSplitter(root string, facts *resolutionFacts) *traceSplitter {
-	return &traceSplitter{root: root, under: filepath.Clean(root) + string(filepath.Separator), facts: facts}
+	rels, _ := outsideRels.LoadOrStore(root, &sync.Map{})
+	return &traceSplitter{root: root, under: filepath.Clean(root) + string(filepath.Separator), facts: facts, rels: rels.(*sync.Map)}
 }
+
+// outsideRels holds, per root, the relative path of each path the fast path of
+// relative cannot cut, such as the lib files every listing resolves.
+var outsideRels sync.Map
 
 func (t *traceSplitter) relative(value string) (string, error) {
 	if !filepath.IsAbs(value) {
@@ -176,8 +183,16 @@ func (t *traceSplitter) relative(value string) (string, error) {
 	if len(value) > len(t.under) && strings.HasPrefix(value, t.under) && filepath.Clean(value) == value {
 		return internString(filepath.ToSlash(value[len(t.under):])), nil
 	}
+	if rel, ok := t.rels.Load(value); ok {
+		return rel.(string), nil
+	}
 	rel, err := filepath.Rel(t.root, value)
-	return internString(filepath.ToSlash(rel)), err
+	if err != nil {
+		return internString(filepath.ToSlash(rel)), err
+	}
+	kept := internString(filepath.ToSlash(rel))
+	t.rels.Store(strings.Clone(value), kept)
+	return kept, nil
 }
 
 func (t *traceSplitter) line(raw string) error {
@@ -252,10 +267,13 @@ func (t *traceSplitter) line(raw string) error {
 		t.previous = ""
 		return nil
 	}
-	t.previous = line
+	t.previous = ""
+	if strings.HasPrefix(line, "Using 'imports' subpath '") {
+		t.previous = strings.Clone(line)
+	}
 	missing, isMissing := missingFileTrace(line)
 	if value, ok := traceField(line, "File name '", "' has a '.json' extension - stripping it."); t.kind == "module" && ok {
-		t.jsonModule = value
+		t.jsonModule = strings.Clone(value)
 	} else if !isMissing {
 		t.jsonModule = ""
 	}
@@ -293,7 +311,7 @@ func (t *traceSplitter) line(raw string) error {
 		}
 		if value, ok := traceField(line, "Trying substitution '", "'."); ok && t.pattern != "" {
 			if i := strings.LastIndex(value, "', candidate module location: '"); i >= 0 {
-				t.substitution, t.substituted = internString(value[:i]), value[i+len("', candidate module location: '"):]
+				t.substitution, t.substituted = internString(value[:i]), strings.Clone(value[i+len("', candidate module location: '"):])
 			}
 		}
 		if strings.Contains(line, "odule resolution kind") {

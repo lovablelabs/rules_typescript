@@ -136,7 +136,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			f := s.emission.files[dir]
 			if len(dirInfo) > 0 {
 				if info, err := dirInfo[0](dir); err == nil {
-					if _, known := s.files[dir]; !known {
+					if _, known := s.dirNames(dir); !known {
 						s.visit(dir, info.RegularFiles)
 						facts.loadedDir(dir)
 					}

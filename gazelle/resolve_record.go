@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/gob"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -30,7 +31,7 @@ var resolveRecordMode = "on"
 
 const (
 	resolveRecordName  = "resolve-record"
-	resolveRecordMagic = "rules_typescript gazelle resolve record v2"
+	resolveRecordMagic = "rules_typescript gazelle resolve record v4"
 )
 
 // resolveRecord is what one run's Resolve and AfterResolvingDeps left in the
@@ -43,15 +44,31 @@ type resolveRecord struct {
 	// Dirs and Listings are those first read after the walk.
 	Dirs     []recordedRead
 	Listings []recordedListing
-	Files    []recordedFile
-	Log      []string
+	// Outside are the directories State leaves out whose names the phase read,
+	// and Trees the roots under which it read every such directory, each as outsideLine.
+	Outside, Trees []recordedRead
+	Files          []recordedFile
+	Log            []string
+	// Whole are the Reads the run read the content of by a name it was given.
+	Whole []string
 	// Facts are the phase's import facts, which a run that replays the phase hands its run record.
 	Facts []byte
 }
 
 type recordedRead struct{ Path, Line string }
 
-type recordedListing struct{ Reads, ReadLines, Dirs, DirDigests []string }
+type recordedListing struct {
+	Reads, ReadLines, Dirs, DirDigests []string
+	// Scans are each read's scanSum, by Reads' order, as the listing's entry held them.
+	Scans []uint64
+}
+
+func (l recordedListing) scanOf(i int) uint64 {
+	if len(l.Scans) != len(l.Reads) {
+		return 0
+	}
+	return l.Scans[i]
+}
 
 type recordedFile struct {
 	Pkg     string
@@ -78,6 +95,108 @@ type resolveRecorder struct {
 
 	mu          sync.Mutex
 	buildBodies map[string]string
+
+	// outside is how much of each walked directory State leaves out; sorted is its keys in order.
+	outside               map[string]dirScope
+	sorted                []string
+	outsideMu             sync.Mutex
+	outsideRead, treeRead map[string]string
+}
+
+// noteOutside notes a read of dir's names unless State holds them.
+func (rec *resolveRecorder) noteOutside(s *programStore, dir string) {
+	if _, listed := s.files[dir]; listed && rec.outside[dir] == digested {
+		return
+	}
+	rec.outsideMu.Lock()
+	defer rec.outsideMu.Unlock()
+	if _, seen := rec.outsideRead[dir]; !seen {
+		rec.outsideRead[dir] = s.outsideLine(dir)
+	}
+}
+
+// noteOutsideTree notes that the phase enumerated every walked directory under root.
+func (rec *resolveRecorder) noteOutsideTree(s *programStore, root string) {
+	rec.outsideMu.Lock()
+	defer rec.outsideMu.Unlock()
+	if _, seen := rec.treeRead[root]; !seen {
+		rec.treeRead[root] = s.treeLine(root, rec.sorted)
+	}
+}
+
+// dirNames is the walk's file names in dir, noted as a read during the Resolve phase.
+func (s *programStore) dirNames(dir string) ([]string, bool) {
+	if rec := resolvePhase.Load(); rec != nil {
+		rec.noteOutside(s, dir)
+	}
+	names, ok := s.files[dir]
+	return names, ok
+}
+
+// dirWalked is whether the walk generated dir, noted as a read during the Resolve phase.
+func (s *programStore) dirWalked(dir string) (bool, bool) {
+	if rec := resolvePhase.Load(); rec != nil {
+		rec.noteOutside(s, dir)
+	}
+	walked, observed := s.walked[dir]
+	return walked, observed
+}
+
+// walkedDirs is every walked directory at or under root, in order, noted as a
+// read of them all during the Resolve phase.
+func (s *programStore) walkedDirs(root string) []string {
+	if rec := resolvePhase.Load(); rec != nil {
+		rec.noteOutsideTree(s, root)
+	}
+	var dirs []string
+	for dir := range s.files {
+		if within(dir, root) {
+			dirs = append(dirs, dir)
+		}
+	}
+	slices.Sort(dirs)
+	return dirs
+}
+
+// outsideLine is what dirNames and dirWalked read of dir.
+func (s *programStore) outsideLine(dir string) string {
+	d := newHasher()
+	names, listed := s.files[dir]
+	walked, observed := s.walked[dir]
+	d.bool(listed)
+	d.strs(names)
+	d.bool(observed)
+	d.bool(walked)
+	sum := d.sum()
+	return hex.EncodeToString(sum[:8])
+}
+
+// treeLine is the outsideLine of every directory of outside at or under root.
+func (s *programStore) treeLine(root string, outside []string) string {
+	d := newHasher()
+	for _, dir := range outside {
+		if within(dir, root) {
+			d.str(dir)
+			d.str(s.outsideLine(dir))
+		}
+	}
+	sum := d.sum()
+	return hex.EncodeToString(sum[:8])
+}
+
+// outsideHolds says whether every directory State leaves out reads as the recorded phase read it.
+func (r *resolveRecord) outsideHolds(s *programStore, outside []string) bool {
+	for _, read := range r.Outside {
+		if s.outsideLine(read.Path) != read.Line {
+			return false
+		}
+	}
+	for _, read := range r.Trees {
+		if s.treeLine(read.Path, outside) != read.Line {
+			return false
+		}
+	}
+	return true
 }
 
 // resolvePhase is the recorder between the first Resolve and the end of
@@ -262,16 +381,18 @@ func (rec *resolveRecorder) begin(s *programStore) bool {
 		return rec.replay != nil
 	}
 	rec.started = true
-	rec.state, rec.why = s.stateDigest(rec.generated, rec.indexed)
+	rec.outside = s.outsideDirs(rec.generated)
+	rec.sorted = slices.Sorted(maps.Keys(rec.outside))
+	rec.state, rec.why = s.stateDigest(rec.generated, rec.indexed, rec.outside)
 	if rec.why == "" {
 		rec.why = s.untrackedRules(rec.generated)
 	}
 	rec.generated, rec.indexed = nil, nil
 	if rec.why == "" {
-		if old := loadResolveRecord(rec.file); old != nil && old.Key == rec.key && old.State == rec.state && old.readsHold(rec.buildNames, rec.cache) {
+		if old := loadResolveRecord(rec.file); old != nil && old.Key == rec.key && old.State == rec.state && old.outsideHolds(s, rec.sorted) && old.readsHold(rec.buildNames, rec.cache) {
 			rec.replay = old
-			old.noteReplayedReads()
 			s.importFacts.replayed(old.Facts)
+			old.noteReplayedReads()
 			noteVerifiedReplay()
 			return true
 		}
@@ -287,6 +408,7 @@ func (rec *resolveRecorder) begin(s *programStore) bool {
 		rec.walkDirs[rel] = true
 	}
 	runInputs.mu.Unlock()
+	rec.outsideRead, rec.treeRead = map[string]string{}, map[string]string{}
 	rec.stderr = log.Writer()
 	log.SetOutput(io.MultiWriter(rec.stderr, &rec.log))
 	resolvePhase.Store(rec)
@@ -323,7 +445,7 @@ func loadResolveRecord(file string) *resolveRecord {
 		return nil
 	}
 	var rec resolveRecord
-	if gob.NewDecoder(bytes.NewReader(data)).Decode(&rec) != nil || rec.Magic != resolveRecordMagic {
+	if gob.NewDecoder(bytes.NewReader(data)).Decode(&rec) != nil || rec.Magic != resolveRecordMagic || !slices.IsSorted(rec.Whole) {
 		return nil
 	}
 	return &rec
@@ -462,9 +584,13 @@ func (rec *resolveRecorder) candidate(s *programStore, logged []byte) (*resolveR
 	in.mu.Lock()
 	incomplete := in.incomplete
 	reads := map[string]string{}
+	var whole []string
 	for path, line := range in.files {
 		if !isBuildFile(path, rec.buildNames) {
 			reads[path] = line
+			if in.whole[path] {
+				whole = append(whole, path)
+			}
 		}
 	}
 	var dirs []recordedRead
@@ -484,9 +610,12 @@ func (rec *resolveRecorder) candidate(s *programStore, logged []byte) (*resolveR
 	maps.Copy(reads, rec.buildBodies)
 	rec.mu.Unlock()
 	next := &resolveRecord{Magic: resolveRecordMagic, Key: rec.key, State: rec.state, Dirs: dirs, Log: phaseLines(logged), Facts: s.importFacts.seal()}
-	for _, path := range slices.Sorted(maps.Keys(reads)) {
-		next.Reads = append(next.Reads, recordedRead{Path: path, Line: reads[path]})
-	}
+	rec.outsideMu.Lock()
+	next.Outside, next.Trees = sortedReads(rec.outsideRead), sortedReads(rec.treeRead)
+	rec.outsideMu.Unlock()
+	next.Reads = sortedReads(reads)
+	slices.Sort(whole)
+	next.Whole = whole
 	stamps := &newest{}
 	if why := next.changed(rec.buildNames, rec.cache, stamps); why != "" {
 		return nil, why + " during the run"
@@ -503,13 +632,25 @@ func (rec *resolveRecorder) candidate(s *programStore, logged []byte) (*resolveR
 		if len(entry.ReadLines) != len(entry.Reads) || len(entry.DirDigests) != len(entry.Dirs) {
 			return nil, "a listing kept no read-time state"
 		}
-		next.Listings = append(next.Listings, recordedListing{Reads: entry.Reads, ReadLines: entry.ReadLines, Dirs: entry.Dirs, DirDigests: entry.DirDigests})
+		scans := make([]uint64, len(entry.Reads))
+		for i := range entry.Reads {
+			scans[i] = entry.scanOf(i)
+		}
+		next.Listings = append(next.Listings, recordedListing{Reads: entry.Reads, ReadLines: entry.ReadLines, Dirs: entry.Dirs, DirDigests: entry.DirDigests, Scans: scans})
 	}
 	if !stamps.at.Before(processStart.Add(-racyWindow)) {
 		return nil, "an input changed within " + racyWindow.String() + " of the run's start"
 	}
 	next.Files = s.captureTracked()
 	return next, ""
+}
+
+func sortedReads(lines map[string]string) []recordedRead {
+	reads := make([]recordedRead, 0, len(lines))
+	for _, path := range slices.Sorted(maps.Keys(lines)) {
+		reads = append(reads, recordedRead{Path: path, Line: lines[path]})
+	}
+	return reads
 }
 
 // noteReplayedReads makes a replaying run's own record read what the replayed
@@ -520,7 +661,11 @@ func (r *resolveRecord) noteReplayedReads() {
 		return
 	}
 	for _, read := range r.Reads {
-		noteRead(read.Path)
+		if has(r.Whole, read.Path) {
+			noteWholeRead(read.Path)
+		} else {
+			noteRead(read.Path)
+		}
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()

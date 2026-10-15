@@ -3,6 +3,7 @@ package typescript
 import (
 	"bytes"
 	"encoding/gob"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -126,6 +127,11 @@ func TestResolveRecord_ResolvesInFullWhenItsStartingStateChanged(t *testing.T) {
 		{"a directive", build(func(b string) string { return "# gazelle:resolve typescript nowhere //app\n" + b })},
 		{"a tsconfig edit", write("app/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["a.ts","b.ts"]}`)},
 		{"a package.json edit", write("package.json", `{"type":"module","name":"resolve-record"}`)},
+		{"a new directory with a source", write("tools/x/y.ts", "export const y = 1;\n")},
+		{"a new directory of data files in a package", write("app/assets/logo.svg", "<svg/>\n")},
+		{"a new directory with a tsconfig.json", write("lib/tsconfig.json", `{"include":["*.ts"]}`)},
+		{"a new directory with a package.json", write("pkg/package.json", `{"name":"pkg"}`)},
+		{"a new directory with a BUILD file", write("tools/b/BUILD.bazel", "")},
 	} {
 		primeResolveRecord(t, root, cache)
 		edit.do()
@@ -134,6 +140,72 @@ func TestResolveRecord_ResolvesInFullWhenItsStartingStateChanged(t *testing.T) {
 			t.Errorf("%s replayed the record of the state before it:\n%s", edit.name, out)
 		}
 		same()
+	}
+}
+
+// A directory with no TypeScript, tsconfig.json, package.json or generated rule
+// holds nothing Resolve reads but its names, which the record checks as read.
+func TestResolveRecord_ReplaysWhenOnlyADirectoryWithoutTypeScriptChanged(t *testing.T) {
+	requireTsgo(t)
+	tree := runRecordTree()
+	tree["svc/BUILD.bazel"] = "sh_library(\n    name = \"svc\",\n    srcs = [\"run.sh\"],\n)\n"
+	tree["svc/run.sh"] = "true\n"
+	root := writeTree(t, tree)
+	cache := t.TempDir()
+	for _, edit := range []struct{ name, rel string }{
+		{"a new directory", "tools/gen/main.go"},
+		{"a new directory below it", "tools/gen/sub/data.txt"},
+		{"a new file beside a BUILD file", "svc/extra.sh"},
+	} {
+		primeResolveRecord(t, root, cache)
+		writeFile(t, filepath.Join(root, edit.rel), "package main\n")
+		same := requireAsCacheless(t, root, edit.name)
+		if out := resolveGazelle(t, root, cache); !resolveReplayed(out) {
+			t.Errorf("%s: Resolve ran again although nothing it reads changed:\n%s", edit.name, out)
+		}
+		same()
+	}
+}
+
+// The digest leaves those directories' names out only because every read of
+// them during the phase is noted; an unnoted read would replay a stale phase.
+func TestResolveRecord_AReadOfADirectoryTheDigestLeavesOutMustHold(t *testing.T) {
+	s := newProgramStore()
+	s.files["app"], s.visited["app"], s.walked["app"] = []string{"a.ts"}, []string{"app/a.ts"}, true
+	s.files["tools"], s.walked["tools"] = []string{"x.json"}, true
+	rec := &resolveRecorder{outside: s.outsideDirs(nil), outsideRead: map[string]string{}, treeRead: map[string]string{}}
+	rec.sorted = slices.Sorted(maps.Keys(rec.outside))
+	resolvePhase.Store(rec)
+	t.Cleanup(func() { resolvePhase.Store(nil) })
+	s.sourceFile("app/a.ts")
+	s.sourceFile("tools/x.json")
+	s.sourceFile("gone/y.json")
+	s.walkedDirs("tools")
+	resolvePhase.Store(nil)
+	if got := slices.Sorted(maps.Keys(rec.outsideRead)); !slices.Equal(got, []string{"gone", "tools"}) {
+		t.Fatalf("noted reads of %q, want the two directories the digest leaves out", got)
+	}
+	r := &resolveRecord{Outside: sortedReads(rec.outsideRead), Trees: sortedReads(rec.treeRead)}
+	holds := func() bool {
+		outside := s.outsideDirs(nil)
+		return r.outsideHolds(s, slices.Sorted(maps.Keys(outside)))
+	}
+	if !holds() {
+		t.Fatal("the reads do not hold for the state they were noted in")
+	}
+	for _, c := range []struct {
+		name         string
+		edit, revert func()
+	}{
+		{"a read directory gained a file", func() { s.files["tools"] = []string{"x.json", "y.json"} }, func() { s.files["tools"] = []string{"x.json"} }},
+		{"a read absent directory appeared", func() { s.files["gone"] = []string{"y.json"} }, func() { delete(s.files, "gone") }},
+		{"an enumerated tree gained a directory", func() { s.files["tools/sub"] = []string{"z.txt"} }, func() { delete(s.files, "tools/sub") }},
+	} {
+		c.edit()
+		if holds() {
+			t.Errorf("%s, but the noted reads still hold", c.name)
+		}
+		c.revert()
 	}
 }
 

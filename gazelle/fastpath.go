@@ -129,6 +129,8 @@ type importFactsRecorder struct {
 	// replay holds the facts of a resolve record this run replays, which stand for the phase it skips.
 	replay    []byte
 	replaying bool
+	// walkNamed are this run's named reads before the replayed phase.
+	walkNamed []string
 	sealed    func() []byte
 	programs  map[string]string
 	derived   map[string]derivation
@@ -265,6 +267,9 @@ func (r *importFactsRecorder) replayed(facts []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.replay, r.replaying = facts, true
+	if in := runInputs; in != nil {
+		r.walkNamed = in.namedSources()
+	}
 }
 
 // id interns file; the caller holds mu.
@@ -477,14 +482,7 @@ func (r *importFactsRecorder) encode() []byte {
 		r.facts.Outputs, r.facts.Generated = r.sealing()
 	}
 	if in := runInputs; in != nil {
-		in.mu.Lock()
-		for abs := range in.named {
-			if rel, ok := repoRelative(in.repoRoot, abs); ok {
-				r.facts.Named = append(r.facts.Named, rel)
-			}
-		}
-		in.mu.Unlock()
-		slices.Sort(r.facts.Named)
+		r.facts.Named = in.namedSources()
 	}
 	r.namesMu.Lock()
 	r.facts.names = nameReads{Paths: slices.Sorted(maps.Keys(r.looked)), Dirs: slices.Sorted(maps.Keys(r.listed))}
@@ -528,7 +526,8 @@ func decodeNameReads(data []byte) *nameReads {
 }
 
 // replayedFacts is the replayed record's facts when they decode and name every
-// listing this run read, else nil; the caller holds mu.
+// listing this run read, else nil; the caller holds mu. Its state leaves out
+// directories this run's walk may have read otherwise, whose reads they gain.
 func (r *importFactsRecorder) replayedFacts() []byte {
 	facts, err := decodeImportFacts(r.replay)
 	if err != nil {
@@ -543,7 +542,40 @@ func (r *importFactsRecorder) replayedFacts() []byte {
 			return nil
 		}
 	}
-	return r.replay
+	r.namesMu.Lock()
+	paths := mergeSorted(facts.names.Paths, maps.Keys(r.looked))
+	dirs := mergeSorted(facts.names.Dirs, maps.Keys(r.listed))
+	r.namesMu.Unlock()
+	named := mergeSorted(facts.Named, slices.Values(r.walkNamed))
+	if len(paths) == len(facts.names.Paths) && len(dirs) == len(facts.names.Dirs) && len(named) == len(facts.Named) {
+		return r.replay
+	}
+	facts.names.Paths, facts.names.Dirs, facts.Named = paths, dirs, named
+	data, err := facts.encode()
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func mergeSorted(sorted []string, more iter.Seq[string]) []string {
+	merged := slices.AppendSeq(slices.Clone(sorted), more)
+	slices.Sort(merged)
+	return slices.Compact(merged)
+}
+
+// namedSources are the repository-relative sources read by a name the extension was given, in order.
+func (in *inputSet) namedSources() []string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	var named []string
+	for abs := range in.named {
+		if rel, ok := repoRelative(in.repoRoot, abs); ok {
+			named = append(named, rel)
+		}
+	}
+	slices.Sort(named)
+	return named
 }
 
 func repoRelative(root, abs string) (string, bool) {
@@ -840,6 +872,35 @@ type fastPathDecision struct {
 	// repoRoot and names are what the record's walked directories' shapes are read with.
 	repoRoot string
 	names    *nameReads
+	// scanned says every moved input is a source whose scan the record holds.
+	scanned bool
+	// newDirs are the directories the edit added that nothing reads, by their dirLines.
+	newDirs map[string]string
+}
+
+// readsNoneOf declines when the recorded run read a name in a gained
+// directory: every name of its parent, a path under it, or a declared output there.
+func (f *importFacts) readsNoneOf(repoRoot string, gained map[string]string) *decline {
+	outputs := slices.Concat(f.Trees, f.Produced)
+	for dir := range gained {
+		rel, ok := repoDir(repoRoot, dir)
+		if !ok {
+			return declined(declineInputs, "%s is outside the repository", dir)
+		}
+		at, _ := slices.BinarySearch(f.names.Paths, rel+"/")
+		parent := parentDir(rel)
+		switch {
+		case has(f.names.Dirs, parent):
+			return declined(declineInputs, "the run read every name in %s, which gained %s", orRepoRoot(parent), rel)
+		case has(f.names.Paths, rel):
+			return declined(declineInputs, "the run looked up %s, now a gained directory", rel)
+		case at < len(f.names.Paths) && within(f.names.Paths[at], rel):
+			return declined(declineInputs, "the run looked up %s, under gained directory %s", f.names.Paths[at], rel)
+		case slices.ContainsFunc(outputs, func(out string) bool { return within(out, rel) || within(rel, out) }):
+			return declined(declineGenerated, "%s, a gained directory, holds or lies in a declared output", rel)
+		}
+	}
+	return nil
 }
 
 // editedDirLine is dir's line once e is written: was with its BUILD file's
@@ -882,9 +943,17 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 			moved = append(moved, i)
 		}
 	}
+	recordLines := sync.OnceValue(func() inputLines {
+		return inputLines{dirs: dirs, files: fileLines(rec.files, stamps), reads: listingReadLines(rec.reads, stamps), roots: rootLines(rec.roots)}
+	})
 	if len(moved) > 0 {
 		if decision, why, handled := decideBuildEdit(rec, snapFile, repo, repoRoot, buildNames, dirs, moved, stamps, names); handled {
 			return decision, why
+		}
+	} else {
+		lines := recordLines()
+		if changed, ok := unchangedScans(rec, lines, buildNames); ok {
+			return &fastPathDecision{lines: lines, files: map[string]string{}, changed: changed, stamps: stamps, repoRoot: repoRoot, names: names, scanned: true}, nil
 		}
 	}
 	facts, err := decodeImportFacts(rec.facts)
@@ -897,11 +966,17 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 	var delta *sourceDelta
 	if len(moved) > 0 {
 		var why *decline
-		if delta, why = sourceChanges(rec, facts, repoRoot, dirs, moved); why != nil {
+		if delta, why = sourceChanges(rec, facts, repoRoot, dirs, moved, buildNames, filepath.Dir(snapFile), stamps); why != nil {
+			return nil, why
+		}
+		if why := facts.readsNoneOf(repoRoot, delta.newDirs); why != nil {
+			return nil, why
+		}
+		if why := excludedNewDir(facts, repoRoot, cliExcludes, delta.newDirs); why != nil {
 			return nil, why
 		}
 	}
-	lines := inputLines{dirs: dirs, files: fileLines(rec.files, stamps), reads: listingReadLines(rec.reads, stamps), roots: rootLines(rec.roots)}
+	lines := recordLines()
 	sums = append(sums, lineSums(lines)...)
 	// A walked directory's shape holds its BUILD file's content, so a BUILD file read by stat there may move.
 	walked := setOf(rec.dirs)
@@ -938,6 +1013,9 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 	}
 	decision := &fastPathDecision{lines: lines, files: map[string]string{}, changed: slices.Sorted(maps.Keys(changed)), stamps: stamps,
 		repoRoot: repoRoot, names: names}
+	if delta != nil {
+		decision.newDirs = delta.newDirs
+	}
 	if len(decision.changed) == 0 && delta.empty() {
 		return decision, nil
 	}
@@ -988,7 +1066,7 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 			}
 		}
 	}
-	readSums := map[string]uint64{}
+	readSums, scans := map[string]uint64{}, rec.scansByRead()
 	for i, read := range rec.reads {
 		readSums[read] = rec.sums[len(rec.dirs)+len(rec.files)+i]
 	}
@@ -1002,7 +1080,7 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 	saved := runInputs
 	runInputs = capture
 	defer func() { runInputs = saved }()
-	reads := listingReads{repoRoot: repoRoot, readSums: readSums, rootSums: rootSums, changed: changedRel, delta: delta, changedRoots: changedRoots}
+	reads := listingReads{repoRoot: repoRoot, readSums: readSums, rootSums: rootSums, scans: scans, changed: changedRel, delta: delta, changedRoots: changedRoots}
 	if proof != nil {
 		reads.owners = map[string]string{}
 		for f, e := range proof.owners {
@@ -1044,6 +1122,38 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 	return decision, nil
 }
 
+// unchangedScans says whether every input that moved is a regular file whose
+// scan the record holds as it is now, which keeps every listing and so the
+// recorded run; changed are those files.
+func unchangedScans(rec *runRecord, lines inputLines, buildNames []string) ([]string, bool) {
+	if len(rec.scans) != len(rec.reads) {
+		return nil, false
+	}
+	sums, was := lineSums(lines), rec.sums[len(rec.dirs):]
+	files := slices.Concat(rec.files, rec.reads)
+	if !slices.Equal(sums[len(files):], was[len(files):]) {
+		return nil, false
+	}
+	walked := setOf(rec.dirs)
+	changed := map[string]bool{}
+	for i, file := range files {
+		if sums[i] == was[i] || (slices.Contains(buildNames, filepath.Base(file)) && walked[filepath.Dir(file)]) {
+			continue
+		}
+		j, found := slices.BinarySearch(rec.reads, file)
+		if !found || rec.scans[j] == 0 || !regularLine(lines.reads[j]) || !scannedAs(file, rec.scans[j]) {
+			return nil, false
+		}
+		changed[file] = true
+	}
+	return slices.Sorted(maps.Keys(changed)), true
+}
+
+func scannedAs(file string, sum uint64) bool {
+	src, ok := scanFile(file)
+	return ok && scanSum(src) == sum
+}
+
 // listingReads is what a listing's entry must have read for the record to
 // stand for it: every read the edit left alone reads the same now, and every
 // one it touched read what the record says.
@@ -1055,6 +1165,8 @@ type listingReads struct {
 	changedRoots       map[string]bool
 	// owners are each gained source's package.
 	owners map[string]string
+	// scans are the record's scan sums, which a source a scan replay left stale in its entry still has.
+	scans map[string]uint64
 }
 
 // patchListings patches every affected listing from its entry and every
@@ -1322,14 +1434,18 @@ func patchAffected(key string, entry *cachedListing, filesList []string, reads l
 				want = "absent"
 			}
 			sum, recorded := reads.readSums[read]
-			if !recorded || sum != lineSum(entry.ReadLines[i]) || existence(entry.ReadLines[i]) != want {
+			sameScan := reads.scans[read] != 0 && reads.scans[read] == entry.Sources[rel].Sum
+			if !(recorded && sum == lineSum(entry.ReadLines[i]) || sameScan) || existence(entry.ReadLines[i]) != want {
 				return fastPatch{}, declined(declineEntry, "listing %s read %s otherwise than the record", key, rel), false
 			}
 			touched = true
 			continue
 		}
-		if listingStats.Line(read) != entry.ReadLines[i] {
-			return fastPatch{}, declined(declineOtherRead, "listing %s: %s changed and the record does not say so", key, read), false
+		if now := listingStats.Line(read); now != entry.ReadLines[i] {
+			if sum := reads.scans[read]; sum == 0 || entry.Sources[rel].Sum != sum || !regularLine(now) || !scannedAs(read, sum) {
+				return fastPatch{}, declined(declineOtherRead, "listing %s: %s changed and the record does not say so", key, read), false
+			}
+			touched = true
 		}
 	}
 	for i, dir := range entry.Dirs {
@@ -1552,18 +1668,22 @@ func checkPatch(facts *importFacts, ids map[string]int32, patch fastPatch, chang
 		probed[parentDir(c.Path)] = true
 	}
 	freshPaths := map[string]bool{}
+	probesMetadata := map[candidateKeyText]bool{}
 	for _, c := range fresh {
 		switch {
 		case !addedSpecifiers[importKey{c.from, c.specifier}]:
 			return declined(declineCandidate, "listing %s resolves %q from %s anew", key, c.specifier, c.from)
-		case c.metadata || c.skipped != "":
-			return declined(declineCandidate, "%s's %q probes package metadata or skips a directory", c.from, c.specifier)
+		case c.skipped != "":
+			return declined(declineCandidate, "%s's %q skips a directory", c.from, c.specifier)
 		case firstParty(c.path) && !probed[parentDir(c.path)]:
 			return declined(declineCandidate, "%s's %q probes %s, a directory listing %s does not", c.from, c.specifier, parentDir(c.path), key)
 		case firstParty(c.path) && (slices.Contains(facts.Produced, c.path) || slices.ContainsFunc(facts.Trees, func(tree string) bool { return within(c.path, tree) })):
 			return declined(declineGenerated, "%s's %q probes %s, a declared output", c.from, c.specifier, c.path)
 		}
 		freshPaths[c.path] = true
+		if c.metadata {
+			probesMetadata[candidateKeyText{c.from, c.specifier, c.block}] = true
+		}
 	}
 	// Witnesses are other importers' blocks probing a path the new blocks probe.
 	type blockID struct {
@@ -1586,6 +1706,12 @@ func checkPatch(facts *importFacts, ids map[string]int32, patch fastPatch, chang
 	for _, b := range candidateBlocks(near) {
 		witnesses[b.probes] = append(witnesses[b.probes], b.key)
 	}
+	// Resolve checks every package metadata probe a program keeps, so one the recorded run kept stands for a new block.
+	for _, b := range candidateBlocks(fresh) {
+		if probesMetadata[b.key] && !slices.ContainsFunc(witnesses[b.probes], func(w candidateKeyText) bool { return keptBySelections(facts, ids, key, w) }) {
+			return declined(declineCandidate, "%s's %q probes package metadata no other importer's resolution with the same probes did", b.key.from, b.key.specifier)
+		}
+	}
 	if why := checkSelections(facts, ids, key, added, candidateBlocks(fresh), witnesses, delta, mates); why != nil {
 		return why
 	}
@@ -1604,11 +1730,12 @@ func checkPatch(facts *importFacts, ids map[string]int32, patch fastPatch, chang
 }
 
 // relativeSourceEdge refuses an edge the fast path cannot follow: anything but
-// a relative import between the listing's first-party sources.
+// a relative or subpath import between the listing's first-party sources.
+// A bare specifier may name a workspace member, whose dep is not its target's owner.
 func relativeSourceEdge(e explainfiles.Edge, listed map[string]bool) *decline {
 	switch {
-	case e.Kind != explainfiles.Import || !strings.HasPrefix(e.Specifier, "./") && !strings.HasPrefix(e.Specifier, "../"):
-		return declined(declineEdgeKind, "%s -> %q is no relative import", e.From, e.Specifier)
+	case e.Kind != explainfiles.Import || !strings.HasPrefix(e.Specifier, "./") && !strings.HasPrefix(e.Specifier, "../") && !strings.HasPrefix(e.Specifier, "#"):
+		return declined(declineEdgeKind, "%s -> %q is no relative or subpath import", e.From, e.Specifier)
 	case !firstParty(e.To) || isDeclarationFile(e.To) || !listed[e.To] || !patchableSource(e.To):
 		return declined(declineEdgeKind, "%s -> %q reaches %s, no listed source", e.From, e.Specifier, e.To)
 	}
@@ -1702,6 +1829,23 @@ func checkSelections(facts *importFacts, ids map[string]int32, key string, added
 		}
 	}
 	return nil
+}
+
+// keptBySelections says whether listing key was selected, and every selection
+// reached w's importer and left w's resolution as the compiler gave it.
+func keptBySelections(facts *importFacts, ids map[string]int32, key string, w candidateKeyText) bool {
+	from, known := ids[w.from]
+	kept := false
+	for _, s := range facts.Selections {
+		if s.Listing != key {
+			continue
+		}
+		if !known || has(s.Unreached, from) || slices.Contains(s.Selected, candidateKey{from, w.specifier, w.block}) {
+			return false
+		}
+		kept = true
+	}
+	return kept
 }
 
 // has says whether a sorted list holds v.
@@ -1852,20 +1996,39 @@ func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord
 		traceRun("fast path build edit")
 	case len(decision.edits) > 0:
 		traceRun("fast path edit")
+	case decision.scanned:
+		traceRun("fast path scan")
 	default:
 		traceRun("fast path")
 	}
 	os.Stdout.Write(rec.stdout)
 	os.Stderr.Write(rec.stderr)
 	if listingVerbose {
-		if decision.restores {
+		switch {
+		case decision.restores:
 			log.Printf("typescript: fast path: replayed; %d BUILD file(s) written back as recorded, which Gazelle's merge restores them to", len(decision.edits))
-		} else {
+		case decision.scanned:
+			log.Printf("typescript: fast path: replayed; %d source(s) changed, none in what a listing reads of it", len(decision.changed))
+		default:
 			log.Printf("typescript: fast path: replayed; %d listing(s) patched, %d BUILD file(s) written, and every import the edit adds or drops is one the rules already resolve",
 				len(decision.patches), len(decision.edits))
 		}
 	}
 	os.Exit(rec.exit)
+}
+
+// withDirs are the walked directories and their lines with more added, in the record's order.
+func withDirs(dirs, lines []string, more map[string]string) ([]string, []string) {
+	all := maps.Clone(more)
+	for i, dir := range dirs {
+		all[dir] = lines[i]
+	}
+	keys := slices.Sorted(maps.Keys(all))
+	values := make([]string, len(keys))
+	for i, dir := range keys {
+		values[i] = all[dir]
+	}
+	return keys, values
 }
 
 // writeEdits writes every BUILD edit, or none: a failed write puts back the ones before it.
@@ -1930,7 +2093,7 @@ func verifyFastPath(fs *flag.FlagSet, file string, rec *runRecord, decision *fas
 // listings are written with the record or not at all, so the next run finds
 // both as one run left them; a verified run's full pass has written its own.
 func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListings bool) {
-	reads := map[string]string{}
+	reads, scans := map[string]string{}, rec.scansByRead()
 	for i, read := range rec.reads {
 		reads[read] = d.lines.reads[i]
 	}
@@ -1938,14 +2101,20 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 	for _, f := range d.changed {
 		recheck[f] = true
 	}
+	// A read the record holds no scan for, or one read whole, gains none here.
+	patched := map[string]uint64{}
 	for _, patch := range d.patches {
 		for i, read := range patch.entry.Reads {
 			if was, seen := reads[read]; !seen || was != patch.entry.ReadLines[i] {
 				recheck[read] = true
 			}
 			reads[read] = patch.entry.ReadLines[i]
+			if scans[read] != 0 && scans[read] != wholeScan {
+				mergeScan(patched, read, patch.entry.scanOf(i))
+			}
 		}
 	}
+	maps.Copy(scans, patched)
 	files := map[string]string{}
 	for i, f := range rec.files {
 		files[f] = d.lines.files[i]
@@ -1962,6 +2131,16 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 		if line, read := reads[f]; (read && incremental.EntryLine(f) != line) || (files[f] != "" && files[f] != now) {
 			if listingVerbose {
 				log.Printf("typescript: fast path: record not carried forward; %s moved during the run", f)
+			}
+			return
+		}
+	}
+	for dir, was := range d.newDirs {
+		now, stamp, err := dirLine(dir, d.buildNames, d.skipDir)
+		d.stamps.see(stamp)
+		if err != nil || now != was {
+			if listingVerbose {
+				log.Printf("typescript: fast path: record not carried forward; %s moved during the run", dir)
 			}
 			return
 		}
@@ -1992,9 +2171,12 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 			}
 		}
 	}
+	if len(d.newDirs) > 0 {
+		next.dirs, lines.dirs = withDirs(rec.dirs, lines.dirs, d.newDirs)
+	}
 	sourceEdit := len(d.edits) > 0 && !d.restores
-	// The facts name the tree before a source edit; the next change runs in full and records anew.
-	if !d.restores {
+	// The facts name the tree before a source edit; the next change that needs them runs in full.
+	if !d.restores && !d.scanned {
 		os.Remove(buildSnapshotFile(file))
 	}
 	if sourceEdit {
@@ -2008,8 +2190,10 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 	for _, f := range next.files {
 		lines.files = append(lines.files, files[f])
 	}
-	for _, r := range next.reads {
+	next.scans = make([]uint64, len(next.reads))
+	for i, r := range next.reads {
 		lines.reads = append(lines.reads, reads[r])
+		next.scans[i] = scans[r]
 	}
 	next.digest, next.walkDigest = next.digests(lines)
 	next.sums = inputSums(lines, next.dirs, d.repoRoot, decodeNameReads(next.facts))

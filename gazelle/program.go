@@ -337,7 +337,7 @@ func (s *programStore) reportStemCollisions() {
 	}
 	n := 0
 	for _, dir := range slices.Sorted(maps.Keys(s.visited)) {
-		if !s.walked[dir] || s.foreign[dir] != "" {
+		if walked, _ := s.dirWalked(dir); !walked || s.foreign[dir] != "" {
 			continue
 		}
 		for _, tsx := range slices.Sorted(slices.Values(s.visited[dir])) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -20,12 +21,15 @@ var jsdocImport = regexp.MustCompile(`(?:import\(\s*|@import\b[^'"]*?from\s*)(['
 
 // Scanned is one source's specifiers and rest, as Specifiers returns them, and
 // Resolutions, how many times tsgo resolves each specifier text; Counted is false
-// when the scanner cannot settle one of those counts.
+// when the scanner cannot settle one of those counts. Exact is false where the
+// scanner may read imports otherwise than tsgo, which only a scan replay, trusting
+// an unchanged scan with no listing to check, must refuse.
 type Scanned struct {
 	Specs       []string
 	Rest        string
 	Resolutions map[string]int
 	Counted     bool
+	Exact       bool
 }
 
 // Scan reads a source once for Specifiers and Resolutions. tsgo resolves a dynamic
@@ -48,7 +52,7 @@ func Scan(name string, src []byte) (Scanned, error) {
 	}
 	sort.Strings(specs)
 	sort.Strings(others)
-	return Scanned{Specs: specs, Rest: restDigest(s.sawJSX, s.module, others), Resolutions: s.counts, Counted: !s.uncounted}, nil
+	return Scanned{Specs: specs, Rest: restDigest(s.sawJSX, s.module, others), Resolutions: s.counts, Counted: !s.uncounted, Exact: !s.inexact}, nil
 }
 
 // Specifiers are the module specifiers tsgo resolves in a source, as sorted
@@ -92,6 +96,8 @@ type token struct {
 	kind byte // 'i' identifier or keyword, 's' string, 'n' number, 'p' punctuation, 't' template end
 	text string
 	end  int
+	// depth is the brace depth after the token.
+	depth int
 }
 
 // callSpan is a dynamic import or require call from the end of the token before
@@ -107,21 +113,36 @@ type callSpan struct {
 }
 
 type scanner struct {
-	src    string
-	pos    int
-	jsx    bool
-	prev   token
-	toks   []token
-	facts  []string
-	sawJSX bool
-	module bool
-	depth  int
-	js     bool
-	call   callSpan
-	counts map[string]int
+	src   string
+	pos   int
+	jsx   bool
+	prev  token
+	toks  []token
+	facts []string
+	// pragmas are every comment's pragmas, in source order.
+	pragmas []string
+	sawJSX  bool
+	module  bool
+	depth   int
+	js      bool
+	call    callSpan
+	counts  map[string]int
 	// uncounted: some specifier's resolution count is unknown.
 	uncounted bool
+	// inexact: tsgo may read an import here otherwise than the scan.
+	inexact bool
+	// ambientBody is the depth inside a module declaration's braces, whose imports tsgo resolves; 0 outside one.
+	ambientBody int
+	// heads are the open parentheses, each true when it opens a control-flow head.
+	heads []bool
+	// closedHead is whether prev closed a control-flow head, after which / starts a regex.
+	closedHead bool
+	// importInStatement is whether prev is an import keyword that cannot start a top-level
+	// statement (after a control-flow head, else, do or a label), where tsgo resolves no declaration.
+	importInStatement bool
 }
+
+var controlHeads = map[string]bool{"if": true, "while": true, "for": true, "with": true}
 
 var keywordsBeforeExpression = map[string]bool{
 	"return": true, "yield": true, "await": true, "case": true, "typeof": true, "void": true,
@@ -138,21 +159,45 @@ func (s *scanner) afterOperand() bool {
 	case 0:
 		return false
 	case 'i':
-		return !keywordsBeforeExpression[s.prev.text] || valueKeywords[s.prev.text]
+		return !keywordsBeforeExpression[s.prev.text] || valueKeywords[s.prev.text] || s.member()
 	case 's', 'n', 't':
 		return true
 	case 'p':
-		return s.prev.text == ")" || s.prev.text == "]"
+		return s.prev.text == ")" && !s.closedHead || s.prev.text == "]" || s.prev.text == "++" || s.prev.text == "--"
 	}
 	return false
 }
 
+// specifierNext is whether a string here is an import, export or require specifier.
+func (s *scanner) specifierNext() bool {
+	n := len(s.toks)
+	switch {
+	case s.prev.kind == 'i' && (s.prev.text == "from" || s.prev.text == "import"):
+		return true
+	case s.prev.text == "(" && n > 1 && (s.toks[n-2].text == "import" || s.toks[n-2].text == "require"):
+		return !s.memberAt(n - 2)
+	}
+	return false
+}
+
+// member is whether prev is a property name, after a . or ?.
+func (s *scanner) member() bool { return s.memberAt(len(s.toks) - 1) }
+
+func (s *scanner) memberAt(i int) bool {
+	return i > 0 && (s.toks[i-1].text == "." || s.toks[i-1].text == "?.")
+}
+
 func (s *scanner) emit(t token) {
-	t.end = s.pos
-	s.prev = t
-	s.toks = append(s.toks, t)
-	if len(s.toks) > 8 {
-		s.toks = s.toks[len(s.toks)-8:]
+	t.end, t.depth = s.pos, s.depth
+	if t.kind == 'i' && t.text == "import" && (s.closedHead || s.prev.kind == 'i' && (s.prev.text == "else" || s.prev.text == "do") || s.prev.text == ":") {
+		s.importInStatement = true
+	}
+	s.prev, s.closedHead = t, false
+	if len(s.toks) == 8 {
+		copy(s.toks, s.toks[1:])
+		s.toks[7] = t
+	} else {
+		s.toks = append(s.toks, t)
 	}
 	s.recognize()
 }
@@ -167,9 +212,24 @@ func (s *scanner) last(n int) []token {
 // recognize records a fact when the newest token completes one.
 func (s *scanner) recognize() {
 	t := s.toks[len(s.toks)-1]
+	if s.importInStatement && t.text != "import" {
+		s.importInStatement = false
+		s.inexact = s.inexact || t.text != "(" && t.text != "."
+	}
 	s.followCall(t)
-	if t.kind == 'i' && (t.text == "import" || t.text == "export") && s.depth == 0 {
-		s.module = true
+	if l := s.last(2); l != nil && l[0].kind == 'i' && !s.memberAt(len(s.toks)-2) {
+		// tsgo's module indicators: import.meta anywhere, and a top-level import
+		// or export declaration, which neither import( nor export as namespace is.
+		top := l[0].depth == 0
+		switch {
+		case l[0].text == "import" && t.text == ".", l[0].text == "import" && top && t.text != "(", l[0].text == "export" && top && t.text != "as":
+			s.module = true
+		}
+	}
+	if l := s.last(4); l != nil && l[0].text == "import" && l[1].kind == 'i' && l[2].text == "=" && t.text != "require" ||
+		s.last(5) != nil && s.last(5)[0].text == "import" && s.last(5)[1].text == "type" && s.last(5)[2].kind == 'i' && s.last(5)[3].text == "=" && t.text != "require" {
+		// An import alias of a namespace is no module indicator, though the scan counts it as one.
+		s.inexact = true
 	}
 	call := func() bool {
 		l := s.last(3)
@@ -179,10 +239,18 @@ func (s *scanner) recognize() {
 		// tsgo resolves a template without substitutions, which no fact records.
 		s.uncounted = true
 	}
+	if l := s.last(3); t.kind == 'i' && (t.text == "with" || t.text == "assert") && l != nil && l[1].kind == 's' && (l[0].text == "from" || l[0].text == "import") {
+		// A resolution-mode attribute changes how tsgo resolves the specifier.
+		attributes, _, _ := strings.Cut(s.src[s.pos:], "}")
+		s.inexact = s.inexact || strings.Contains(attributes, "resolution-mode")
+	}
 	if t.kind != 's' {
 		return
 	}
 	if l := s.last(2); l != nil && l[0].kind == 'i' && (l[0].text == "from" || l[0].text == "import") {
+		// tsgo resolves an import declaration only at the top level or in a module
+		// declaration's body, and a from only after a clause.
+		s.uncounted = s.uncounted || s.depth != 0 && s.depth != s.ambientBody || l[0].text == "from" && !afterClause(s.last(3))
 		s.facts = append(s.facts, "import "+t.text)
 		s.count(t.text[1:len(t.text)-1], 1)
 		return
@@ -196,6 +264,10 @@ func (s *scanner) recognize() {
 	if l := s.last(3); l != nil && l[0].text == "declare" && l[1].text == "module" {
 		s.facts = append(s.facts, "augment "+t.text)
 	}
+}
+
+func afterClause(l []token) bool {
+	return l != nil && (l[0].kind == 'i' || l[0].text == "}" || l[0].text == "*")
 }
 
 func (s *scanner) count(text string, n int) {
@@ -285,6 +357,10 @@ func (s *scanner) scan() error {
 	if err := s.scanJS(-1); err != nil {
 		return err
 	}
+	if len(s.pragmas) > 0 {
+		// One fact, in source order: tsgo takes the last of a repeated pragma.
+		s.facts = append(s.facts, "pragma "+strings.Join(s.pragmas, " "))
+	}
 	s.endCall()
 	if s.depth != 0 {
 		return errUnscannable
@@ -326,6 +402,9 @@ func (s *scanner) scanJS(stop int) error {
 			if err != nil {
 				return err
 			}
+			if !s.specifierNext() && !word.MatchString(text) {
+				s.skipped(text)
+			}
 			s.emit(token{kind: 's', text: text})
 		case c == '`':
 			s.pos++
@@ -356,6 +435,8 @@ func (s *scanner) scanJS(stop int) error {
 				s.emit(token{kind: 'p', text: "${"})
 			}
 		case c == '/' && !s.afterOperand():
+			// After an object literal's } tsgo reads a division, which may hide an import from the scan.
+			s.uncounted = s.uncounted || s.prev.kind == 'p' && s.prev.text == "}"
 			if err := s.regex(); err != nil {
 				return err
 			}
@@ -390,14 +471,29 @@ func (s *scanner) scanJS(stop int) error {
 					break
 				}
 			}
+			head := false
 			switch text {
 			case "{":
 				s.depth++
+				if l := s.last(2); l != nil && l[0].text == "module" && l[1].kind == 's' {
+					s.ambientBody = s.depth
+				}
 			case "}":
+				if s.depth == s.ambientBody {
+					s.ambientBody = 0
+				}
 				s.depth--
+			case "(":
+				forAwait := s.prev.text == "await" && len(s.toks) > 1 && s.toks[len(s.toks)-2].text == "for"
+				s.heads = append(s.heads, s.prev.kind == 'i' && !s.member() && (controlHeads[s.prev.text] || forAwait))
+			case ")":
+				if n := len(s.heads); n > 0 {
+					head, s.heads = s.heads[n-1], s.heads[:n-1]
+				}
 			}
 			s.pos += len(text)
 			s.emit(token{kind: 'p', text: text})
+			s.closedHead = head
 		}
 	}
 	if len(templates) > 0 || stop >= 0 {
@@ -409,6 +505,7 @@ func (s *scanner) scanJS(stop int) error {
 // jsxElement consumes one element or fragment from its `<`: tag, attributes,
 // children text, nested elements, and the JavaScript inside every `{}`.
 func (s *scanner) jsxElement() error {
+	start := s.pos
 	s.pos++ // <
 	closing := false
 	angles := 0 // type arguments on the tag: <Component<T> />
@@ -422,9 +519,11 @@ func (s *scanner) jsxElement() error {
 			angles--
 			s.pos++
 		case c == '{':
+			s.skipped(s.src[start:s.pos])
 			if err := s.jsxExpression(); err != nil {
 				return err
 			}
+			start = s.pos
 		case c == '"' || c == '\'':
 			if _, err := s.quoted(c); err != nil {
 				return err
@@ -443,9 +542,11 @@ func (s *scanner) jsxElement() error {
 			s.pos += end + 4
 		case c == '/' && s.at("/>"):
 			s.pos += 2
+			s.skipped(s.src[start:s.pos])
 			return nil
 		case c == '>':
 			s.pos++
+			s.skipped(s.src[start:s.pos])
 			if closing {
 				return nil
 			}
@@ -470,6 +571,7 @@ func (s *scanner) jsxChildren() error {
 			if jsxText.MatchString(s.src[start:s.pos]) {
 				return errUnscannable
 			}
+			s.skipped(s.src[start:s.pos])
 		}
 		switch {
 		case s.at("</"):
@@ -482,6 +584,7 @@ func (s *scanner) jsxChildren() error {
 				return errUnscannable
 			}
 			s.pos++
+			s.skipped(s.src[start:s.pos])
 			return nil
 		case s.src[s.pos] == '<':
 			if err := s.jsxElement(); err != nil {
@@ -510,25 +613,49 @@ func (s *scanner) jsxExpression() error {
 	return err
 }
 
+// codeShaped is text tsgo would read as an import, an export or an augmentation.
+var codeShaped = regexp.MustCompile(`\bimport\s*(\(|['"{]|\*\s*as\b|\.\s*meta\b)|\bimport\s+(type\s+)?[\w$]+\s*(,|from\b|=)|\brequire\s*\(|\bfrom\s*['"]|\bexport\s*(\{|\*|=[^=>]|(default|const|let|var|function|class|type|interface|enum|async|declare|abstract|namespace|module|import|as)\b)|\bdeclare\s+module\b`)
+
+// word is a string of one word, such as an "import" condition, which holds no code.
+var word = regexp.MustCompile(`^.[\w$-]*.$`)
+
+var codeWords = []string{"import", "require", "from", "export", "declare"}
+
+// skipped leaves the scan inexact when text it read as no code could be an import
+// or export, where a misread string, regex, comment or JSX boundary would hide one.
+func (s *scanner) skipped(text string) {
+	if !s.inexact && slices.ContainsFunc(codeWords, func(w string) bool { return strings.Contains(text, w) }) && codeShaped.MatchString(text) {
+		s.inexact = true
+	}
+}
+
 func (s *scanner) at(lit string) bool { return strings.HasPrefix(s.src[s.pos:], lit) }
 
 func (s *scanner) comment(text string) {
+	s.skipped(text)
 	if s.js && mentionsImport(text) {
 		// JavaScript's JSDoc is parsed, and an import type in it is resolved.
 		s.uncounted = true
 	}
+	// tsgo reads directives and pragmas from the file's header alone; the facts
+	// mark the rest, so moving one into the header moves the rest digest.
+	late := ""
+	if len(s.toks) > 0 {
+		late = "late "
+	}
 	if strings.HasPrefix(text, "///") {
-		s.facts = append(s.facts, "directive "+strings.TrimSpace(text))
+		s.facts = append(s.facts, late+"directive "+strings.TrimSpace(text))
 	}
 	for _, m := range jsdocImport.FindAllStringSubmatch(text, -1) {
 		s.facts = append(s.facts, "jsdoc "+m[1])
 	}
-	for _, pragma := range []string{"@jsx", "@ts-nocheck", "@flow"} {
-		if i := strings.Index(text, pragma); i >= 0 {
-			s.facts = append(s.facts, "pragma "+strings.Fields(text[i:])[0]+" "+strings.Join(strings.Fields(text[i:])[1:min(2, len(strings.Fields(text[i:])))], ""))
-		}
+	for _, m := range pragma.FindAllStringSubmatch(text, -1) {
+		s.pragmas = append(s.pragmas, late+m[1]+" "+m[2])
 	}
 }
+
+// A pragma as tsgo reads one, in any case and on any line of a comment, and its first argument.
+var pragma = regexp.MustCompile(`(?i)(@(?:jsx[^ \t\r\n]*|ts-nocheck|flow))[ \t]*([^ \t\r\n]*)`)
 
 func (s *scanner) quoted(q byte) (string, error) {
 	start := s.pos
@@ -552,15 +679,18 @@ func (s *scanner) quoted(q byte) (string, error) {
 // templateBody consumes template text after a backtick or a closing `}`, and
 // reports whether the template ended rather than opening a ${ substitution.
 func (s *scanner) templateBody() (bool, error) {
+	start := s.pos
 	for s.pos < len(s.src) {
 		switch {
 		case s.src[s.pos] == '\\':
 			s.pos += 2
 		case s.src[s.pos] == '`':
 			s.pos++
+			s.skipped(s.src[start:s.pos])
 			return true, nil
 		case s.at("${"):
 			s.pos += 2
+			s.skipped(s.src[start:s.pos])
 			return false, nil
 		default:
 			s.pos++
@@ -570,6 +700,7 @@ func (s *scanner) templateBody() (bool, error) {
 }
 
 func (s *scanner) regex() error {
+	start := s.pos
 	s.pos++
 	inClass := false
 	for s.pos < len(s.src) {
@@ -589,6 +720,7 @@ func (s *scanner) regex() error {
 			for s.pos < len(s.src) && isIdentPart(s.src[s.pos]) {
 				s.pos++
 			}
+			s.skipped(s.src[start:s.pos])
 			return nil
 		default:
 			s.pos++
