@@ -1,6 +1,7 @@
 package typescript
 
 import (
+	"cmp"
 	"fmt"
 	"log"
 	"maps"
@@ -1154,8 +1155,19 @@ func minimizeDependencies(c *config.Config, from label.Label, deps map[string]de
 	for dep := range deps {
 		retained[dep] = true
 	}
+	// Only compilers (links resolve to their member's) supply inputs, so trying the rest first checks each drop against the full supply.
+	supplierRank := func(dep string) int {
+		if _, owner := memo.programTarget(c, from.Pkg, dep); owner != nil && owner.Kind() == "ts_compile" {
+			return 1
+		}
+		return 0
+	}
+	candidates := slices.Collect(maps.Keys(retained))
+	slices.SortFunc(candidates, func(a, b string) int {
+		return cmp.Or(cmp.Compare(supplierRank(a), supplierRank(b)), strings.Compare(a, b))
+	})
 	var supply *fixedSupply
-	for _, candidate := range slices.Sorted(maps.Keys(retained)) {
+	for _, candidate := range candidates {
 		if orderFree && supply == nil && memo.settled(c, from, retained, called) {
 			supply = newFixedSupply(c, from, deps, retained, roots, sourceOwner, scopeDemands, memo)
 		}

@@ -2707,6 +2707,61 @@ snapshots:
 	}
 }
 
+func TestLinkedMemberNpmDependencyIsNotRetainedBesideTheLink(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":               "module(name = \"linked_npm\")\n",
+		"package.json":               `{"private":true}`,
+		"node_modules/.modules.yaml": "layoutVersion: 5\n",
+		pnpmLockfileName: `lockfileVersion: '9.0'
+importers:
+  .: {}
+  app:
+    dependencies:
+      dep:
+        specifier: workspace:*
+        version: link:../dep
+      nested-value:
+        specifier: 1.0.0
+        version: 1.0.0
+  dep:
+    dependencies:
+      nested-value:
+        specifier: 1.0.0
+        version: 1.0.0
+packages:
+  nested-value@1.0.0:
+    resolution: {integrity: sha512-aaa}
+snapshots:
+  nested-value@1.0.0: {}
+`,
+		"dep/package.json":  `{"name":"dep","private":true}`,
+		"dep/tsconfig.json": `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["*.ts"]}`,
+		"dep/index.ts":      "import type { Value } from 'nested-value'; export type Result = Value;\n",
+		"dep/node_modules/nested-value/package.json": `{"name":"nested-value","version":"1.0.0","types":"index.d.ts"}`,
+		"dep/node_modules/nested-value/index.d.ts":   "export interface Value { value: number }\n",
+		"app/package.json":                           `{"private":true,"dependencies":{"dep":"workspace:*","nested-value":"1.0.0"}}`,
+		"app/tsconfig.json":                          `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"paths":{"dep":["../dep/index.ts"]}},"include":["src/**/*.ts"]}`,
+		"app/test/tsconfig.json":                     `{"extends":"../tsconfig.json","include":["**/*.ts"]}`,
+		"app/src/x.ts":                               "import type { Result } from 'dep'; export type Imported = Result;\n",
+		"app/test/helper.ts":                         "import type { Imported } from '../src/x.js'; export type Helper = Imported;\n",
+	})
+	var first map[string]string
+	for range 2 {
+		output, err := protoGazelle(t, root)
+		if err != nil {
+			t.Fatalf("linked member npm dependency: %v\n%s", err, output)
+		}
+		helper := onDiskRule(t, root, "app/test", "ts_compile", "test")
+		wantLabels(t, "the link supplies the member's npm dependency", helper.AttrStrings("deps"), []string{"//app", "//app:node_modules/dep"})
+		wantLabels(t, "the link's store needs no foreign importer", helper.AttrStrings("source_node_modules"), nil)
+		if first == nil {
+			first = convergeSnapshot(t, root)
+		} else if diff := snapshotDiff(first, convergeSnapshot(t, root)); diff != "" {
+			t.Fatalf("linked member npm dependency did not converge: %s", diff)
+		}
+	}
+}
+
 func TestBorrowedSourceKeepsItsNpmImporterUntilACompilerOwnsIt(t *testing.T) {
 	for _, lookup := range []struct {
 		name, target string
