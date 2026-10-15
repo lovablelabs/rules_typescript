@@ -21,7 +21,8 @@ import (
 // since the record: each directory's change is exactly these entries.
 type sourceDelta struct {
 	gained, lost map[string]bool
-	// names are each changed directory's entry names now, before those it had before the edit.
+	// names are each changed directory's entry names now; before are those it had
+	// before the edit, beside the names of entries nothing read, as they are now.
 	names, before map[string][]string
 }
 
@@ -57,42 +58,6 @@ func pkgRelative(pkg, f string) string {
 // shapeEntry is one entry of a dirShape and the name it is sorted by.
 type shapeEntry struct{ name, line string }
 
-// shapeEntries splits a dirShape into its entries; ok is false when an entry's
-// name cannot be read back.
-func shapeEntries(shape string) ([]shapeEntry, bool) {
-	var out []shapeEntry
-	for line := range strings.SplitSeq(shape, "\n") {
-		if line == "" {
-			continue
-		}
-		kind, rest, _ := strings.Cut(line, " ")
-		name := rest
-		switch kind {
-		case "d", "gone":
-		case "f":
-			if source, ok := sourceEntryName(line); !ok && source != "" {
-				name = source
-			}
-		case "b":
-			fields := strings.Fields(rest)
-			if len(fields) != 3 {
-				return nil, false
-			}
-			name = fields[0]
-		case "l":
-			before, _, found := strings.Cut(rest, " -> ")
-			if !found {
-				return nil, false
-			}
-			name = before
-		default:
-			return nil, false
-		}
-		out = append(out, shapeEntry{name, line})
-	}
-	return out, true
-}
-
 // sourceChanges reads the directories whose shape moved as gained and lost
 // TypeScript sources: a source entry no listing holds is gained, a listed source
 // no longer there is lost, and the directory as it was must hash to the record's sum.
@@ -113,20 +78,24 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 		if !ok {
 			return nil, declined(declineInputs, "%s is outside the repository", rec.dirs[i])
 		}
-		entries, ok := shapeEntries(dirShape(dirs[i]))
-		if !ok {
-			return nil, declined(declineInputs, "%s holds an entry whose name the record cannot read back", orRepoRoot(rel))
-		}
 		present := map[string]bool{}
 		var was []shapeEntry
-		for _, e := range entries {
+		// An entry nothing read stands among the names a lost source's stem is checked against.
+		var unread []string
+		for e, ok := range dirEntries(rel, dirs[i], &facts.names) {
+			if !ok {
+				return nil, declined(declineInputs, "%s holds an entry whose name the record cannot read back", orRepoRoot(rel))
+			}
 			present[e.name] = true
 			delta.names[rel] = append(delta.names[rel], e.name)
-			if e.line == "f "+e.name && patchableSource(path.Join(rel, e.name)) && !listed[rel][e.name] {
+			switch {
+			case e.source && patchableSource(path.Join(rel, e.name)) && !listed[rel][e.name]:
 				delta.gained[path.Join(rel, e.name)] = true
-				continue
+			case e.shape == "":
+				unread = append(unread, e.name)
+			default:
+				was = append(was, shapeEntry{e.name, e.shape})
 			}
-			was = append(was, e)
 		}
 		for name := range listed[rel] {
 			if !present[name] {
@@ -141,6 +110,7 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 			b.WriteByte('\n')
 			delta.before[rel] = append(delta.before[rel], e.name)
 		}
+		delta.before[rel] = append(delta.before[rel], unread...)
 		if lineSum(b.String()) != rec.sums[i] {
 			var names []string
 			for f := range mapsKeys(delta.gained, delta.lost) {

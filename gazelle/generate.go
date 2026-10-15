@@ -38,6 +38,12 @@ func generateRules(args language.GenerateArgs) language.GenerateResult {
 	for _, file := range args.RegularFiles {
 		s.walked[parentDir(path.Join(args.Rel, file))] = true
 	}
+	// Under update_only a subdirectory without a BUILD file is walked only if it holds a file.
+	if tc.updateOnly {
+		for _, sub := range args.Subdirs {
+			s.importFacts.enumerated(path.Join(args.Rel, sub))
+		}
+	}
 	if p := s.programs[args.Rel]; p != nil {
 		input := s.inputs[args.Rel]
 		input.program = p
@@ -562,13 +568,11 @@ func programCandidate(name string) bool {
 func (s *programStore) dataFiles(pkg string, tc *tsConfig) []string {
 	var out []string
 	for _, dir := range slices.Sorted(maps.Keys(s.files)) {
+		if (dir != pkg && !dirIsAncestorOf(pkg, dir)) || s.nearestPackage(dir) != pkg {
+			continue
+		}
+		s.importFacts.enumerated(dir)
 		if !s.walked[dir] || s.foreign[dir] != "" {
-			continue
-		}
-		if dir != pkg && !dirIsAncestorOf(pkg, dir) {
-			continue
-		}
-		if s.nearestPackage(dir) != pkg {
 			continue
 		}
 		for _, f := range s.files[dir] {

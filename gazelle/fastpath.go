@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"iter"
 	"log"
 	"maps"
 	"os"
@@ -30,7 +31,7 @@ import (
 var fastPathMode = "on"
 
 // importFactsVersion names the shape of importFacts; a record of another shape is never used.
-const importFactsVersion = 2
+const importFactsVersion = 3
 
 // importFacts is what one run's Resolve phase did with each listing's edges: enough to
 // prove that an import between files one rule already compiles changes nothing.
@@ -55,6 +56,8 @@ type importFacts struct {
 	// Excludes are the walk's exclude patterns, Overrides the TypeScript resolve
 	// directives, and Produced and Trees the files and directories BUILD files declare as outputs.
 	Excludes, Overrides, Produced, Trees []string
+	// names are encoded ahead of the rest, which a record's sums read alone.
+	names nameReads
 }
 
 // listingFacts is one listing the run used and the TypeScript sources it read.
@@ -131,6 +134,10 @@ type importFactsRecorder struct {
 	derived   map[string]derivation
 	// sealing reads the store's manifest outputs and generated packages when the facts are sealed.
 	sealing func() (outputs, generated []string)
+	// looked and listed are the walked file names the run looked up and the
+	// directories it read every name of; lookups are hot, so they lock apart.
+	namesMu        sync.Mutex
+	looked, listed map[string]bool
 }
 
 type derivation struct {
@@ -141,7 +148,8 @@ type derivation struct {
 
 func newImportFactsRecorder(sealing func() (outputs, generated []string)) *importFactsRecorder {
 	r := &importFactsRecorder{ids: map[string]int32{}, facts: importFacts{Version: importFactsVersion},
-		programs: map[string]string{}, derived: map[string]derivation{}, sealing: sealing}
+		programs: map[string]string{}, derived: map[string]derivation{}, sealing: sealing,
+		looked: map[string]bool{}, listed: map[string]bool{}}
 	r.sealed = sync.OnceValue(r.encode)
 	return r
 }
@@ -209,6 +217,27 @@ func (r *importFactsRecorder) configured(rel string, f *rule.File) {
 			}
 		}
 	}
+}
+
+// lookedUp notes that the run asked whether f is among the files of its walked
+// directory; a program source always counts, so it is left out.
+func (r *importFactsRecorder) lookedUp(f string) {
+	if r == nil || programCandidate(f) {
+		return
+	}
+	r.namesMu.Lock()
+	defer r.namesMu.Unlock()
+	r.looked[f] = true
+}
+
+// enumerated notes that the run read the name of every file in walked directory dir.
+func (r *importFactsRecorder) enumerated(dir string) {
+	if r == nil {
+		return
+	}
+	r.namesMu.Lock()
+	defer r.namesMu.Unlock()
+	r.listed[dir] = true
 }
 
 // rooted notes that listed is base's program with more roots: the package's kept
@@ -457,6 +486,9 @@ func (r *importFactsRecorder) encode() []byte {
 		in.mu.Unlock()
 		slices.Sort(r.facts.Named)
 	}
+	r.namesMu.Lock()
+	r.facts.names = nameReads{Paths: slices.Sorted(maps.Keys(r.looked)), Dirs: slices.Sorted(maps.Keys(r.listed))}
+	r.namesMu.Unlock()
 	data, err := r.facts.encode()
 	if err != nil {
 		if listingVerbose {
@@ -469,10 +501,30 @@ func (r *importFactsRecorder) encode() []byte {
 
 func (f *importFacts) encode() ([]byte, error) {
 	var b bytes.Buffer
-	if err := gob.NewEncoder(&b).Encode(f); err != nil {
+	enc := gob.NewEncoder(&b)
+	// Incomplete facts may lack the Resolve phase's lookups, so their name reads decode as unknown.
+	names := f.names
+	if f.Incomplete == "" {
+		names.Version = f.Version
+	}
+	if err := enc.Encode(&names); err != nil {
+		return nil, fmt.Errorf("encoding import facts: %w", err)
+	}
+	if err := enc.Encode(f); err != nil {
 		return nil, fmt.Errorf("encoding import facts: %w", err)
 	}
 	return b.Bytes(), nil
+}
+
+// decodeNameReads decodes only the facts' name reads, nil when they are of
+// another version or out of order.
+func decodeNameReads(data []byte) *nameReads {
+	var names nameReads
+	if len(data) == 0 || gob.NewDecoder(bytes.NewReader(data)).Decode(&names) != nil ||
+		names.Version != importFactsVersion || !slices.IsSorted(names.Paths) || !slices.IsSorted(names.Dirs) {
+		return nil
+	}
+	return &names
 }
 
 // replayedFacts is the replayed record's facts when they decode and name every
@@ -509,12 +561,19 @@ func decodeImportFacts(data []byte) (*importFacts, error) {
 	if len(data) == 0 {
 		return nil, errNoFacts
 	}
+	dec := gob.NewDecoder(bytes.NewReader(data))
 	var facts importFacts
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&facts); err != nil {
+	if err := dec.Decode(&facts.names); err != nil {
+		return nil, fmt.Errorf("decoding import facts: %w", err)
+	}
+	if err := dec.Decode(&facts); err != nil {
 		return nil, fmt.Errorf("decoding import facts: %w", err)
 	}
 	if facts.Version != importFactsVersion {
 		return nil, fmt.Errorf("import facts of version %d, want %d", facts.Version, importFactsVersion)
+	}
+	if facts.Incomplete == "" && facts.names.Version != importFactsVersion {
+		return nil, fmt.Errorf("import facts' name reads of version %d, want %d", facts.names.Version, importFactsVersion)
 	}
 	if err := facts.validate(); err != nil {
 		return nil, err
@@ -525,6 +584,9 @@ func decodeImportFacts(data []byte) (*importFacts, error) {
 // validate checks that every index names a file and every list is in the
 // order the fast path searches it.
 func (f *importFacts) validate() error {
+	if !slices.IsSorted(f.names.Paths) || !slices.IsSorted(f.names.Dirs) {
+		return errFactsIndex
+	}
 	n := int32(len(f.Files))
 	ok := func(ids []int32) bool {
 		return slices.IsSorted(ids) && !slices.ContainsFunc(ids, func(id int32) bool { return id < 0 || id >= n })
@@ -557,13 +619,43 @@ var errNoFacts = errors.New("the record keeps no import facts")
 
 // ---- the record's input sums ------------------------------------------------
 
+// nameReads are what a run read of its walked directories' file names: the
+// Paths it looked up one by one and the Dirs whose every name it read.
+type nameReads struct {
+	Version     int
+	Paths, Dirs []string
+}
+
+// unread says whether a run with these name reads read nothing of the file
+// name in walked directory dir: it is no program source, nobody looked it up,
+// and nobody read every name in dir.
+func (n *nameReads) unread(dir, name string) bool {
+	return n != nil && !programCandidate(name) && !has(n.Dirs, dir) && !has(n.Paths, path.Join(dir, name))
+}
+
 // inputSums are a record's inputs' lines, eight bytes of SHA-256 each, in the
-// record's order: dirs (with listed sources' stats left out), files, reads, roots.
-func inputSums(l inputLines) []uint64 {
-	sums := make([]uint64, 0, len(l.dirs)+len(l.files)+len(l.reads)+len(l.roots))
-	for _, line := range l.dirs {
-		sums = append(sums, lineSum(dirShape(line)))
+// record's order: dirs (as dirShape reads them), files, reads, roots.
+func inputSums(l inputLines, dirs []string, repoRoot string, names *nameReads) []uint64 {
+	return append(dirSums(l.dirs, dirs, repoRoot, names), lineSums(l)...)
+}
+
+func dirSums(lines, dirs []string, repoRoot string, names *nameReads) []uint64 {
+	sums := make([]uint64, len(lines))
+	parallel(len(lines), func(i int) { sums[i] = dirSum(repoRoot, dirs[i], lines[i], names) })
+	return sums
+}
+
+func dirSum(repoRoot, dir, line string, names *nameReads) uint64 {
+	rel, ok := repoDir(repoRoot, dir)
+	if !ok {
+		return lineSum(dirShape("", line, nil))
 	}
+	return lineSum(dirShape(rel, line, names))
+}
+
+// lineSums are the sums of the files', reads' and roots' lines.
+func lineSums(l inputLines) []uint64 {
+	sums := make([]uint64, 0, len(l.files)+len(l.reads)+len(l.roots))
 	for _, list := range [][]string{l.files, l.reads, l.roots} {
 		for _, line := range list {
 			sums = append(sums, lineSum(line))
@@ -577,41 +669,98 @@ func lineSum(line string) uint64 {
 	return binary.BigEndian.Uint64(sum[:8])
 }
 
-// dirShape is a dirLine without the stat of each TypeScript source in it: what
-// the fast path requires unchanged, since a source's content reaches the output
-// only through the listings that read it.
-func dirShape(line string) string {
+// dirShape is walked directory rel's dirLine as the fast path requires it
+// unchanged: the record holds every file whose content the run reads apart, but
+// for those Gazelle reads itself.
+func dirShape(rel, line string, names *nameReads) string {
 	var b strings.Builder
-	for entry := range strings.SplitSeq(line, "\n") {
-		if entry == "" {
-			continue
+	for e := range dirEntries(rel, line, names) {
+		if e.shape != "" {
+			b.WriteString(e.shape)
+			b.WriteByte('\n')
 		}
-		if name, ok := sourceEntryName(entry); ok {
-			fmt.Fprintf(&b, "f %s\n", name)
-			continue
-		}
-		b.WriteString(entry)
-		b.WriteByte('\n')
 	}
 	return b.String()
 }
 
-// sourceEntryName is the name of a dirLine "f <name> <stat>" entry for a patchable
-// source; a stat is five fields.
-func sourceEntryName(entry string) (string, bool) {
-	rest, ok := strings.CutPrefix(entry, "f ")
-	if !ok {
-		return "", false
-	}
-	cut := len(rest)
-	for range 5 {
-		cut = strings.LastIndexByte(rest[:cut], ' ')
-		if cut < 0 {
-			return "", false
+// dirEntry's shape is "" for an entry nothing read.
+type dirEntry struct {
+	name, shape string
+	source      bool
+}
+
+// dirEntries yields each entry of walked directory rel's dirLine and whether
+// its name reads back; one that does not keeps its whole line.
+func dirEntries(rel, line string, names *nameReads) iter.Seq2[dirEntry, bool] {
+	return func(yield func(dirEntry, bool) bool) {
+		for entry := range strings.SplitSeq(line, "\n") {
+			if entry == "" {
+				continue
+			}
+			if !yield(dirEntryOf(rel, entry, names)) {
+				return
+			}
 		}
 	}
-	name := rest[:cut]
-	return name, patchableSource(name)
+}
+
+func dirEntryOf(rel, entry string, names *nameReads) (dirEntry, bool) {
+	kind, rest, _ := strings.Cut(entry, " ")
+	e := dirEntry{name: rest, shape: entry}
+	var found bool
+	switch kind {
+	case "d", "gone":
+		return e, true
+	case "b":
+		e.name, _, found = cutFields(rest, 2)
+	case "l":
+		e.name, _, found = strings.Cut(rest, " -> ")
+	case "f":
+		// A stat is five fields, its mode first.
+		var stat string
+		if e.name, stat, found = cutFields(rest, 5); !found {
+			break
+		}
+		mode, _, _ := strings.Cut(stat, " ")
+		switch {
+		case patchableSource(e.name):
+			e.source, e.shape = true, "f "+e.name
+		case readByGazelle(e.name):
+		case names.unread(rel, e.name):
+			e.shape = ""
+		default:
+			e.shape = "f " + e.name + " " + mode
+		}
+	}
+	if !found {
+		e.name = rest
+	}
+	return e, found
+}
+
+// cutFields cuts the last n space-separated fields off s.
+func cutFields(s string, n int) (before, fields string, found bool) {
+	cut := len(s)
+	for range n {
+		if cut = strings.LastIndexByte(s[:cut], ' '); cut < 0 {
+			return s, "", false
+		}
+	}
+	return s[:cut], s[cut+1:], true
+}
+
+// readByGazelle names the files Gazelle reads outside the record, and the
+// manifests and configurations a package comes from, which count whole.
+func readByGazelle(name string) bool {
+	switch name {
+	case ".bazelignore", "REPO.bazel", "MODULE.bazel", "WORKSPACE", "WORKSPACE.bazel", "WORKSPACE.bzlmod",
+		"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc":
+		return true
+	}
+	lower := strings.ToLower(name)
+	config := strings.HasSuffix(lower, ".json") && (strings.HasPrefix(lower, "tsconfig") || strings.HasPrefix(lower, "jsconfig"))
+	return config || strings.HasPrefix(lower, "wrangler.") ||
+		strings.HasPrefix(name, "BUILD") || strings.HasSuffix(name, ".MODULE.bazel") || strings.HasSuffix(name, ".bzl")
 }
 
 // ---- the decision -------------------------------------------------------------
@@ -681,18 +830,22 @@ type fastPathDecision struct {
 	// changed are the inputs whose lines moved; stamps the newest change among all inputs.
 	changed []string
 	stamps  *newest
-	// edits are the BUILD files a gained, renamed or deleted source changes.
-	edits []*packageEdit
+	// edits are the BUILD files a gained, renamed or deleted source changes,
+	// or with restores set the edited BUILD files written back as recorded.
+	edits    []*packageEdit
+	restores bool
 	// buildNames and skipDir, the listing cache, are what a walked directory's line is read with.
 	buildNames []string
 	skipDir    string
+	// repoRoot and names are what the record's walked directories' shapes are read with.
+	repoRoot string
+	names    *nameReads
 }
 
 // editedDirLine is dir's line once e is written: was with its BUILD file's
 // content sum moved, which it must be as the directory reads now.
 func (d *fastPathDecision) editedDirLine(dir, was string, e *packageEdit) (string, bool) {
-	name := filepath.Base(e.file)
-	prefix := fmt.Sprintf("b %s %o ", name, e.mode)
+	prefix := fmt.Sprintf("b %s %o ", filepath.Base(e.file), e.mode)
 	var b strings.Builder
 	moved := false
 	for entry := range strings.SplitSeq(was, "\n") {
@@ -700,7 +853,7 @@ func (d *fastPathDecision) editedDirLine(dir, was string, e *packageEdit) (strin
 			continue
 		}
 		if strings.HasPrefix(entry, prefix) {
-			entry = fmt.Sprintf("%s%x", prefix, sha256.Sum256(e.content))
+			entry = buildEntry(filepath.Base(e.file), e.mode, e.content)
 			moved = true
 		}
 		b.WriteString(entry)
@@ -716,14 +869,22 @@ func (d *fastPathDecision) editedDirLine(dir, was string, e *packageEdit) (strin
 // every import the edit adds or drops lies between files that every rule
 // reading the importer already resolves the same way. A gained or lost source
 // changes its rule's srcs and nothing else, which the decision's edits write.
-func decideFastPath(rec *runRecord, repoRoot string, buildNames []string, dirs []string, stamps *newest, cliExcludes string) (*fastPathDecision, *decline) {
+func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, dirs []string, stamps *newest, cliExcludes, snapFile string) (*fastPathDecision, *decline) {
 	if len(rec.facts) == 0 || len(rec.sums) != len(rec.dirs)+len(rec.files)+len(rec.reads)+len(rec.roots) {
 		return nil, declined(declineNoFacts, "the record keeps no import facts")
 	}
+	// The BUILD-edit path needs no complete facts, only the name reads the sums were taken with.
+	names := decodeNameReads(rec.facts)
+	sums := dirSums(dirs, rec.dirs, repoRoot, names)
 	var moved []int
-	for i := range rec.dirs {
-		if lineSum(dirShape(dirs[i])) != rec.sums[i] {
+	for i, sum := range sums {
+		if sum != rec.sums[i] {
 			moved = append(moved, i)
+		}
+	}
+	if len(moved) > 0 {
+		if decision, why, handled := decideBuildEdit(rec, snapFile, repo, repoRoot, buildNames, dirs, moved, stamps, names); handled {
+			return decision, why
 		}
 	}
 	facts, err := decodeImportFacts(rec.facts)
@@ -741,7 +902,7 @@ func decideFastPath(rec *runRecord, repoRoot string, buildNames []string, dirs [
 		}
 	}
 	lines := inputLines{dirs: dirs, files: fileLines(rec.files, stamps), reads: listingReadLines(rec.reads, stamps), roots: rootLines(rec.roots)}
-	sums := inputSums(lines)
+	sums = append(sums, lineSums(lines)...)
 	// A walked directory's shape holds its BUILD file's content, so a BUILD file read by stat there may move.
 	walked := setOf(rec.dirs)
 	changed := map[string]bool{}
@@ -775,7 +936,8 @@ func decideFastPath(rec *runRecord, repoRoot string, buildNames []string, dirs [
 		}
 		changedRoots[rel] = true
 	}
-	decision := &fastPathDecision{lines: lines, files: map[string]string{}, changed: slices.Sorted(maps.Keys(changed)), stamps: stamps}
+	decision := &fastPathDecision{lines: lines, files: map[string]string{}, changed: slices.Sorted(maps.Keys(changed)), stamps: stamps,
+		repoRoot: repoRoot, names: names}
 	if len(decision.changed) == 0 && delta.empty() {
 		return decision, nil
 	}
@@ -975,55 +1137,112 @@ func patchListings(facts *importFacts, affected map[int]bool, reads listingReads
 			return nil, declined(declineFilesList, "the record's files lists derive from one another in a cycle")
 		}
 		slices.Sort(ready)
-		patched := make([]*fastPatch, len(ready))
-		kept := make([]*cachedListing, len(ready))
-		whys := make([]*decline, len(ready))
-		parallel(len(ready), func(j int) {
-			i := ready[j]
+		// A projection whose base patches this round is patched beside it from a guessed
+		// base, and kept only if the patched base derives the same files list.
+		var guessed []int
+		if structural {
+			inRound := map[int]bool{}
+			for _, i := range ready {
+				inRound[i] = true
+			}
+			for i := range pending {
+				if b, known := byKey[facts.Listings[i].Base]; known && inRound[b] && !inRound[i] {
+					guessed = append(guessed, i)
+				}
+			}
+			slices.Sort(guessed)
+		}
+		type attempt struct {
+			filesList []string
+			patched   *fastPatch
+			kept      *cachedListing
+			why       *decline
+		}
+		baseListings := func(b int) (was, now explainfiles.Listing) {
+			if p := done[b]; p != nil {
+				return p.listing, p.p.Listing
+			}
+			return unchanged[b].Listing, unchanged[b].Listing
+		}
+		targets := slices.Concat(ready, guessed)
+		attempts := make([]attempt, len(targets))
+		parallel(len(attempts), func(j int) {
+			a := &attempts[j]
+			i, guess := targets[j], j >= len(ready)
 			l := facts.Listings[i]
 			entry, why := load(i)
 			if why != nil {
-				whys[j] = why
+				a.why = why
 				return
 			}
 			filesList := entry.FilesList
 			if structural && entry.FilesList != nil {
 				if l.Base == "" {
-					whys[j] = declined(declineFilesList, "listing %s is a files list the record does not derive", l.Key)
+					a.why = declined(declineFilesList, "listing %s is a files list the record does not derive", l.Key)
 					return
 				}
-				b := byKey[l.Base]
-				was, now := explainfiles.Listing{}, explainfiles.Listing{}
-				if p := done[b]; p != nil {
-					was, now = p.listing, p.p.Listing
+				var was, now explainfiles.Listing
+				if guess {
+					base, why := load(byKey[l.Base])
+					if why != nil {
+						a.why = why
+						return
+					}
+					was, now = base.Listing, deltaListing(base.Listing, reads.delta)
+					entry = entry.patchCopy()
 				} else {
-					was, now = unchanged[b].Listing, unchanged[b].Listing
+					was, now = baseListings(byKey[l.Base])
 				}
-				if filesList, whys[j] = derivedFilesList(entry, l, was, now, reads.delta, reads.owners); whys[j] != nil {
+				if filesList, a.why = derivedFilesList(entry, l, was, now, reads.delta, reads.owners); a.why != nil {
 					return
 				}
 			}
+			a.filesList = filesList
 			p, why, same := patchAffected(l.Key, entry, filesList, reads)
 			switch {
 			case why != nil:
-				whys[j] = why
+				a.why = why
 			case same:
-				kept[j] = entry
+				a.kept = entry
 			default:
 				p.newKey = filesListKey(l.Key, filesList)
-				patched[j] = &p
+				a.patched = &p
 			}
 		})
-		for j, i := range ready {
-			if whys[j] != nil {
-				return nil, whys[j]
-			}
-			if patched[j] != nil {
-				done[i] = patched[j]
+		settle := func(i int, a attempt) {
+			if a.patched != nil {
+				done[i] = a.patched
 			} else {
-				unchanged[i] = kept[j]
+				unchanged[i] = a.kept
 			}
 			delete(pending, i)
+		}
+		for j, i := range ready {
+			if attempts[j].why != nil {
+				return nil, attempts[j].why
+			}
+			settle(i, attempts[j])
+		}
+		for j, i := range guessed {
+			a := attempts[len(ready)+j]
+			entry, why := load(i)
+			if why != nil {
+				return nil, why
+			}
+			l := facts.Listings[i]
+			was, now := baseListings(byKey[l.Base])
+			want := entry.FilesList
+			if want != nil {
+				if want, why = derivedFilesList(entry, l, was, now, reads.delta, reads.owners); why != nil {
+					continue
+				}
+			}
+			if slices.Equal(want, a.filesList) {
+				if a.why != nil {
+					return nil, a.why
+				}
+				settle(i, a)
+			}
 		}
 	}
 	var patches []fastPatch
@@ -1057,6 +1276,23 @@ func derivedFilesList(entry *cachedListing, l listingFacts, baseWas, baseNow exp
 	}
 	slices.Sort(roots)
 	return slices.Compact(roots), nil
+}
+
+// deltaListing is base as the delta alone would leave it: lost sources gone,
+// gained ones listed and rooted.
+func deltaListing(base explainfiles.Listing, delta *sourceDelta) explainfiles.Listing {
+	gained := slices.Collect(maps.Keys(delta.gained))
+	keep := func(was []string) []string {
+		return append(slices.DeleteFunc(slices.Clone(was), delta.isLost), gained...)
+	}
+	return explainfiles.Listing{Roots: keep(base.Roots), Files: keep(base.Files)}
+}
+
+// patchCopy is the entry as a patch may change it, so a guessed patch leaves the entry itself as it was.
+func (entry *cachedListing) patchCopy() *cachedListing {
+	c := *entry
+	c.Sources, c.DirDigests = maps.Clone(entry.Sources), slices.Clone(entry.DirDigests)
+	return &c
 }
 
 // filesListKey is the cache key a files-list projection of key's family has
@@ -1589,7 +1825,7 @@ func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord
 	if fastPathMode == "off" {
 		return
 	}
-	decision, why := decideFastPath(rec, c.RepoRoot, c.ValidBuildFileNames, dirs, stamps, flagValue(fs, "exclude"))
+	decision, why := decideFastPath(rec, c.RepoRoot, c.RepoName, c.ValidBuildFileNames, dirs, stamps, flagValue(fs, "exclude"), buildSnapshotFile(file))
 	if mode := flagValue(fs, "mode"); why == nil && len(decision.edits) > 0 && mode != "fix" {
 		why = declined(declineMode, "-mode=%s; only fix writes the BUILD edit", mode)
 	}
@@ -1601,6 +1837,9 @@ func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord
 	}
 	decision.buildNames, decision.skipDir = c.ValidBuildFileNames, filepath.Dir(file)
 	if fastPathMode == "verify" {
+		if decision.restores {
+			os.Exit(verifyBuildEdit(file, rec, decision, argsWith(fs, "-ts_fastpath=off", "-ts_run_record=off", "-ts_resolve_record=off")))
+		}
 		os.Exit(verifyFastPath(fs, file, rec, decision))
 	}
 	if err := decision.writeEdits(); err != nil {
@@ -1608,16 +1847,23 @@ func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord
 		return
 	}
 	decision.carryForward(file, rec, true)
-	if len(decision.edits) > 0 {
+	switch {
+	case decision.restores:
+		traceRun("fast path build edit")
+	case len(decision.edits) > 0:
 		traceRun("fast path edit")
-	} else {
+	default:
 		traceRun("fast path")
 	}
 	os.Stdout.Write(rec.stdout)
 	os.Stderr.Write(rec.stderr)
 	if listingVerbose {
-		log.Printf("typescript: fast path: replayed; %d listing(s) patched, %d BUILD file(s) written, and every import the edit adds or drops is one the rules already resolve",
-			len(decision.patches), len(decision.edits))
+		if decision.restores {
+			log.Printf("typescript: fast path: replayed; %d BUILD file(s) written back as recorded, which Gazelle's merge restores them to", len(decision.edits))
+		} else {
+			log.Printf("typescript: fast path: replayed; %d listing(s) patched, %d BUILD file(s) written, and every import the edit adds or drops is one the rules already resolve",
+				len(decision.patches), len(decision.edits))
+		}
 	}
 	os.Exit(rec.exit)
 }
@@ -1745,7 +1991,13 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 				files[e.file], _ = fileLine(e.file)
 			}
 		}
-		// The facts name the tree before the edit; the next change runs in full and records anew.
+	}
+	sourceEdit := len(d.edits) > 0 && !d.restores
+	// The facts name the tree before a source edit; the next change runs in full and records anew.
+	if !d.restores {
+		os.Remove(buildSnapshotFile(file))
+	}
+	if sourceEdit {
 		facts, err := (&importFacts{Version: importFactsVersion, Incomplete: "the record was carried past a BUILD edit the fast path wrote"}).encode()
 		if err != nil {
 			log.Printf("typescript: fast path: %v", err)
@@ -1760,7 +2012,7 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 		lines.reads = append(lines.reads, reads[r])
 	}
 	next.digest, next.walkDigest = next.digests(lines)
-	next.sums = inputSums(lines)
+	next.sums = inputSums(lines, next.dirs, d.repoRoot, decodeNameReads(next.facts))
 	data, err := next.encode()
 	if err != nil {
 		log.Printf("typescript: fast path: %v", err)

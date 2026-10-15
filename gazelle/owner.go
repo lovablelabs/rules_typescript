@@ -342,7 +342,11 @@ func (s *programStore) owner(f string) (string, bool) {
 }
 
 func (s *programStore) sourceFile(f string) bool {
-	return firstParty(f) && slices.Contains(s.files[parentDir(f)], path.Base(f))
+	if !firstParty(f) {
+		return false
+	}
+	s.importFacts.lookedUp(f)
+	return slices.Contains(s.files[parentDir(f)], path.Base(f))
 }
 
 func (s *programStore) generationDisabled(dir string) bool {
