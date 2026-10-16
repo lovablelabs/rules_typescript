@@ -1,11 +1,12 @@
 package typescript
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"maps"
@@ -39,11 +40,13 @@ func refuse(reason string) *program {
 	return nil
 }
 
-const patchStateVersion = 3
+const patchStateVersion = 4
 
 type cachedSource struct {
 	Specs []string
 	Rest  string
+	// Sum is scanSum of the whole scan; 0 in an entry recorded before it existed.
+	Sum uint64
 }
 
 var sourceSpecs sync.Map // absolute path -> incremental.Scanned, or nil when unscannable
@@ -68,8 +71,29 @@ func scanFile(abs string) (incremental.Scanned, bool) {
 
 func scanSpecs(abs string) (cachedSource, bool) {
 	src, ok := scanFile(abs)
-	return cachedSource{Specs: src.Specs, Rest: src.Rest}, ok
+	return cachedSource{Specs: src.Specs, Rest: src.Rest, Sum: scanSum(src)}, ok
 }
+
+// scanSum covers every field of a scan, which is all a listing or its patch reads
+// of a source; an edit that keeps it keeps every listing the source is in. An
+// uncounted or inexact scan has none: it may miss an import tsgo reads.
+func scanSum(src incremental.Scanned) uint64 {
+	if !src.Counted || !src.Exact {
+		return 0
+	}
+	data, err := json.Marshal(src)
+	if err != nil {
+		return 0
+	}
+	if sum := lineSum(fmt.Sprintf("%d %s", patchStateVersion, data)); sum > wholeScan {
+		return sum
+	}
+	return wholeScan + 1
+}
+
+// wholeScan stands, in a run record's scans, for a read the extension made of a
+// source's whole content, which no scan sum covers; scanSum never returns it.
+const wholeScan uint64 = 1
 
 func patchableSource(rel string) bool {
 	return !strings.HasPrefix(rel, "../") && !strings.HasPrefix(rel, embeddedLibs) &&
@@ -105,9 +129,25 @@ func recordPatchState(entry *cachedListing, repoRoot string, project *tsconfig.R
 	parallel(len(patchable), func(i int) {
 		scans[i].src, scans[i].ok = scanSpecs(filepath.Join(repoRoot, filepath.FromSlash(patchable[i])))
 	})
+	imported := map[string]map[string]bool{}
+	note := func(kind explainfiles.EdgeKind, from, specifier string) {
+		if kind == explainfiles.Import {
+			if imported[from] == nil {
+				imported[from] = map[string]bool{}
+			}
+			imported[from][specifier] = true
+		}
+	}
+	for _, e := range entry.Listing.Edges {
+		note(e.Kind, e.From, e.Specifier)
+	}
+	for _, u := range entry.Listing.Unresolved {
+		note(u.Kind, u.From, u.Specifier)
+	}
 	entry.Sources = map[string]cachedSource{}
 	for i, file := range patchable {
-		if scans[i].ok {
+		// A scan that misses an import tsgo resolved vouches for no edit to the source.
+		if scans[i].ok && scannedAsListed(scans[i].src.Specs, imported[file]) {
 			entry.Sources[file] = scans[i].src
 		}
 	}
@@ -129,6 +169,23 @@ func recordPatchState(entry *cachedListing, repoRoot string, project *tsconfig.R
 			entry.Unmatched = append(entry.Unmatched, file)
 		}
 	}
+}
+
+// scannedAsListed says whether a scan read every import tsgo resolved from the
+// source, beside those tsgo adds for JSX or helpers, which the scan's rest covers.
+// A scanned import tsgo lists nowhere is common: an ambient module declares it.
+func scannedAsListed(specs []string, listed map[string]bool) bool {
+	scanned := map[string]bool{}
+	for _, spec := range specs {
+		_, text, _ := strings.Cut(spec, ":")
+		scanned[text] = true
+	}
+	for text := range listed {
+		if !scanned[text] && text != "tslib" && !strings.HasSuffix(text, "/jsx-runtime") && !strings.HasSuffix(text, "/jsx-dev-runtime") {
+			return false
+		}
+	}
+	return true
 }
 
 func newPatchConfig(project *tsconfig.Resolved, projectDir string) *patchConfig {
@@ -464,6 +521,13 @@ func existence(line string) string {
 	return "file"
 }
 
+// regularLine is whether a stat line is a regular file's.
+func regularLine(line string) bool {
+	field, _, _ := strings.Cut(line, " ")
+	mode, err := strconv.ParseUint(field, 8, 32)
+	return err == nil && fs.FileMode(mode).IsRegular()
+}
+
 type importKey struct {
 	from, specifier string
 }
@@ -609,6 +673,8 @@ func (t *patcher) patch(subject string) *program {
 			}
 			if !slices.Equal(src.Specs, old.Specs) {
 				edited[rel] = src
+			} else {
+				t.sources[rel] = src
 			}
 		case path.Ext(rel) == ".json" && path.Base(rel) != "package.json":
 		default:
@@ -1676,6 +1742,7 @@ func programFromEntry(entry *cachedListing, subject string) *program {
 	p.Files = slices.Clone(p.Files)
 	p.Roots = slices.Clone(p.Roots)
 	p.Edges = slices.Clone(p.Edges)
+	p.candidates = slices.Grow(p.candidates, len(entry.Candidates))
 	for _, c := range entry.Candidates {
 		p.candidates = append(p.candidates, c.resolutionCandidate())
 	}
@@ -1826,9 +1893,5 @@ func writeListing(key string, entry *cachedListing) {
 }
 
 func writeListingFile(file string, entry *cachedListing) {
-	var buf bytes.Buffer
-	if gob.NewEncoder(&buf).Encode(entry) != nil {
-		return
-	}
-	writeAtomically(file, buf.Bytes())
+	writeAtomicallyWith(file, func(w io.Writer) error { return gob.NewEncoder(w).Encode(entry) })
 }

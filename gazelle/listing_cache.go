@@ -446,13 +446,21 @@ func familyEntries(id listingID) []*cachedListing {
 }
 
 func saveListing(id listingID, repoRoot, subject string, args []string, p *program) {
+	memo, _ := absolutePaths.LoadOrStore(repoRoot, &sync.Map{})
+	joined := memo.(*sync.Map)
 	abs := func(rel string) string {
 		if filepath.IsAbs(rel) {
 			return filepath.Clean(rel)
 		}
-		return filepath.Join(repoRoot, filepath.FromSlash(rel))
+		if joinedPath, ok := joined.Load(rel); ok {
+			return joinedPath.(string)
+		}
+		joinedPath := filepath.Join(repoRoot, filepath.FromSlash(rel))
+		joined.Store(rel, joinedPath)
+		return joinedPath
 	}
-	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution, FilesList: id.files}
+	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution, FilesList: id.files,
+		Reads: make([]string, 0, len(p.Files)+3*len(p.candidates)+1), Candidates: make([]cachedCandidate, 0, len(p.candidates))}
 	for _, file := range p.Files {
 		if !strings.HasPrefix(file, embeddedLibs) {
 			entry.Reads = append(entry.Reads, abs(file))
@@ -508,6 +516,9 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 	}
 	writeListingAsync(filepath.Join(listingCacheDir, id.key), &entry)
 }
+
+// absolutePaths holds, per root, each repository-relative path's absolute one: listings name the same files.
+var absolutePaths sync.Map
 
 // pendingSaves are the cache files still being written, each with a channel closed once it is on disk.
 var pendingSaves sync.Map

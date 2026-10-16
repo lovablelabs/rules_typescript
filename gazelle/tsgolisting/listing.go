@@ -175,19 +175,22 @@ func (c *Compiler) compile(ctx context.Context, sys *system, commandLine *tsopti
 }
 
 // tracer is tsc.GetTraceWithWriterFromSys's trace, each message formatted
-// as diagnostics.Format does it without its regular expression.
+// as diagnostics.Format does it without its regular expression. tsgo traces
+// from one goroutine, so one buffer holds every line.
 func (c *Compiler) tracer(w io.Writer, loc locale.Locale) func(*diagnostics.Message, ...any) {
+	var line []byte
 	return func(msg *diagnostics.Message, args ...any) {
 		key := templateKey{msg, loc}
 		template, ok := c.templates.Load(key)
 		if !ok {
 			template, _ = c.templates.LoadOrStore(key, diagnostics.Localize(loc, msg, ""))
 		}
-		line, ok := format(template, diagnostics.StringifyArgs(args))
+		line, ok = appendFormat(line[:0], template, diagnostics.StringifyArgs(args))
 		if !ok {
-			line = msg.Localize(loc, args...)
+			line = append(line[:0], msg.Localize(loc, args...)...)
 		}
-		_, _ = io.WriteString(w, line+"\n")
+		line = append(line, '\n')
+		_, _ = w.Write(line)
 	}
 }
 
@@ -196,34 +199,32 @@ type templateKey struct {
 	locale locale.Locale
 }
 
-// format replaces each {N} in template with args[N], as diagnostics.Format
-// does; ok is false where Format would panic, for it to do so.
-func format(template string, args []string) (string, bool) {
+// appendFormat appends template with each {N} replaced by args[N], as
+// diagnostics.Format does; ok is false where Format would panic, for it to do so.
+func appendFormat(dst []byte, template string, args []string) ([]byte, bool) {
 	if len(args) == 0 {
-		return template, true
+		return append(dst, template...), true
 	}
-	var b strings.Builder
 	for {
 		open := strings.IndexByte(template, '{')
 		if open < 0 {
-			b.WriteString(template)
-			return b.String(), true
+			return append(dst, template...), true
 		}
 		digits := open + 1
 		for digits < len(template) && '0' <= template[digits] && template[digits] <= '9' {
 			digits++
 		}
 		if digits == open+1 || digits == len(template) || template[digits] != '}' {
-			b.WriteString(template[:open+1])
+			dst = append(dst, template[:open+1]...)
 			template = template[open+1:]
 			continue
 		}
 		index, err := strconv.Atoi(template[open+1 : digits])
 		if err != nil || index >= len(args) {
-			return "", false
+			return dst, false
 		}
-		b.WriteString(template[:open])
-		b.WriteString(strings.ToValidUTF8(args[index], "\uFFFD"))
+		dst = append(dst, template[:open]...)
+		dst = append(dst, strings.ToValidUTF8(args[index], "\uFFFD")...)
 		template = template[digits+1:]
 	}
 }

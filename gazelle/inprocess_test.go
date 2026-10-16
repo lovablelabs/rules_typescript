@@ -5,7 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/microsoft/typescript-go/shim/listing"
 )
@@ -82,5 +85,52 @@ func TestListingInProcess_StartsTsgoOnlyForAnotherVersion(t *testing.T) {
 				t.Errorf("the listing differs from tsgo's:\n%s", diff)
 			}
 		})
+	}
+}
+
+// The in-process listing reuses a chunk's buffer once its lines are handled:
+// the splitter must keep nothing of a line, or a later chunk rewrites what it kept.
+func TestTraceSplitter_KeepsNothingOfALinesBuffer(t *testing.T) {
+	requireTsgo(t)
+	tree := subpathTree()
+	tree["app/tsconfig.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true,"paths":{"@app/*":["./*"]}},"include":["*.ts"]}`
+	tree["package.json"] = `{"type":"module","imports":{"#lib/*":"./lib/*.ts","#app/*":"./app/*.ts","#dep":"dep"}}`
+	tree["node_modules/dep/package.json"] = `{"name":"dep","types":"index.d.ts"}`
+	tree["node_modules/dep/index.d.ts"] = "export declare const dep: number;\n"
+	tree["app/empty/notes.txt"] = "no package.json here\n"
+	tree["app/j.ts"] = "import data from './empty/package.json';\nimport { dep } from '#dep';\nexport const j = [data, dep];\n"
+	root := writeTree(t, tree)
+	tsgo, err := newProgramStore().binary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(tsgo, "-p", "app/tsconfig.json", "--noEmit", "--listFilesOnly", "--explainFiles", "--pretty", "false", "--traceResolution", "--locale", "en")
+	cmd.Dir = root
+	out, _ := cmd.Output()
+	// Each phrase leads to a field the splitter keeps across lines.
+	for _, phrase := range []string{"======== Resolving module", "Using 'imports' subpath '", "' has a '.json' extension - stripping it.", "Trying substitution '"} {
+		if !strings.Contains(string(out), phrase) {
+			t.Fatalf("tsgo traced no %q:\n%s", phrase, out)
+		}
+	}
+	var wantFacts, gotFacts resolutionFacts
+	wantText, wantCandidates, wantErr := splitTrace(root, string(out), &wantFacts)
+	split := newTraceSplitter(root, &gotFacts)
+	buf := make([]byte, 0, len(out))
+	for _, line := range strings.SplitAfter(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+		buf = append(buf[:0], line...)
+		if err := split.line(unsafe.String(unsafe.SliceData(buf), len(buf))); err != nil {
+			t.Fatal(err)
+		}
+		for i := range buf {
+			buf[i] = 'x'
+		}
+	}
+	gotText, gotCandidates, gotErr := split.finish()
+	if gotText != wantText || !reflect.DeepEqual(gotCandidates, wantCandidates) || !reflect.DeepEqual(gotFacts, wantFacts) || (gotErr == nil) != (wantErr == nil) {
+		t.Errorf("a rewritten line buffer changed what the splitter kept")
 	}
 }

@@ -567,15 +567,16 @@ func programCandidate(name string) bool {
 // deeper package's, a ts_codegen's, a BUILD file or the ts_config's own src.
 func (s *programStore) dataFiles(pkg string, tc *tsConfig) []string {
 	var out []string
-	for _, dir := range slices.Sorted(maps.Keys(s.files)) {
-		if (dir != pkg && !dirIsAncestorOf(pkg, dir)) || s.nearestPackage(dir) != pkg {
+	for _, dir := range s.walkedDirs(pkg) {
+		if s.nearestPackage(dir) != pkg {
 			continue
 		}
 		s.importFacts.enumerated(dir)
-		if !s.walked[dir] || s.foreign[dir] != "" {
+		if walked, _ := s.dirWalked(dir); !walked || s.foreign[dir] != "" {
 			continue
 		}
-		for _, f := range s.files[dir] {
+		names, _ := s.dirNames(dir)
+		for _, f := range names {
 			switch {
 			case f == "BUILD.bazel", f == "BUILD", f == "package.json", programCandidate(f):
 			case path.Join(dir, f) == s.configPath(pkg), dir == pkg && f == "tsconfig.json":
@@ -1307,9 +1308,9 @@ func withSourceExports(args language.GenerateArgs, tc *tsConfig, res language.Ge
 		res.Imports = append(res.Imports, nil)
 	}
 	var scopes []string
-	for dir := range tc.programs.files {
+	for _, dir := range tc.programs.walkedDirs(args.Rel) {
 		source := path.Join(dir, "package.json")
-		if !within(dir, args.Rel) || !tc.programs.sourceFile(source) ||
+		if !tc.programs.sourceFile(source) ||
 			tc.programs.inputIdentity(args.Config, tc.programs.index, source) != authoredInput {
 			continue
 		}

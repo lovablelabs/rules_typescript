@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/microsoft/typescript-go/shim/listing"
 )
@@ -162,20 +163,25 @@ func inProcessDifference(got, want *program) string {
 // lineWriter hands line each line written to it, newline kept, on a
 // goroutine of its own and a chunk of lines at a time, as eachLine does a
 // pipe's; the first error stops it and is handed to stop. One writer at a
-// time: tsgo writes its trace and its listing from one goroutine.
+// time: tsgo writes its trace and its listing from one goroutine. A chunk's
+// buffer is reused once its lines are handled, so line must keep none of them.
 type lineWriter struct {
-	buf    []byte
-	chunks chan string
+	buf    *[]byte
+	chunks chan *[]byte
 	done   sync.WaitGroup
 	err    error
 }
 
 const lineChunk = 1 << 20
 
+var lineBuffers = sync.Pool{New: func() any { return new([]byte) }}
+
 func newLineWriter(line func(string) error, stop func(error)) *lineWriter {
-	w := &lineWriter{chunks: make(chan string, 4)}
+	w := &lineWriter{chunks: make(chan *[]byte, 4), buf: lineBuffers.Get().(*[]byte)}
+	*w.buf = (*w.buf)[:0]
 	w.done.Go(func() {
-		for chunk := range w.chunks {
+		for b := range w.chunks {
+			chunk := unsafe.String(unsafe.SliceData(*b), len(*b))
 			for chunk != "" && w.err == nil {
 				n := strings.IndexByte(chunk, '\n') + 1
 				if n == 0 {
@@ -186,31 +192,37 @@ func newLineWriter(line func(string) error, stop func(error)) *lineWriter {
 				}
 				chunk = chunk[n:]
 			}
+			lineBuffers.Put(b)
 		}
 	})
 	return w
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
-	w.buf = append(w.buf, p...)
-	if len(w.buf) >= lineChunk {
-		w.send(bytes.LastIndexByte(w.buf, '\n') + 1)
+	*w.buf = append(*w.buf, p...)
+	if len(*w.buf) >= lineChunk {
+		w.send(bytes.LastIndexByte(*w.buf, '\n') + 1)
 	}
 	return len(p), nil
 }
 
 func (w *lineWriter) send(end int) {
 	if end > 0 {
-		w.chunks <- string(w.buf[:end])
-		w.buf = w.buf[:copy(w.buf, w.buf[end:])]
+		next := lineBuffers.Get().(*[]byte)
+		*next = append((*next)[:0], (*w.buf)[end:]...)
+		*w.buf = (*w.buf)[:end]
+		w.chunks <- w.buf
+		w.buf = next
 	}
 }
 
 // close hands on what is left, an unterminated last line included, and waits
 // for every line to be handed on.
 func (w *lineWriter) close() error {
-	w.send(len(w.buf))
+	w.send(len(*w.buf))
 	close(w.chunks)
 	w.done.Wait()
+	lineBuffers.Put(w.buf)
+	w.buf = nil
 	return w.err
 }

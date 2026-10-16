@@ -175,7 +175,7 @@ func automaticProgramImports(c *config.Config, consumer, sources *rule.Rule, f *
 	dirInfo ...func(string) (walk.DirInfo, error)) []resolve.ImportSpec {
 	result := declaredSourceImports(c, sources, f, dirInfo...)
 	ignored := slices.ContainsFunc(f.Directives, func(d rule.Directive) bool { return d.Key == "ignore" })
-	closing := getConfig(c).programs.walked[f.Pkg]
+	closing, _ := getConfig(c).programs.dirWalked(f.Pkg)
 	if result.incomplete != "" && closing && managesProgramClosure(consumer) && !ignored && (len(c.Langs) == 0 || slices.Contains(c.Langs, languageName)) {
 		log.Fatalf("typescript: %s cannot discover its compiler closure: %s; use explicit source-file labels for automatic closure, or keep the whole rule or ignore its package and maintain sources and deps manually", label.New(c.RepoName, f.Pkg, consumer.Name()), result.incomplete)
 	}
@@ -1764,7 +1764,8 @@ func selectedRuleImports(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, 
 		return file != nil && slices.ContainsFunc(file.Directives, func(d rule.Directive) bool { return d.Key == "ignore" })
 	}
 	imports := map[resolve.ImportSpec]bool{}
-	managed := s.walked[pkg] && managedProgramRule(r, pkg) && !ignored(file) &&
+	walked, _ := s.dirWalked(pkg)
+	managed := walked && managedProgramRule(r, pkg) && !ignored(file) &&
 		(len(c.Langs) == 0 || slices.Contains(c.Langs, languageName))
 	if managed {
 		for _, spec := range keptRuleImports(c, r, file) {

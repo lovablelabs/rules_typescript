@@ -24,6 +24,8 @@ type sourceDelta struct {
 	// names are each changed directory's entry names now; before are those it had
 	// before the edit, beside the names of entries nothing read, as they are now.
 	names, before map[string][]string
+	// newDirs are the gained directories nothing reads, with their dirLines.
+	newDirs map[string]string
 }
 
 func (d *sourceDelta) has(rel string) bool {
@@ -59,9 +61,10 @@ func pkgRelative(pkg, f string) string {
 type shapeEntry struct{ name, line string }
 
 // sourceChanges reads the directories whose shape moved as gained and lost
-// TypeScript sources: a source entry no listing holds is gained, a listed source
-// no longer there is lost, and the directory as it was must hash to the record's sum.
-func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []string, moved []int) (*sourceDelta, *decline) {
+// TypeScript sources and gained directories nothing reads: a source entry no
+// listing holds is gained, a listed source no longer there is lost, and the
+// directory as it was must hash to the record's sum.
+func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []string, moved []int, buildNames []string, skip string, stamps *newest) (*sourceDelta, *decline) {
 	listed := map[string]map[string]bool{}
 	for _, l := range facts.Listings {
 		for _, id := range l.Listed {
@@ -72,7 +75,8 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 			listed[parentDir(f)][path.Base(f)] = true
 		}
 	}
-	delta := &sourceDelta{gained: map[string]bool{}, lost: map[string]bool{}, names: map[string][]string{}, before: map[string][]string{}}
+	delta := &sourceDelta{gained: map[string]bool{}, lost: map[string]bool{}, names: map[string][]string{}, before: map[string][]string{}, newDirs: map[string]string{}}
+	walked := setOf(rec.dirs)
 	for _, i := range moved {
 		rel, ok := repoDir(repoRoot, rec.dirs[i])
 		if !ok {
@@ -81,7 +85,7 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 		present := map[string]bool{}
 		var was []shapeEntry
 		// An entry nothing read stands among the names a lost source's stem is checked against.
-		var unread []string
+		var unread, unwalked []string
 		for e, ok := range dirEntries(rel, dirs[i], &facts.names) {
 			if !ok {
 				return nil, declined(declineInputs, "%s holds an entry whose name the record cannot read back", orRepoRoot(rel))
@@ -95,6 +99,9 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 				unread = append(unread, e.name)
 			default:
 				was = append(was, shapeEntry{e.name, e.shape})
+				if e.shape == "d "+e.name && !walked[filepath.Join(rec.dirs[i], e.name)] {
+					unwalked = append(unwalked, e.name)
+				}
 			}
 		}
 		for name := range listed[rel] {
@@ -104,14 +111,20 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 			}
 		}
 		slices.SortFunc(was, func(a, b shapeEntry) int { return strings.Compare(a.name, b.name) })
-		var b strings.Builder
+		var added []string
+		was, added = newSubdirs(was, unwalked, rec.sums[i])
+		for _, name := range added {
+			tree, why := outsideTree(filepath.Join(rec.dirs[i], name), path.Join(rel, name), buildNames, skip, stamps)
+			if why != nil {
+				return nil, why
+			}
+			maps.Copy(delta.newDirs, tree)
+		}
 		for _, e := range was {
-			b.WriteString(e.line)
-			b.WriteByte('\n')
 			delta.before[rel] = append(delta.before[rel], e.name)
 		}
 		delta.before[rel] = append(delta.before[rel], unread...)
-		if lineSum(b.String()) != rec.sums[i] {
+		if shapeSum(was) != rec.sums[i] {
 			var names []string
 			for f := range mapsKeys(delta.gained, delta.lost) {
 				if parentDir(f) == rel {
@@ -124,6 +137,87 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 		}
 	}
 	return delta, nil
+}
+
+func shapeSum(entries []shapeEntry) uint64 {
+	var b strings.Builder
+	for _, e := range entries {
+		b.WriteString(e.line)
+		b.WriteByte('\n')
+	}
+	return lineSum(b.String())
+}
+
+// maxNewSubdirs bounds the subsets of unwalked subdirectories newSubdirs hashes.
+const maxNewSubdirs = 8
+
+// newSubdirs are the subdirectories the record does not walk whose entries,
+// left out, make the directory hash to sum as it was, and the entries kept;
+// was itself and none when no subset does.
+func newSubdirs(was []shapeEntry, unwalked []string, sum uint64) ([]shapeEntry, []string) {
+	if len(unwalked) == 0 || shapeSum(was) == sum {
+		return was, nil
+	}
+	without := func(subset []string) ([]shapeEntry, bool) {
+		kept := slices.DeleteFunc(slices.Clone(was), func(e shapeEntry) bool { return slices.Contains(subset, e.name) })
+		return kept, shapeSum(kept) == sum
+	}
+	if len(unwalked) > maxNewSubdirs {
+		for _, name := range unwalked {
+			if kept, ok := without([]string{name}); ok {
+				return kept, []string{name}
+			}
+		}
+		return was, nil
+	}
+	for mask := 1; mask < 1<<len(unwalked); mask++ {
+		var subset []string
+		for j, name := range unwalked {
+			if mask&(1<<j) != 0 {
+				subset = append(subset, name)
+			}
+		}
+		if kept, ok := without(subset); ok {
+			return kept, subset
+		}
+	}
+	return was, nil
+}
+
+// outsideTree is every directory under gained directory dir with its dirLine,
+// as long as none holds a BUILD file, a link, a program source or a file the
+// extension or Gazelle reads by its name: a walk of it then generates nothing.
+func outsideTree(dir, rel string, buildNames []string, skip string, stamps *newest) (map[string]string, *decline) {
+	tree := map[string]string{}
+	for queue := []string{dir}; len(queue) > 0; queue = queue[1:] {
+		d := queue[0]
+		if _, seen := tree[d]; seen {
+			return nil, declined(declineInputs, "%s, a gained directory, lists %s twice", rel, d)
+		}
+		if filepath.Base(d) == ".git" {
+			return nil, declined(declineExcluded, "the walk skips .git, which %s holds", rel)
+		}
+		line, stamp, err := dirLine(d, buildNames, skip)
+		stamps.see(stamp)
+		if err != nil || line == "absent" {
+			return nil, declined(declineInputs, "%s, a gained directory, does not read back", rel)
+		}
+		tree[d] = line
+		for entry := range strings.SplitSeq(line, "\n") {
+			kind, rest, _ := strings.Cut(entry, " ")
+			name, _, _ := cutFields(rest, 5)
+			switch {
+			case entry == "":
+			case kind == "d" && (rest == "." || rest == ".." || strings.ContainsRune(rest, '/')):
+				return nil, declined(declineInputs, "%s, a gained directory, holds an entry whose name the record cannot read back", rel)
+			case kind == "d":
+				queue = append(queue, filepath.Join(d, rest))
+			case kind != "f" || programCandidate(name) || readByGazelle(name):
+				return nil, declined(declineInputs, "%s, a gained directory, holds %s", rel, entry)
+			}
+		}
+	}
+	return tree, nil
 }
 
 // packageEdit is one package's ts_compile whose srcs gain and lose the delta's
@@ -158,6 +252,107 @@ var generatedExtensions = map[string][]string{
 	".mts": {".mjs", ".d.mts"}, ".cts": {".cjs", ".d.cts"},
 }
 
+// walkExcludes are the walk's exclude patterns and the directories .bazelignore names.
+func walkExcludes(facts *importFacts, repoRoot, cliExcludes string) (excludes, ignored []string, why *decline) {
+	excludes = slices.Clone(facts.Excludes)
+	if cliExcludes != "" {
+		excludes = append(excludes, strings.Split(cliExcludes, ",")...)
+	}
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".bazelignore"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, declined(declineExcluded, ".bazelignore: %v", err)
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			if line = strings.Trim(path.Clean(line), "/"); line != "" {
+				ignored = append(ignored, line)
+			}
+		}
+	}
+	return excludes, ignored, nil
+}
+
+// excludedNewDir declines a gained directory the walk may skip, which a record
+// made by the full pass would not hold as walked.
+func excludedNewDir(facts *importFacts, repoRoot, cliExcludes string, newDirs map[string]string) *decline {
+	if len(newDirs) == 0 {
+		return nil
+	}
+	excludes, ignored, why := walkExcludes(facts, repoRoot, cliExcludes)
+	if why != nil {
+		return why
+	}
+	repoIgnores, why := repoIgnoredDirectories(repoRoot)
+	if why != nil {
+		return why
+	}
+	for dir := range newDirs {
+		rel, _ := repoDir(repoRoot, dir)
+		if slices.ContainsFunc(ignored, func(entry string) bool { return within(rel, entry) }) {
+			return declined(declineExcluded, ".bazelignore names %s or a directory above it", rel)
+		}
+		// The walk skips a directory a pattern matches and everything under it.
+		for at := rel; at != ""; at = parentDir(at) {
+			for _, pattern := range excludes {
+				if matched, known := excludeMatch(pattern, at); matched || !known {
+					return declined(declineExcluded, "the exclude pattern %s could match %s", pattern, at)
+				}
+			}
+			for _, pattern := range repoIgnores {
+				if matched, known := excludeMatch(pattern, at); matched || !known {
+					return declined(declineExcluded, "REPO.bazel's ignore_directories pattern %s could match %s", pattern, at)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// repoIgnoredDirectories are the patterns of REPO.bazel's first top-level
+// ignore_directories call, read as Gazelle's walk reads them (walk/config.go,
+// loadRepoDirectoryIgnore); an argument other than a list of string literals declines.
+func repoIgnoredDirectories(repoRoot string) ([]string, *decline) {
+	data, err := os.ReadFile(filepath.Join(repoRoot, "REPO.bazel"))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, declined(declineExcluded, "REPO.bazel: %v", err)
+	case !bytes.Contains(data, []byte("ignore_directories")):
+		return nil, nil
+	}
+	f, err := bzl.Parse(repoRoot, data)
+	if err != nil {
+		return nil, declined(declineExcluded, "REPO.bazel: %v", err)
+	}
+	for _, stmt := range f.Stmt {
+		call, ok := stmt.(*bzl.CallExpr)
+		if !ok {
+			continue
+		}
+		if ident, ok := call.X.(*bzl.Ident); !ok || ident.Name != "ignore_directories" {
+			continue
+		}
+		var list *bzl.ListExpr
+		if len(call.List) == 1 {
+			list, _ = call.List[0].(*bzl.ListExpr)
+		}
+		if list == nil {
+			return nil, declined(declineExcluded, "REPO.bazel's ignore_directories takes no list literal")
+		}
+		patterns := make([]string, 0, len(list.List))
+		for _, item := range list.List {
+			s, ok := item.(*bzl.StringExpr)
+			if !ok {
+				return nil, declined(declineExcluded, "REPO.bazel's ignore_directories holds %s, no string literal", bzl.FormatString(item))
+			}
+			patterns = append(patterns, s.Value)
+		}
+		return patterns, nil
+	}
+	return nil, nil
+}
+
 // proveDelta places every gained and lost source in its directory's package's
 // ts_compile, next to another source of that rule in the same directory, so
 // that only the rule's srcs list tells the two apart.
@@ -165,24 +360,14 @@ func proveDelta(rec *runRecord, facts *importFacts, repoRoot string, buildNames 
 	if len(facts.Overrides) > 0 {
 		return nil, declined(declineOverride, "a TypeScript resolve directive could name a source the record never saw: %s", facts.Overrides[0])
 	}
-	excludes := slices.Clone(facts.Excludes)
-	if cliExcludes != "" {
-		excludes = append(excludes, strings.Split(cliExcludes, ",")...)
+	excludes, ignored, why := walkExcludes(facts, repoRoot, cliExcludes)
+	if why != nil {
+		return nil, why
 	}
 	walked := map[string]int{}
 	for i, dir := range rec.dirs {
 		if rel, ok := repoDir(repoRoot, dir); ok {
 			walked[rel] = i
-		}
-	}
-	data, err := os.ReadFile(filepath.Join(repoRoot, ".bazelignore"))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, declined(declineExcluded, ".bazelignore: %v", err)
-	}
-	var ignored []string
-	for line := range strings.SplitSeq(string(data), "\n") {
-		if line = strings.Trim(strings.TrimSpace(line), "/"); line != "" && !strings.HasPrefix(line, "#") {
-			ignored = append(ignored, line)
 		}
 	}
 	listed := map[string]bool{}

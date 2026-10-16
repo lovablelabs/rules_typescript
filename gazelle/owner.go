@@ -64,10 +64,10 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 		edge.To = file
 		selected[key(candidate)] = selection{edge: edge, probe: probe}
 	}
-	candidatesByFrom := map[string][]resolutionCandidate{}
+	candidatesByFrom := map[string][]int32{}
 	treeBoundaries := map[resolutionKey]string{}
-	for _, candidate := range p.candidates {
-		candidatesByFrom[candidate.from] = append(candidatesByFrom[candidate.from], candidate)
+	for i, candidate := range p.candidates {
+		candidatesByFrom[candidate.from] = append(candidatesByFrom[candidate.from], int32(i))
 		if treeBoundaries[key(candidate)] == "" {
 			if _, tree := codegenTreeOwner(s, s.index, candidate.path); tree {
 				treeBoundaries[key(candidate)] = candidate.path
@@ -108,13 +108,14 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 	replaced := func(edge explainfiles.Edge) bool {
 		if edge.Kind.ModuleSpecifier() || edge.Kind == explainfiles.TypeReference {
 			matched, unselected := false, false
-			for _, candidate := range candidatesByFrom[edge.From] {
+			for _, i := range candidatesByFrom[edge.From] {
+				candidate := &p.candidates[i]
 				if candidate.specifier != edge.Specifier || candidate.resolved != edge.To ||
 					(candidate.kind == explainfiles.TypeReference) != (edge.Kind == explainfiles.TypeReference) {
 					continue
 				}
 				matched = true
-				if selected[key(candidate)].edge.To == "" {
+				if selected[key(*candidate)].edge.To == "" {
 					unselected = true
 				}
 			}
@@ -330,7 +331,7 @@ func (s *programStore) owner(f string) (string, bool) {
 	}
 	for ; ; dir = parentDir(dir) {
 		if files, ok := s.packages[dir]; ok {
-			if files[f] && s.walked[dir] {
+			if walked, _ := s.dirWalked(dir); files[f] && walked {
 				return dir, true
 			}
 			return "", false
@@ -346,12 +347,13 @@ func (s *programStore) sourceFile(f string) bool {
 		return false
 	}
 	s.importFacts.lookedUp(f)
-	return slices.Contains(s.files[parentDir(f)], path.Base(f))
+	names, _ := s.dirNames(parentDir(f))
+	return slices.Contains(names, path.Base(f))
 }
 
 func (s *programStore) generationDisabled(dir string) bool {
 	for ; ; dir = parentDir(dir) {
-		if generated, observed := s.walked[dir]; observed {
+		if generated, observed := s.dirWalked(dir); observed {
 			return !generated
 		}
 		// update_only skips Configure for contained directories without BUILD files.
@@ -483,7 +485,7 @@ func javaScriptTwin(f string) string {
 // programs that reached it, once the walk is done.
 func (s *programStore) reportUnowned() {
 	// A run over one subtree has not listed the packages above it.
-	if s.skipped || !s.walked[""] {
+	if walked, _ := s.dirWalked(""); s.skipped || !walked {
 		return
 	}
 	listedBy := map[string][]string{}
@@ -505,7 +507,7 @@ func (s *programStore) reportUnowned() {
 
 func (s *programStore) whyUnowned(f string) string {
 	dir := parentDir(f)
-	if _, observed := s.files[dir]; !observed {
+	if _, observed := s.dirNames(dir); !observed {
 		return "under " + dir + ", which this run did not walk (excluded or ignored)"
 	}
 	if !s.sourceFile(f) {
@@ -515,7 +517,7 @@ func (s *programStore) whyUnowned(f string) string {
 		return "under " + parentDir(m) + ", a project pnpm installs nothing " +
 			"for: " + foreignReason(m)
 	}
-	if !s.walked[dir] {
+	if walked, _ := s.dirWalked(dir); !walked {
 		return "under " + dir + ", where TypeScript rules are not being generated"
 	}
 	for ; ; dir = parentDir(dir) {

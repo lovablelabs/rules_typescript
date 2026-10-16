@@ -160,7 +160,7 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 				outputs = slices.Sorted(maps.Keys(s.emission.outputs))
 			}
 			for pkg := range s.generatedPackages {
-				if s.walked[pkg] {
+				if walked, _ := s.dirWalked(pkg); walked {
 					generated = append(generated, pkg)
 				}
 			}
