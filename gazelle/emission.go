@@ -80,7 +80,7 @@ func (g *emissionGraph) setRule(key string, r *rule.Rule) {
 	g.storeRule(key, r)
 }
 
-// Resolve edits only resolve attributes, which no proto provider reads.
+// Resolve edits only resolve attributes, which neither protoIndex nor holdingIndex reads.
 func (g *emissionGraph) setResolvedRule(key string, r *rule.Rule) {
 	if g.rules[key] != r {
 		g.rulesGeneration++
