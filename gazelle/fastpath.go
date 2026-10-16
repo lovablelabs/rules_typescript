@@ -1151,7 +1151,7 @@ func unchangedScans(rec *runRecord, lines inputLines, buildNames []string) ([]st
 
 func scannedAs(file string, sum uint64) bool {
 	src, ok := scanFile(file)
-	return ok && scanSum(src) == sum
+	return ok && src.sum == sum
 }
 
 // listingReads is what a listing's entry must have read for the record to

@@ -383,7 +383,7 @@ func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.
 		final = withPackageScopeCompiler(args, tc, final)
 	}
 	reportTakenNames(args, final.Gen)
-	kinds := (&tsLang{}).Kinds()
+	kinds := tsKinds()
 	ownedRules := ownedRuleNames(args.Rel)
 	discard := func(r *rule.Rule) {
 		r.Delete()
@@ -658,7 +658,7 @@ func canonicalRule(c *config.Config, r *rule.Rule) *rule.Rule {
 	if len(c.KindMap) == 0 {
 		return r
 	}
-	kinds := (&tsLang{}).Kinds()
+	kinds := tsKinds()
 	if _, known := kinds[r.Kind()]; known {
 		return r
 	}

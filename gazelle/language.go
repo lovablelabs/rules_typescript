@@ -5,6 +5,7 @@ package typescript
 import (
 	"flag"
 	"fmt"
+	"iter"
 	"log"
 	"maps"
 	"os"
@@ -192,7 +193,7 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	}
 	l.programs.visit(rel, info.RegularFiles)
 	for _, base := range l.programs.bases[rel] {
-		l.observeSources([]string{tsconfigIn(base)})
+		l.observeSources(slices.Values([]string{tsconfigIn(base)}))
 	}
 	if p := l.programs.programs[rel]; p != nil {
 		kept := l.programs.keptProgramSources(c, rel, recordedDirInfo)
@@ -204,18 +205,25 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 }
 
 func (l *tsLang) observeProgram(p *program) {
-	files := slices.Clone(p.Files)
-	for _, candidate := range p.candidates {
-		files = append(files, candidate.path)
-	}
-	l.observeSources(files)
+	l.observeSources(func(yield func(string) bool) {
+		for _, file := range p.Files {
+			if !yield(file) {
+				return
+			}
+		}
+		for _, candidate := range p.candidates {
+			if !yield(candidate.path) {
+				return
+			}
+		}
+	})
 }
 
 // Resolve runs after the native walk releases GetDirInfo's BUILD and exclusion facts.
-func (l *tsLang) observeSources(files []string) {
+func (l *tsLang) observeSources(files iter.Seq[string]) {
 	observed := map[string]bool{}
 	var dirs []string
-	for _, file := range files {
+	for file := range files {
 		dir := parentDir(file)
 		if !firstParty(file) || observed[dir] {
 			continue
@@ -525,7 +533,7 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 			}
 		}
 	}
-	if info := l.Kinds()[r.Kind()]; len(info.NonEmptyAttrs) > 0 && effective.IsEmpty(info) {
+	if info := tsKinds()[r.Kind()]; len(info.NonEmptyAttrs) > 0 && effective.IsEmpty(info) {
 		return
 	}
 	if effective.PrivateAttr("_ts_scope_candidate") == true {
@@ -601,7 +609,7 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 				retainSourceImporters(c, r, from, imps.program, deps)
 				retainTestRoots(c, r, from, sourceRoots)
 				filename := filepath.Join(c.RepoRoot, filepath.FromSlash(from.Pkg), c.DefaultBuildFileName())
-				rule.MergeRules(r, live, l.Kinds()[r.Kind()].ResolveAttrs, filename)
+				rule.MergeRules(r, live, tsKinds()[r.Kind()].ResolveAttrs, filename)
 				if promote != nil {
 					for _, dep := range live.AttrStrings("deps") {
 						promote(emissionLabel(c.RepoName, from.Pkg, dep))

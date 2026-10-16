@@ -50,29 +50,35 @@ type cachedSource struct {
 	ResolutionMode bool
 }
 
-var sourceSpecs sync.Map // absolute path -> incremental.Scanned, or nil when unscannable
+var sourceSpecs sync.Map // absolute path -> scannedSource, or nil when unscannable
 
-func scanFile(abs string) (incremental.Scanned, bool) {
+type scannedSource struct {
+	incremental.Scanned
+	sum uint64
+}
+
+func scanFile(abs string) (scannedSource, bool) {
 	if v, ok := sourceSpecs.Load(abs); ok {
-		src, ok := v.(incremental.Scanned)
+		src, ok := v.(scannedSource)
 		return src, ok
 	}
 	data, err := readSourceInput(abs)
-	var src incremental.Scanned
+	var scanned incremental.Scanned
 	if err == nil {
-		src, err = incremental.Scan(abs, data)
+		scanned, err = incremental.Scan(abs, data)
 	}
 	if err != nil {
 		sourceSpecs.Store(abs, nil)
-		return incremental.Scanned{}, false
+		return scannedSource{}, false
 	}
+	src := scannedSource{scanned, scanSum(scanned)}
 	sourceSpecs.Store(abs, src)
 	return src, true
 }
 
 func scanSpecs(abs string) (cachedSource, bool) {
 	src, ok := scanFile(abs)
-	return cachedSource{Specs: src.Specs, Rest: src.Rest, Sum: scanSum(src), ResolutionMode: src.ResolutionMode}, ok
+	return cachedSource{Specs: src.Specs, Rest: src.Rest, Sum: src.sum, ResolutionMode: src.ResolutionMode}, ok
 }
 
 // scanSum covers every field of a scan, which is all a listing or its patch reads
