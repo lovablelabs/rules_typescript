@@ -66,6 +66,9 @@ func (j *predecodeJob) run(ahead bool) {
 	j.once.Do(func() {
 		j.ahead = ahead
 		j.decoded = decodeListing(j.key)
+		if ahead && j.decoded.entry != nil {
+			internEntry(j.decoded.entry)
+		}
 	})
 }
 
@@ -87,7 +90,22 @@ func decodeListing(key string) decodedListing {
 	}
 }
 
+// internEntry lets an entry decoded ahead drop its own copies of strings other entries hold, as the walk does on a hit.
+func internEntry(entry *cachedListing) {
+	internProgram(&program{Listing: entry.Listing})
+	for i := range entry.Candidates {
+		c := &entry.Candidates[i]
+		c.From, c.Specifier, c.Path = internString(c.From), internString(c.Specifier), internString(c.Path)
+		c.Resolved, c.Skipped = internString(c.Resolved), internString(c.Skipped)
+	}
+}
+
 func isListingKey(name string) bool {
+	family, list, isFilesList := strings.Cut(name, "-")
+	return isDigest(family) && (!isFilesList || isDigest(list))
+}
+
+func isDigest(name string) bool {
 	if len(name) != 2*sha256.Size {
 		return false
 	}
