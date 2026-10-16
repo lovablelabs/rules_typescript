@@ -1623,6 +1623,53 @@ func TestResolveEdges_ConfigImportThroughGeneratedDeclarationRetainsRuntimeOutpu
 	}
 }
 
+func TestResolveEdges_ConfigAugmentationOfAGeneratedOrOverriddenModuleIsNoConfigImport(t *testing.T) {
+	const cfg = "web/vitest.config.mts"
+	const file = "web/generated/value.ts"
+	const spec = "./generated/value"
+	augmentation := explainfiles.Edge{From: cfg, To: file, Specifier: spec, Kind: explainfiles.Augmentation}
+	for _, owner := range []string{"producer", "override"} {
+		for _, test := range []struct {
+			name  string
+			edges []explainfiles.Edge
+		}{
+			{"augmentation", []explainfiles.Edge{augmentation}},
+			{"augmentation then import", []explainfiles.Edge{augmentation, importEdge(cfg, spec, file)}},
+			{"import then augmentation", []explainfiles.Edge{importEdge(cfg, spec, file), augmentation}},
+		} {
+			t.Run(owner+"/"+test.name, func(t *testing.T) {
+				c, tc := edgeRepo(t, edgeListings)
+				tc.programs.visit("web/generated", nil)
+				writeFile(t, filepath.Join(c.RepoRoot, file), "export interface Extra { n: number }\n")
+				dep := "//web:make_value"
+				if owner == "override" {
+					f, err := rule.LoadData("BUILD.bazel", "", []byte("# gazelle:resolve typescript "+file+" //web:override_value\n"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					(&resolve.Configurer{}).Configure(c, "", f)
+					dep = "//web:override_value"
+				}
+				ix := buildIndex(t, c, indexedRule{kind: "ts_codegen", name: "make_value", pkg: "web", outs: []string{"generated/value.ts"}})
+				tc.programs.vitestPrograms = map[string]*program{cfg: {
+					Listing:    explainfiles.Listing{Roots: []string{cfg}, Files: []string{cfg, file}, Edges: test.edges},
+					candidates: []resolutionCandidate{{from: cfg, specifier: spec, path: file, file: true, resolved: file}},
+				}}
+				r, logged := resolveEdgesOf(t, c, ix, "ts_test", "web/test", "test_test", &ruleImports{config: cfg})
+				wantDeps, wantSrcs := []string{dep}, []string{"//web:generated/value.ts", "//web:package.json"}
+				if test.name == "augmentation" {
+					wantDeps, wantSrcs = nil, []string{"//web:package.json"}
+				}
+				wantStrings(t, "config deps", r.AttrStrings("deps"), wantDeps)
+				wantLabels(t, "config_srcs", r.AttrStrings("config_srcs"), wantSrcs)
+				if logged != "" {
+					t.Fatal(logged)
+				}
+			})
+		}
+	}
+}
+
 func TestResolveEdges_GeneratedConfigSelfImport(t *testing.T) {
 	c, tc := edgeRepo(t, edgeListings)
 	const cfg = "web/vitest.config.mts"
