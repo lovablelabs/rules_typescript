@@ -3,6 +3,7 @@ package typescript
 import (
 	"bytes"
 	"log"
+	"maps"
 	"runtime"
 	"slices"
 	"strconv"
@@ -91,8 +92,8 @@ func (l *tsLang) finishBeforeWriting(ix *resolve.RuleIndex) {
 
 // mergeKinds follows map_kind chains to the end, as Gazelle's merge does.
 func (l *tsLang) mergeKinds(c *config.Config) map[string]rule.KindInfo {
-	kinds := l.Kinds()
-	for from, info := range l.Kinds() {
+	kinds := maps.Clone(tsKinds())
+	for from, info := range tsKinds() {
 		seen := map[string]bool{from: true}
 		for mapped, ok := c.KindMap[from]; ok && !seen[mapped.KindName]; mapped, ok = c.KindMap[mapped.KindName] {
 			seen[mapped.KindName] = true

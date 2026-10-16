@@ -56,7 +56,14 @@ func Scan(name string, src []byte) (Scanned, error) {
 	sort.Strings(specs)
 	sort.Strings(others)
 	mode := s.escapedMode || strings.Contains(s.src, "resolution-mode")
-	return Scanned{Specs: specs, Rest: restDigest(s.sawJSX, s.module, others), Resolutions: s.counts, Counted: !s.uncounted, Exact: !s.inexact && !mode, ResolutionMode: mode}, nil
+	var resolutions map[string]int
+	if s.counts != nil {
+		resolutions = make(map[string]int, len(s.counts))
+		for text, n := range s.counts {
+			resolutions[strings.Clone(text)] = n
+		}
+	}
+	return Scanned{Specs: specs, Rest: restDigest(s.sawJSX, s.module, others), Resolutions: resolutions, Counted: !s.uncounted, Exact: !s.inexact && !mode, ResolutionMode: mode}, nil
 }
 
 // Specifiers are the module specifiers tsgo resolves in a source, as sorted

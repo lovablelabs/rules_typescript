@@ -20,7 +20,7 @@ import (
 // Read off Kinds(): a second list of what Gazelle recomputes would go stale
 // when a kind gains an attribute.
 func managedAttrs(kind string) (mergeable, resolved []string) {
-	info, ok := (&tsLang{}).Kinds()[kind]
+	info, ok := tsKinds()[kind]
 	if !ok {
 		return nil, nil
 	}
