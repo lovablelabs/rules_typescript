@@ -40,7 +40,7 @@ func refuse(reason string) *program {
 	return nil
 }
 
-const patchStateVersion = 5
+const patchStateVersion = 6
 
 type cachedSource struct {
 	Specs []string

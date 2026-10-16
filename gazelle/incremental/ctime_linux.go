@@ -1,4 +1,4 @@
-package typescript
+package incremental
 
 import (
 	"io/fs"
@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func changeTime(info fs.FileInfo) time.Time {
+func ChangeTime(info fs.FileInfo) time.Time {
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
 		return time.Unix(st.Ctim.Unix())
 	}

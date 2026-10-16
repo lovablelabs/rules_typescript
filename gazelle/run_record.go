@@ -540,7 +540,7 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 		}
 		if info.Mode()&fs.ModeSymlink != 0 {
 			target, _ := os.Readlink(file)
-			fmt.Fprintf(&b, "l %s -> %s %s: ", name, target, statLine(info))
+			fmt.Fprintf(&b, "l %s -> %s %s: ", name, target, incremental.StatLine(info))
 			stamp = later(stamp, changed(info))
 			if info, err = os.Stat(file); err != nil {
 				b.WriteString("dangling\n")
@@ -558,7 +558,7 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 			}
 			b.WriteString(buildEntry(name, info.Mode(), data) + "\n")
 		default:
-			fmt.Fprintf(&b, "f %s %s\n", name, statLine(info))
+			fmt.Fprintf(&b, "f %s %s\n", name, incremental.StatLine(info))
 		}
 		stamp = later(stamp, changed(info))
 	}
@@ -575,30 +575,22 @@ func fileLine(file string) (string, time.Time) {
 	case info.IsDir():
 		return "dir", time.Time{}
 	case info.Mode()&fs.ModeSymlink == 0:
-		return statLine(info), changed(info)
+		return incremental.StatLine(info), changed(info)
 	}
 	target, _ := os.Readlink(file)
-	line := statLine(info) + " -> " + target
+	line := incremental.StatLine(info) + " -> " + target
 	switch to, err := os.Stat(file); {
 	case err != nil:
 		return line + " dangling", changed(info)
 	case to.IsDir():
 		return line + " dir", changed(info)
 	default:
-		return line + " " + statLine(to), later(changed(info), changed(to))
+		return line + " " + incremental.StatLine(to), later(changed(info), changed(to))
 	}
-}
-
-func statLine(info fs.FileInfo) string {
-	var ino uint64
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		ino = uint64(st.Ino)
-	}
-	return fmt.Sprintf("%o %d %d %d %d", info.Mode(), info.Size(), info.ModTime().UnixNano(), changeTime(info).UnixNano(), ino)
 }
 
 // changed is the later of a file's mtime and ctime.
-func changed(info fs.FileInfo) time.Time { return later(info.ModTime(), changeTime(info)) }
+func changed(info fs.FileInfo) time.Time { return later(info.ModTime(), incremental.ChangeTime(info)) }
 
 func later(a, b time.Time) time.Time {
 	if b.After(a) {
