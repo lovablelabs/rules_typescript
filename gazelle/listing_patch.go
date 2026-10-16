@@ -624,6 +624,10 @@ func tryPatchListing(entry *cachedListing, subject string, filesList []string) (
 	if p == nil {
 		return nil, t.refusal
 	}
+	// tsgo refuses a program with no file unless its only diagnostic is TS18003.
+	if len(p.Files) == 0 {
+		return nil, "the patch leaves the program no file"
+	}
 	listingPatched.Add(1)
 	return p, ""
 }
@@ -1771,7 +1775,7 @@ func (t *patcher) underDirs(rel string) bool {
 }
 
 func programFromEntry(entry *cachedListing, subject string) *program {
-	p := &program{Listing: entry.Listing, config: subject, resolution: entry.Resolution}
+	p := &program{Listing: entry.Listing, config: subject, resolution: entry.Resolution, refused: entry.Refused}
 	p.Files = slices.Clone(p.Files)
 	p.Roots = slices.Clone(p.Roots)
 	p.Edges = slices.Clone(p.Edges)

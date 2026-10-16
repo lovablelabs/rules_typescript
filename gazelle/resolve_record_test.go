@@ -326,7 +326,7 @@ func TestResolveRecord_StateDigestClassifiesEveryField(t *testing.T) {
 		{reflect.TypeFor[ruleImports](), []string{"program", "candidates", "sources", "edges", "config", "deps", "srcDrops"}, nil},
 		{reflect.TypeFor[srcDrops](), []string{"args", "have", "dropped"}, nil},
 		{reflect.TypeFor[resolutionCandidate](), []string{"from", "specifier", "path", "file", "metadata", "kind", "block", "resolved", "skipped"}, nil},
-		{reflect.TypeFor[cachedListing](), []string{"Listing", "Candidates", "Resolution"},
+		{reflect.TypeFor[cachedListing](), []string{"Listing", "Candidates", "Resolution", "Refused"},
 			[]string{"Reads", "Configs", "PackageExtends", "Dirs", "Fingerprint", "Root", "ReadLines", "DirDigests", "Sources", "PatchVersion", "Config", "Unmatched", "FilesList", "StaleDiagnostics"}},
 		{reflect.TypeFor[cachedCandidate](), []string{"From", "Specifier", "Path", "File", "Metadata", "Kind", "Block", "Resolved", "Skipped"}, nil},
 		{reflect.TypeFor[explainfiles.Listing](), []string{"Files", "Roots", "Edges", "Types", "Implicit", "Diagnostics", "Unresolved", "Resolutions", "Candidates", "PackageTargets"}, nil},

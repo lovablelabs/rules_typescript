@@ -91,6 +91,7 @@ type cachedListing struct {
 	FilesList []string
 	// StaleDiagnostics says a patch took a JSON content edit, which may move tsgo's diagnostics.
 	StaleDiagnostics bool
+	Refused          string
 }
 
 type cachedCandidate struct {
@@ -111,7 +112,7 @@ type listingID struct {
 
 func listingKey(repoRoot, tsgo, subject string, args []string) listingID {
 	h := sha256.New()
-	fmt.Fprintf(h, "v1\n%s\n%s\n", repoRoot, subject)
+	fmt.Fprintf(h, "v2\n%s\n%s\n", repoRoot, subject)
 	if info, err := os.Stat(tsgo); err == nil {
 		fmt.Fprintf(h, "tsgo %s %d %d\n", tsgo, info.Size(), info.ModTime().UnixNano())
 	}
@@ -297,6 +298,7 @@ func (entry *cachedListing) take(p *program) {
 		entry.Candidates = append(entry.Candidates, c.cached())
 	}
 	entry.Resolution = p.resolution
+	entry.Refused = p.refused
 }
 
 // loadListing is the cached listing for id, and whether it was patched.
@@ -527,7 +529,7 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 		joined.Store(rel, joinedPath)
 		return joinedPath
 	}
-	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution, FilesList: id.files,
+	entry := cachedListing{Listing: p.Listing, Resolution: p.resolution, FilesList: id.files, Refused: p.refused,
 		Reads: make([]string, 0, len(p.Files)+3*len(p.candidates)+1), Candidates: make([]cachedCandidate, 0, len(p.candidates))}
 	for _, file := range p.Files {
 		if !strings.HasPrefix(file, embeddedLibs) {
@@ -570,6 +572,16 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 			return
 		}
 		project, projectDir = resolved, filepath.Dir(cfg)
+	}
+	// A files entry tsgo did not find is no listed file, yet writing it changes the listing.
+	if project != nil && project.Files != nil {
+		for _, file := range *project.Files {
+			file = filepath.FromSlash(strings.ReplaceAll(file, "${configDir}", projectDir))
+			if !filepath.IsAbs(file) {
+				file = filepath.Join(project.FilesDir, file)
+			}
+			entry.Reads = append(entry.Reads, abs(file))
+		}
 	}
 	slices.Sort(entry.Reads)
 	entry.Reads = slices.Compact(entry.Reads)
