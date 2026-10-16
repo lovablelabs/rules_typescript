@@ -81,6 +81,9 @@ func TestScanMovesOrRefusesWhereTsgoReadsImportsOtherwise(t *testing.T) {
 		{"a property named export left after the last export", "declare const o: { export: number };\no.export = 1;\nexport {};\n", "declare const o: { export: number };\no.export = 1;\n", ""},
 		{"a division after a non-null assertion", "declare const x: number;\nconst z = x! / 2; const w = 4 / 2;\nexport {};\n", "declare const x: number;\nconst z = x! / 2; import \"dep\"; const w = 4 / 2;\nexport {};\n", ""},
 		{"a resolution-mode attribute", "import type { D } from './d';\n", "import type { D } from './d' with { 'resolution-mode': 'require' };\n", ""},
+		{"an import beside a resolution-mode attribute made type-only", "import { D } from './d' with { 'resolution-mode': 'require' };\n", "import type { D } from './d' with { 'resolution-mode': 'require' };\n", ""},
+		{"a resolution-mode attribute split by a line continuation changed", "import type { D } from './d' with { 'resolution\\\n-mode': 'import' };\n", "import type { D } from './d' with { 'resolution\\\n-mode': 'require' };\n", ""},
+		{"an escaped resolution-mode attribute changed", "import type { D } from './d' with { 'resolution\\u002dmode': 'import' };\n", "import type { D } from './d' with { 'resolution\\u002dmode': 'require' };\n", ""},
 	} {
 		file := cmp.Or(tc.file, "a.ts")
 		before, err := Scan(file, []byte(tc.before))

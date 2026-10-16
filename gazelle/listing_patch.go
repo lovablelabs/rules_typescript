@@ -40,13 +40,14 @@ func refuse(reason string) *program {
 	return nil
 }
 
-const patchStateVersion = 4
+const patchStateVersion = 5
 
 type cachedSource struct {
 	Specs []string
 	Rest  string
 	// Sum is scanSum of the whole scan; 0 in an entry recorded before it existed.
-	Sum uint64
+	Sum            uint64
+	ResolutionMode bool
 }
 
 var sourceSpecs sync.Map // absolute path -> incremental.Scanned, or nil when unscannable
@@ -71,7 +72,7 @@ func scanFile(abs string) (incremental.Scanned, bool) {
 
 func scanSpecs(abs string) (cachedSource, bool) {
 	src, ok := scanFile(abs)
-	return cachedSource{Specs: src.Specs, Rest: src.Rest, Sum: scanSum(src)}, ok
+	return cachedSource{Specs: src.Specs, Rest: src.Rest, Sum: scanSum(src), ResolutionMode: src.ResolutionMode}, ok
 }
 
 // scanSum covers every field of a scan, which is all a listing or its patch reads
@@ -668,6 +669,10 @@ func (t *patcher) patch(subject string) *program {
 				t.fail("a changed source changed more than its imports")
 				return nil
 			}
+			if src.ResolutionMode || old.ResolutionMode {
+				t.fail("a changed source names a resolution-mode")
+				return nil
+			}
 			if !t.resolvedOnce(rel, old, src) {
 				return nil
 			}
@@ -945,6 +950,9 @@ func (t *patcher) resolveEntered(f string) bool {
 		return src.Rest == incremental.PlainRest(c[0], c[1])
 	}) {
 		return t.fail("a file entering the program has references, augmentations or pragmas")
+	}
+	if src.ResolutionMode {
+		return t.fail("a file entering the program names a resolution-mode")
 	}
 	switch counts, counted := t.resolutions(f); {
 	case !counted:
@@ -1451,7 +1459,7 @@ func (t *patcher) reuseBare(from, text string, implicit bool, aliasRefusal strin
 	}
 	want := t.bareScope(from)
 	for _, owner := range t.specOwners[text] {
-		if owner == from || !t.files[owner] || slices.Contains(t.entering, owner) || t.mode(owner, text, implicit) != mode ||
+		if owner == from || !t.files[owner] || slices.Contains(t.entering, owner) || t.sources[owner].ResolutionMode || t.mode(owner, text, implicit) != mode ||
 			mode == "implicit" && len(t.blocksOf[importKey{owner, text}]) == 0 || t.bareScope(owner) != want {
 			continue
 		}

@@ -135,6 +135,9 @@ func patchFixture() map[string]string {
 		"app/node_modules/react/package.json":     `{"name":"react","version":"1.0.0","types":"index.d.ts","exports":{".":{"types":"./index.d.ts"},"./jsx-runtime":{"types":"./jsx-runtime.d.ts"}}}`,
 		"app/node_modules/react/index.d.ts":       "export declare const useState: number;\n",
 		"app/node_modules/react/jsx-runtime.d.ts": "export declare const jsx: any;\nexport declare namespace JSX { interface IntrinsicElements { [k: string]: any } }\n",
+		"app/node_modules/dual/package.json":      `{"name":"dual","version":"1.0.0","exports":{".":{"import":{"types":"./esm.d.ts"},"require":{"types":"./cjs.d.ts"}}}}`,
+		"app/node_modules/dual/esm.d.ts":          "export declare const X: number;\n",
+		"app/node_modules/dual/cjs.d.ts":          "export declare const X: number;\n",
 		"app/src/a.ts":                            "import { b } from './b';\nexport const a = b;\n",
 		"app/src/b.ts":                            "export const b = 1;\n",
 		"app/src/c.ts":                            "import { d } from './lib/d.js';\nexport const c = d;\n",
@@ -271,6 +274,52 @@ func TestListingCache_PatchRefusesWhatItDoesNotModel(t *testing.T) {
 		}, edit: map[string]string{
 			"app/src/m.ts": "declare module './b' {\n  export const extra: number;\n}\nexport as namespace M;\n",
 		}},
+		{name: "a resolution-mode import attribute changed", start: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution-mode': 'import' };\nexport type T = typeof X;\n",
+		}, edit: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution-mode': 'require' };\nexport type T = typeof X;\n",
+		}},
+		{name: "an escaped resolution-mode import attribute changed", start: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution\\x2dmode': 'import' };\nexport type T = typeof X;\n",
+		}, edit: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution\\x2dmode': 'require' };\nexport type T = typeof X;\n",
+		}},
+		{name: "a resolution-mode import attribute added", start: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual';\nexport type T = typeof X;\n",
+		}, edit: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution-mode': 'require' };\nexport type T = typeof X;\n",
+		}},
+		{name: "a resolution-mode import attribute removed", start: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution-mode': 'require' };\nexport type T = typeof X;\n",
+		}, edit: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual';\nexport type T = typeof X;\n",
+		}},
+		{name: "an import beside a resolution-mode attribute made type-only", start: map[string]string{
+			"app/src/t.ts": "import { X } from 'dual' with { 'resolution-mode': 'require' };\nexport const T = X;\n",
+		}, edit: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution-mode': 'require' };\nexport type T = typeof X;\n",
+		}},
+		{name: "an added file importing a package another file imports with a resolution-mode", start: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual' with { 'resolution-mode': 'require' };\nexport type T = typeof X;\n",
+		}, edit: map[string]string{
+			"app/src/u.ts": "import type { X } from 'dual';\nexport type U = typeof X;\n",
+		}},
+		{name: "an added file importing a package with a resolution-mode", start: map[string]string{
+			"app/src/t.ts": "import type { X } from 'dual';\nexport type T = typeof X;\n",
+		}, edit: map[string]string{
+			"app/src/u.ts": "import type { X } from 'dual' with { 'resolution-mode': 'require' };\nexport type U = typeof X;\n",
+		}},
+		{name: "an import added beside a JavaScript file importing the package with an escaped resolution-mode", start: map[string]string{
+			"app/tsconfig.json": strings.Replace(patchFixtureConfig, `"types":[]`, `"types":[],"allowJs":true,"checkJs":true`, 1),
+			"app/src/t.js":      "/** @import { X } from 'dual' with { 'resolution\\u002dmode': 'require' } */\nexport const t = 1;\n",
+		}, edit: map[string]string{
+			"app/src/a.ts": "import { b } from './b';\nimport type { X } from 'dual';\nexport const a = b;\nexport type A = typeof X;\n",
+		}},
+		{name: "an added file importing a package an import type resolves with a resolution-mode", start: map[string]string{
+			"app/src/t.ts": "export type T = import('dual', { with: { 'resolution-mode': 'require' } }).X;\n",
+		}, edit: map[string]string{
+			"app/src/u.ts": "import type { X } from 'dual';\nexport type U = typeof X;\n",
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := patchFixture()
@@ -279,11 +328,11 @@ func TestListingCache_PatchRefusesWhatItDoesNotModel(t *testing.T) {
 			l.list("app/tsconfig.json")
 			writeWorkspace(t, l.root, tc.edit)
 			got := l.list("app/tsconfig.json")
-			if l.runs != 2 {
-				t.Fatalf("the edit was patched instead of listed again (%d runs)", l.runs)
-			}
 			if diff := listingDifference(got, l.fresh("app/tsconfig.json")); diff != "" {
-				t.Errorf("the relisted program differs from tsgo's:\n%s", diff)
+				t.Errorf("the listing differs from tsgo's:\n%s", diff)
+			}
+			if l.runs != 2 {
+				t.Errorf("the edit was patched instead of listed again (%d runs)", l.runs)
 			}
 		})
 	}

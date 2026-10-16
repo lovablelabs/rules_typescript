@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -23,13 +24,15 @@ var jsdocImport = regexp.MustCompile(`(?:import\(\s*|@import\b[^'"]*?from\s*)(['
 // Resolutions, how many times tsgo resolves each specifier text; Counted is false
 // when the scanner cannot settle one of those counts. Exact is false where the
 // scanner may read imports otherwise than tsgo, which only a scan replay, trusting
-// an unchanged scan with no listing to check, must refuse.
+// an unchanged scan with no listing to check, must refuse. ResolutionMode is whether
+// the source names a resolution-mode, whose effect on resolution the scan does not model.
 type Scanned struct {
-	Specs       []string
-	Rest        string
-	Resolutions map[string]int
-	Counted     bool
-	Exact       bool
+	Specs          []string
+	Rest           string
+	Resolutions    map[string]int
+	Counted        bool
+	Exact          bool
+	ResolutionMode bool
 }
 
 // Scan reads a source once for Specifiers and Resolutions. tsgo resolves a dynamic
@@ -52,7 +55,8 @@ func Scan(name string, src []byte) (Scanned, error) {
 	}
 	sort.Strings(specs)
 	sort.Strings(others)
-	return Scanned{Specs: specs, Rest: restDigest(s.sawJSX, s.module, others), Resolutions: s.counts, Counted: !s.uncounted, Exact: !s.inexact}, nil
+	mode := s.escapedMode || strings.Contains(s.src, "resolution-mode")
+	return Scanned{Specs: specs, Rest: restDigest(s.sawJSX, s.module, others), Resolutions: s.counts, Counted: !s.uncounted, Exact: !s.inexact && !mode, ResolutionMode: mode}, nil
 }
 
 // Specifiers are the module specifiers tsgo resolves in a source, as sorted
@@ -131,6 +135,8 @@ type scanner struct {
 	uncounted bool
 	// inexact: tsgo may read an import here otherwise than the scan.
 	inexact bool
+	// escapedMode: a string with escapes spells resolution-mode once decoded.
+	escapedMode bool
 	// ambientBody is the depth inside a module declaration's braces, whose imports tsgo resolves; 0 outside one.
 	ambientBody int
 	// heads are the open parentheses, each true when it opens a control-flow head.
@@ -238,11 +244,6 @@ func (s *scanner) recognize() {
 	if t.kind == 't' && call() {
 		// tsgo resolves a template without substitutions, which no fact records.
 		s.uncounted = true
-	}
-	if l := s.last(3); t.kind == 'i' && (t.text == "with" || t.text == "assert") && l != nil && l[1].kind == 's' && (l[0].text == "from" || l[0].text == "import") {
-		// A resolution-mode attribute changes how tsgo resolves the specifier.
-		attributes, _, _ := strings.Cut(s.src[s.pos:], "}")
-		s.inexact = s.inexact || strings.Contains(attributes, "resolution-mode")
 	}
 	if t.kind != 's' {
 		return
@@ -405,6 +406,7 @@ func (s *scanner) scanJS(stop int) error {
 			if !s.specifierNext() && !word.MatchString(text) {
 				s.skipped(text)
 			}
+			s.noteEscapedMode(text)
 			s.emit(token{kind: 's', text: text})
 		case c == '`':
 			s.pos++
@@ -629,10 +631,39 @@ func (s *scanner) skipped(text string) {
 	}
 }
 
+func (s *scanner) noteEscapedMode(text string) {
+	s.escapedMode = s.escapedMode || strings.Contains(text, "\\") && strings.Contains(unescape(text), "resolution-mode")
+}
+
+// A string literal's escape sequence: code point, hex, legacy octal, line continuation, or any other character.
+var escape = regexp.MustCompile(`\\(?:u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([0-3][0-7]{0,2}|[4-7][0-7]?)|\r\n|[\r\n\x{2028}\x{2029}]|(.))`)
+
+// unescape decodes a string literal's escapes as tsgo does, but for a control
+// character's letter escape, which stays its letter.
+func unescape(text string) string {
+	return escape.ReplaceAllStringFunc(text, func(seq string) string {
+		m := escape.FindStringSubmatch(seq)
+		hex, octal := m[1]+m[2]+m[3], m[4]
+		switch {
+		case hex != "":
+			r, _ := strconv.ParseUint(hex, 16, 32)
+			return string(rune(r))
+		case octal != "":
+			r, _ := strconv.ParseUint(octal, 8, 32)
+			return string(rune(r))
+		}
+		return m[5]
+	})
+}
+
 func (s *scanner) at(lit string) bool { return strings.HasPrefix(s.src[s.pos:], lit) }
 
 func (s *scanner) comment(text string) {
 	s.skipped(text)
+	if s.js {
+		// JavaScript's JSDoc import types and @import tags take attributes too.
+		s.noteEscapedMode(text)
+	}
 	if s.js && mentionsImport(text) {
 		// JavaScript's JSDoc is parsed, and an import type in it is resolved.
 		s.uncounted = true
