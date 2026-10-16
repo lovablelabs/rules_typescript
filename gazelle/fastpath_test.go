@@ -172,6 +172,31 @@ func TestFastPath_DeclinedEditsRunTheFullPass(t *testing.T) {
 	}
 }
 
+func TestFastPath_SameSizeRestoredMtimeImportChangeMatchesTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	tree := fastPathTree()
+	tree["lid/tsconfig.json"] = tree["lib/tsconfig.json"]
+	tree["lid/x.ts"] = tree["lib/x.ts"]
+	root := writeTree(t, tree)
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	a := filepath.Join(root, "app/a.ts")
+	info, err := os.Stat(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, a, strings.Replace(tree["app/a.ts"], "../lib/x", "../lid/x", 1))
+	if err := os.Chtimes(a, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(pastRacyWindow)
+	same := requireAsCacheless(t, root, "an in-place import edit with its mtime restored")
+	if out, err := tsGazelle(t, root, "-ts_listing_cache="+cache); err != nil {
+		t.Fatalf("gazelle: %v\n%s", err, out)
+	}
+	same()
+}
+
 func editFile(rel, body string) func(t *testing.T, root string) {
 	return func(t *testing.T, root string) { writeFile(t, filepath.Join(root, rel), body) }
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Options names what a run reads: Root walked, Skip pruned by relative path,
@@ -95,7 +96,7 @@ func walkEntries(o Options, rel string, sem chan struct{}, add func(k, v string)
 				add(childRel, "gone")
 				continue
 			}
-			line := statLine(filepath.Join(dir, entry.Name()), info)
+			line := readLine(filepath.Join(dir, entry.Name()), info)
 			if o.ByContent != nil && info.Mode().IsRegular() && o.ByContent(childRel) {
 				if data, err := os.ReadFile(filepath.Join(dir, entry.Name())); err == nil {
 					line = fmt.Sprintf("%o %x", info.Mode(), sha256.Sum256(data))
@@ -128,21 +129,37 @@ func entryLine(path string) string {
 	if err != nil {
 		return "absent"
 	}
-	return statLine(path, info)
+	return readLine(path, info)
 }
 
-func statLine(path string, info fs.FileInfo) string {
-	var ino uint64
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		ino = uint64(st.Ino)
+func readLine(path string, info fs.FileInfo) string {
+	changed := ChangeTime(info)
+	// pnpm hard-links package files to its store, so another checkout's install moves their ctime.
+	if strings.Contains(filepath.ToSlash(path), "/node_modules/") {
+		changed = time.Time{}
 	}
-	mtime := info.ModTime().UnixNano()
-	line := fmt.Sprintf("%o %d %d %d", info.Mode(), info.Size(), mtime, ino)
+	line := fingerprint(info, changed)
 	if info.Mode()&fs.ModeSymlink != 0 {
 		target, _ := os.Readlink(path)
 		line += " -> " + target
 	}
 	return line
+}
+
+// StatLine is info's mode, size, mtime, ctime and inode. An in-place rewrite
+// that restores the mtime still moves the ctime, though neither proves content.
+func StatLine(info fs.FileInfo) string { return fingerprint(info, ChangeTime(info)) }
+
+func fingerprint(info fs.FileInfo, changed time.Time) string {
+	var ino uint64
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		ino = uint64(st.Ino)
+	}
+	var ctime int64
+	if !changed.IsZero() {
+		ctime = changed.UnixNano()
+	}
+	return fmt.Sprintf("%o %d %d %d %d", info.Mode(), info.Size(), info.ModTime().UnixNano(), ctime, ino)
 }
 
 // Load returns the digest a previous run saved at path, or "" when there is none.

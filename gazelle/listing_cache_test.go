@@ -75,6 +75,40 @@ func TestListingCache_ReusesUntilAnInputItReadChanges(t *testing.T) {
 	}
 }
 
+func TestListingCache_SameSizeRestoredMtimeImportChangeIsNotServedStale(t *testing.T) {
+	l := newListingRuns(t, patchFixture())
+	l.list("app/tsconfig.json")
+	a := filepath.Join(l.root, "app/src/a.ts")
+	info, err := os.Stat(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a, []byte("import { b } from './c';\nexport const a = b;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(a, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	listed := l.list("app/tsconfig.json")
+	if !slices.ContainsFunc(listed.Edges, func(e explainfiles.Edge) bool { return e.From == "app/src/a.ts" && e.To == "app/src/c.ts" }) {
+		t.Fatalf("an in-place edit with its mtime restored kept the old import: %v", listed.Edges)
+	}
+	if diff := listingDifference(listed, l.fresh("app/tsconfig.json")); diff != "" {
+		t.Errorf("the listing differs from tsgo's:\n%s", diff)
+	}
+}
+
+func TestListingCache_AHardLinkToAPackageFileKeepsTheListing(t *testing.T) {
+	l := newListingRuns(t, patchFixture())
+	l.list("app/tsconfig.json")
+	if err := os.Link(filepath.Join(l.root, "app/node_modules/react/index.d.ts"), filepath.Join(t.TempDir(), "index.d.ts")); err != nil {
+		t.Fatal(err)
+	}
+	if l.list("app/tsconfig.json"); l.runs != 1 {
+		t.Errorf("another link to a package file listed the program again (%d runs): %v", l.runs, lastPatchRefusal.Load())
+	}
+}
+
 // listingRuns lists one program through the cache with fresh per-run state,
 // and counts how often tsgo ran.
 type listingRuns struct {

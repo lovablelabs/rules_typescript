@@ -14,9 +14,6 @@ go_library(
     name = "typescript",
     srcs = [
         "config.go",
-        "ctime_darwin.go",
-        "ctime_linux.go",
-        "ctime_other.go",
         "emission.go",
         "fastpath.go",
         "fastpath_build.go",
