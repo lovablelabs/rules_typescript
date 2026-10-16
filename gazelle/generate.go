@@ -963,6 +963,27 @@ type edgeIndex struct {
 	byFrom map[string][]explainfiles.Edge
 }
 
+// Positions in candidates by importer; shared by every reader and never written.
+func (p *program) candidatesBySource() map[string][]int32 {
+	if p == nil {
+		return nil
+	}
+	if ix := p.byImporter; ix != nil && len(ix.candidates) == len(p.candidates) && (len(p.candidates) == 0 || &ix.candidates[0] == &p.candidates[0]) {
+		return ix.byFrom
+	}
+	byFrom := map[string][]int32{}
+	for i, candidate := range p.candidates {
+		byFrom[candidate.from] = append(byFrom[candidate.from], int32(i))
+	}
+	p.byImporter = &candidateIndex{candidates: p.candidates, byFrom: byFrom}
+	return byFrom
+}
+
+type candidateIndex struct {
+	candidates []resolutionCandidate
+	byFrom     map[string][]int32
+}
+
 type dirIndex struct {
 	files []string
 	dirs  []candidateDir
@@ -1020,7 +1041,14 @@ func sourceEdges(byFrom map[string][]explainfiles.Edge, files ...[]string) []exp
 			from[f] = true
 		}
 	}
-	var out []explainfiles.Edge
+	n := 0
+	for f := range from {
+		n += len(byFrom[f])
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]explainfiles.Edge, 0, n)
 	for _, f := range slices.Sorted(maps.Keys(from)) {
 		out = append(out, byFrom[f]...)
 	}
@@ -1451,17 +1479,24 @@ func (p *program) ownedCandidates(files ...[]string) []resolutionCandidate {
 	if p == nil {
 		return nil
 	}
+	byFrom := p.candidatesBySource()
 	from := map[string]bool{}
+	var owned []int32
 	for _, list := range files {
 		for _, file := range list {
-			from[file] = true
+			if !from[file] {
+				from[file] = true
+				owned = append(owned, byFrom[file]...)
+			}
 		}
 	}
-	var out []resolutionCandidate
-	for _, candidate := range p.candidates {
-		if from[candidate.from] {
-			out = append(out, candidate)
-		}
+	if len(owned) == 0 {
+		return nil
+	}
+	slices.Sort(owned)
+	out := make([]resolutionCandidate, len(owned))
+	for i, at := range owned {
+		out[i] = p.candidates[at]
 	}
 	return out
 }

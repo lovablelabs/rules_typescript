@@ -64,10 +64,9 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 		edge.To = file
 		selected[key(candidate)] = selection{edge: edge, probe: probe}
 	}
-	candidatesByFrom := map[string][]int32{}
+	candidatesByFrom := p.candidatesBySource()
 	treeBoundaries := map[resolutionKey]string{}
-	for i, candidate := range p.candidates {
-		candidatesByFrom[candidate.from] = append(candidatesByFrom[candidate.from], int32(i))
+	for _, candidate := range p.candidates {
 		if treeBoundaries[key(candidate)] == "" {
 			if _, tree := codegenTreeOwner(s, s.index, candidate.path); tree {
 				treeBoundaries[key(candidate)] = candidate.path
@@ -130,12 +129,8 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 		})
 	}
 	p.Types, p.Implicit = filterTypes(p.Types), filterTypes(p.Implicit)
-	byFrom := map[string][]explainfiles.Edge{}
-	for _, edge := range p.Edges {
-		if !replaced(edge) {
-			byFrom[edge.From] = append(byFrom[edge.From], edge)
-		}
-	}
+	listed := p.edgesBySource()
+	chosenByFrom := map[string][]explainfiles.Edge{}
 	for _, k := range slices.SortedFunc(maps.Keys(selected), func(a, b resolutionKey) int {
 		if n := strings.Compare(a.from, b.from); n != 0 {
 			return n
@@ -145,14 +140,15 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 		}
 		return a.block - b.block
 	}) {
-		byFrom[k.from] = append(byFrom[k.from], selected[k].edge)
+		chosenByFrom[k.from] = append(chosenByFrom[k.from], selected[k].edge)
 	}
 	queue := slices.Clone(p.Roots)
-	for _, edge := range byFrom[p.config] {
-		if edge.Kind == explainfiles.TypeReference {
-			queue = append(queue, p.config)
-			break
-		}
+	if slices.ContainsFunc(listed[p.config], func(edge explainfiles.Edge) bool {
+		return edge.Kind == explainfiles.TypeReference && !replaced(edge)
+	}) || slices.ContainsFunc(chosenByFrom[p.config], func(edge explainfiles.Edge) bool {
+		return edge.Kind == explainfiles.TypeReference
+	}) {
+		queue = append(queue, p.config)
 	}
 	if len(retained) > 0 {
 		kept := map[string]bool{}
@@ -171,7 +167,9 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 		}
 	}
 	reached := map[string]bool{}
-	var edges []explainfiles.Edge
+	var order []string
+	var keptEdges []bool
+	total := 0
 	for len(queue) > 0 {
 		file := queue[0]
 		queue = queue[1:]
@@ -179,9 +177,36 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 			continue
 		}
 		reached[file] = true
-		edges = append(edges, byFrom[file]...)
-		for _, edge := range byFrom[file] {
+		order = append(order, file)
+		for _, edge := range listed[file] {
+			keep := !replaced(edge)
+			keptEdges = append(keptEdges, keep)
+			if keep {
+				total++
+				queue = append(queue, edge.To)
+			}
+		}
+		for _, edge := range chosenByFrom[file] {
+			total++
 			queue = append(queue, edge.To)
+		}
+	}
+	var edges []explainfiles.Edge
+	if total > 0 {
+		edges = make([]explainfiles.Edge, 0, total)
+	}
+	byFrom := make(map[string][]explainfiles.Edge, len(order))
+	for _, file := range order {
+		start := len(edges)
+		for _, edge := range listed[file] {
+			if keptEdges[0] {
+				edges = append(edges, edge)
+			}
+			keptEdges = keptEdges[1:]
+		}
+		edges = append(edges, chosenByFrom[file]...)
+		if len(edges) > start {
+			byFrom[file] = edges[start:len(edges):len(edges)]
 		}
 	}
 	if s.importFacts != nil {
@@ -193,10 +218,11 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 	}
 	p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(file string) bool { return !reached[file] })
 	p.Edges = edges
+	p.bySource = &edgeIndex{edges: edges, byFrom: byFrom}
 	p.moduleEdges = nil
 	var block resolutionKey
 	selectedProbePassed := false
-	p.candidates = slices.DeleteFunc(slices.Clone(p.candidates), func(candidate resolutionCandidate) bool {
+	dropped := func(candidate resolutionCandidate) bool {
 		if key(candidate) != block {
 			block, selectedProbePassed = key(candidate), false
 		}
@@ -213,7 +239,25 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 			return true
 		}
 		return !candidate.metadata && (candidate.skipped == "" || selected[key(candidate)].edge.To != "")
-	})
+	}
+	drop := make([]bool, len(p.candidates))
+	n := 0
+	for i, candidate := range p.candidates {
+		if drop[i] = dropped(candidate); !drop[i] {
+			n++
+		}
+	}
+	var candidates []resolutionCandidate
+	if p.candidates != nil {
+		candidates = make([]resolutionCandidate, 0, n)
+	}
+	for i, candidate := range p.candidates {
+		if !drop[i] {
+			candidates = append(candidates, candidate)
+		}
+	}
+	p.candidates = candidates
+	p.byImporter = nil
 }
 
 func (s *programStore) selectInput(dir string) {
