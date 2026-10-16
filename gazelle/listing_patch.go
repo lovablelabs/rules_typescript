@@ -1827,19 +1827,30 @@ func unreached(p *program, files map[string]bool) []string {
 }
 
 // listingDifference is how two listings of one program differ, ignoring the
-// order of files and edges and the numbering of resolutions; "" when they do not.
+// order of files and edges, the numbering of resolutions and resolution facts
+// got keeps that want lacks; "" when they do not.
 func listingDifference(got, want *program) string {
 	canon := func(p *program) map[string][]string {
 		out := map[string][]string{
 			"files": slices.Clone(p.Files), "roots": slices.Clone(p.Roots), "diagnostics": slices.Clone(p.Diagnostics),
 		}
-		for _, e := range p.Edges {
-			out["edges"] = append(out["edges"], fmt.Sprintf("%d %s -> %s %q", e.Kind, e.From, e.To, e.Specifier))
+		edge := func(e explainfiles.Edge) string {
+			return fmt.Sprintf("%d %s -> %s %q", e.Kind, e.From, e.To, e.Specifier)
 		}
-		for _, types := range [][]explainfiles.TypeEntry{p.Types, p.Implicit} {
-			for _, te := range types {
-				out["types"] = append(out["types"], te.Entry+" "+te.File)
-			}
+		for _, e := range p.Edges {
+			out["edges"] = append(out["edges"], edge(e))
+		}
+		for _, te := range p.Types {
+			out["types"] = append(out["types"], te.Entry+" "+te.File)
+		}
+		for _, te := range p.Implicit {
+			out["implicit types"] = append(out["implicit types"], te.Entry+" "+te.File)
+		}
+		for _, u := range p.Unresolved {
+			out["unresolved"] = append(out["unresolved"], fmt.Sprintf("%d %s %q probes=%q", u.Kind, u.From, u.Specifier, u.Candidates))
+		}
+		if p.refused != "" {
+			out["refusal"] = []string{p.refused}
 		}
 		blocks := map[int][]string{}
 		var order []int
@@ -1860,15 +1871,40 @@ func listingDifference(got, want *program) string {
 	}
 	a, b := canon(got), canon(want)
 	var diff []string
-	for _, k := range slices.Sorted(maps.Keys(b)) {
-		if slices.Equal(a[k], b[k]) {
-			continue
-		}
-		extra, missing := multisetMinus(a[k], b[k]), multisetMinus(b[k], a[k])
+	report := func(k string, extra, missing []string) {
 		diff = append(diff, fmt.Sprintf("%s: %d not in tsgo's, %d missing\n  + %s\n  - %s", k, len(extra), len(missing),
 			strings.Join(extra[:min(5, len(extra))], "\n  + "), strings.Join(missing[:min(5, len(missing))], "\n  - ")))
 	}
+	keys := maps.Clone(a)
+	maps.Copy(keys, b)
+	for _, k := range slices.Sorted(maps.Keys(keys)) {
+		if !slices.Equal(a[k], b[k]) {
+			report(k, multisetMinus(a[k], b[k]), multisetMinus(b[k], a[k]))
+		}
+	}
+	if missing := multisetMinus(resolutionFactList(want.resolution), resolutionFactList(got.resolution)); len(missing) > 0 {
+		report("resolution facts", nil, missing)
+	}
 	return strings.Join(diff, "\n")
+}
+
+func resolutionFactList(f resolutionFacts) []string {
+	var out []string
+	for _, list := range []struct {
+		name   string
+		values []string
+	}{
+		{"kind", f.Kinds}, {"relative target", f.RelativeTargets},
+		{"substitution", f.Substitutions}, {"substitution target", f.SubstitutionTargets},
+	} {
+		for _, v := range list.values {
+			out = append(out, list.name+" "+strings.ReplaceAll(v, "\x00", " "))
+		}
+	}
+	if f.RootDirs {
+		out = append(out, "rootDirs")
+	}
+	return out
 }
 
 func multisetMinus(a, b []string) []string {
