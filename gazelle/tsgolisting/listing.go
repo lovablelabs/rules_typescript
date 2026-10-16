@@ -1,6 +1,6 @@
 // Package listing runs a tsgo listing in the calling process: the command
-// line, the output and the exit status tsgo's own main would have, with each
-// source file parsed once for every listing a Compiler runs.
+// line, the output and the exit status tsgo's own main would have, sharing
+// parses between the listings a Compiler runs.
 package listing
 
 import (
@@ -40,8 +40,8 @@ func Version() string {
 	return core.Version()
 }
 
-// Compiler runs listings against one directory of lib files and keeps every
-// file it parses, for the next listing that reads the same text.
+// Compiler runs listings against one directory of lib files and, until
+// DropParses, keeps every file it parses for the next listing that reads it.
 type Compiler struct {
 	libDir    string
 	files     collections.SyncMap[fileKey, *parsedFile]
@@ -63,6 +63,11 @@ type parsedFile struct {
 // them from: its executable's, symlinks resolved.
 func New(libDir string) *Compiler {
 	return &Compiler{libDir: tspath.NormalizePath(libDir)}
+}
+
+// DropParses frees every file c keeps; a later listing parses them again.
+func (c *Compiler) DropParses() {
+	c.files.Clear()
 }
 
 // Run is `tsgo args` run in dir with stdout as its standard output, and
