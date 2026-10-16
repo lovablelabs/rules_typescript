@@ -599,7 +599,7 @@ func (s *programStore) prehash(generated []generatedPackage) (map[*program][sha2
 	return programs, rules
 }
 
-// programDigest leaves out bySource, moduleEdges and byDir, indexes built on first use.
+// programDigest leaves out bySource, byImporter, moduleEdges and byDir, indexes built on first use.
 func programDigest(p *program) [sha256.Size]byte {
 	d := newHasher()
 	d.listing(&p.Listing)

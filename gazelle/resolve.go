@@ -3,6 +3,7 @@ package typescript
 import (
 	"cmp"
 	"fmt"
+	"iter"
 	"log"
 	"maps"
 	"path"
@@ -508,12 +509,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 			return false
 		}
 		byFrom := p.edgesBySource()
-		candidatesByFrom := map[string][]resolutionCandidate{}
-		if p != nil {
-			for _, candidate := range p.candidates {
-				candidatesByFrom[candidate.from] = append(candidatesByFrom[candidate.from], candidate)
-			}
-		}
+		candidatesByFrom := p.candidatesBySource()
 		type step struct {
 			edge  explainfiles.Edge
 			store bool
@@ -522,9 +518,9 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 		for i, e := range edges {
 			queue[i] = step{edge: e}
 		}
-		admitCandidates := func(candidates []resolutionCandidate) {
+		admitCandidates := func(candidates iter.Seq[resolutionCandidate]) {
 			said := map[int]bool{}
-			for _, candidate := range candidates {
+			for candidate := range candidates {
 				if candidate.metadata {
 					switch tc.programs.metadataIdentity(c, candidate.path) {
 					case generatedInput:
@@ -544,7 +540,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 				}
 			}
 		}
-		admitCandidates(candidates)
+		admitCandidates(slices.Values(candidates))
 		type reachedFile struct {
 			file  string
 			store bool
@@ -604,7 +600,13 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					if tc.programs.generatedProgramFile(c, ix, e.To, true) {
 						continue
 					}
-					admitCandidates(candidatesByFrom[e.To])
+					admitCandidates(func(yield func(resolutionCandidate) bool) {
+						for _, at := range candidatesByFrom[e.To] {
+							if !yield(p.candidates[at]) {
+								return
+							}
+						}
+					})
 				}
 				for _, next := range byFrom[e.To] {
 					queue = append(queue, step{edge: next, store: store})
@@ -642,11 +644,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 				selected := *p
 				tc.programs.selectProgram(c, &selected)
 				p = &selected
-				for _, candidate := range p.candidates {
-					if candidate.from == imps.config {
-						candidates = append(candidates, candidate)
-					}
-				}
+				candidates = p.ownedCandidates([]string{imps.config})
 			}
 			walk(p, sourceEdges(p.edgesBySource(), []string{imps.config}), []string{imps.config}, candidates, files)
 		}
