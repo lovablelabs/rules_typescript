@@ -1001,7 +1001,7 @@ func (p *program) candidateEdge(candidate resolutionCandidate) explainfiles.Edge
 		p.moduleEdges = map[[3]string]explainfiles.EdgeKind{}
 		for _, edge := range p.Edges {
 			key := [3]string{edge.From, edge.Specifier, edge.To}
-			if edge.Kind.ModuleSpecifier() && p.moduleEdges[key] != explainfiles.Import {
+			if kind, seen := p.moduleEdges[key]; edge.Kind.ModuleSpecifier() && (!seen || kind != explainfiles.Import) {
 				p.moduleEdges[key] = edge.Kind
 			}
 		}
