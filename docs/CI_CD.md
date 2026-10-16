@@ -6,8 +6,9 @@ consumer workspace, which this repository's CI does not run.
 
 ## GitHub Actions CI
 
-`.github/workflows/ci.yml` runs on every push to `main`/`develop` and on every
-pull request, whichever branch it targets. It has six jobs.
+`.github/workflows/ci.yml` runs on every push to `main`/`develop`, on every
+pull request, whichever branch it targets, and in the merge queue. It has six
+jobs.
 
 The five jobs that run Bazel set it up with `bazel-contrib/setup-bazel@0.18.0`,
 sharing one set of caches (see [Caches](#caches)).
@@ -62,13 +63,16 @@ sharing one set of caches (see [Caches](#caches)).
      visible to `df`
 
 5. **Integration Tests (nested Bazel)** (`integration-tests`)
-   - Two legs, one per shard (`npm`, `core`), on `vars.CI_LARGE_RUNNER` when it
-     is set, each running
+   - Six legs, one per shard (`npm`, `roundtrip-1` to `roundtrip-4`, `core`),
+     on `vars.CI_LARGE_RUNNER` when it is set, each running
      `bazelisk test --config=ci-integration-<shard> //tests/integration/... --test_env=RULES_TS_IT_SCRATCH=/mnt/rules_ts_it`.
      Each config in `.bazelrc` selects tests by the `shard-<name>` tag
      `nested_bazel_tags(shard = ...)` in `tests/integration/tags.bzl` adds;
-     `core` is the complement of the other, so a test with no shard tag
-     still runs. `tools/ci/check_integration_shards.sh` fails when the three
+     `core` is the complement of the others, so a test with no shard tag
+     still runs. The `roundtrip-<n>` shards split the 17 `gazelle_roundtrip`
+     groups, balanced by their measured nested-Bazel time; every leg but
+     `npm` first builds the warmup group, so no group pays the nested runtime
+     actions inside its own timeout. `tools/ci/check_integration_shards.sh` fails when the three
      sources disagree
    - The only job that runs them. `--config=ci` in the `test` job expands
      `--config=fast`, whose `--test_tag_filters=-nested-bazel` filters them out;
@@ -115,8 +119,9 @@ sharing one set of caches (see [Caches](#caches)).
      `/mnt/rules_ts_it/pnpm` under the key
      `nested-bazel-<runner.os>-<shard>-<hash of the module, lock and BUILD
      files>`, with `nested-bazel-<runner.os>-<shard>-` as the restore-key
-     prefix. Each leg saves its own, on main only, after trimming
-     `disk_cache` to `NESTED_DISK_CACHE_MAX_BYTES`. `/mnt/rules_ts_it/repository_cache` is a link to
+     prefix. `core` and `npm` save theirs, on main only, after trimming
+     `disk_cache` to `NESTED_DISK_CACHE_MAX_BYTES`; the `roundtrip-<n>` legs
+     restore `core`'s and save none, as four more entries do not fit. `/mnt/rules_ts_it/repository_cache` is a link to
      the shared repository cache, which this job restores and does not save. Cold, the concurrent servers all miss the
      shared cache at once and fetch the same artifacts, a measured ~4GB
      (`tests/integration/tags.bzl`). The cache is content-addressed, so a stale

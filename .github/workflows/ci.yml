@@ -7,6 +7,7 @@ on:
   # No branch filter: a stacked PR targets the branch below it, and a filtered
   # `pull_request` fires no run at all for one -- not a skipped check, nothing.
   pull_request:
+  merge_group:
 
 # A push to a pull request supersedes the checks still running on its previous
 # head. Every other run gets a group of its own, so nothing cancels or queues
@@ -317,13 +318,16 @@ jobs:
         run: BAZEL=bazelisk tools/ci/check_determinism.sh /mnt/rules_ts_det
 
   integration-tests:
-    # 16 nested-Bazel tests at ~3 minutes each. "cpu:2" already runs several at
-    # once, so this was never serial -- but one runner only has so many cores,
-    # which is what kept the lane on the critical path. These legs spread it
-    # over two runners.
+    # 34 nested-Bazel tests at 1 to 13 minutes each. "cpu:2" already runs
+    # several at once, so this was never serial -- but one runner only has so
+    # many cores, and the core leg alone ran 65 to 110 minutes on one. The
+    # roundtrip legs take the 17 gazelle_roundtrip groups off it, four per leg
+    # balanced by measured time: each carries about a fifth of what core did.
     name: Integration Tests (${{ matrix.shard }})
     runs-on: ${{ vars.CI_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 180
+    env:
+      NESTED_CACHE_SHARD: ${{ startsWith(matrix.shard, 'roundtrip-') && 'core' || matrix.shard }}
     strategy:
       # As in `examples`: one leg going red must not cancel the others, or a
       # single flaky nested Bazel hides the state of the rest of the suite.
@@ -331,10 +335,10 @@ jobs:
       matrix:
         # One name per `test:ci-integration-<name>` config in //.bazelrc, which
         # is where the tag filter behind each leg lives. `core` is the
-        # complement of the other, so a test added with no shard tag runs
+        # complement of the others, so a test added with no shard tag runs
         # there rather than nowhere; check_integration_shards.sh (in the `test`
         # job) fails if these three sources ever disagree.
-        shard: [npm, core]
+        shard: [npm, roundtrip-1, roundtrip-2, roundtrip-3, roundtrip-4, core]
     steps:
       - uses: actions/checkout@v4
 
@@ -366,6 +370,9 @@ jobs:
 
       # Each shard saves its complete cache; immutable shared keys let the
       # faster shard prevent the slower shard from saving its native outputs.
+      # The roundtrip legs restore core's, which holds the nested tool chain
+      # every leg builds, and save none: four more ~2.3 GB entries do not fit
+      # the 10 GB.
       - uses: actions/cache/restore@v6
         id: nested-cache
         with:
@@ -373,9 +380,9 @@ jobs:
             /mnt/rules_ts_it/disk_cache
             /mnt/rules_ts_it/bazelisk
             /mnt/rules_ts_it/pnpm
-          key: nested-bazel-${{ runner.os }}-${{ matrix.shard }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion', '**/BUILD.bazel') }}
+          key: nested-bazel-${{ runner.os }}-${{ env.NESTED_CACHE_SHARD }}-${{ hashFiles('**/MODULE.bazel', '**/pnpm-lock.yaml', '**/Cargo.lock', '.bazelversion', '**/BUILD.bazel') }}
           restore-keys: |
-            nested-bazel-${{ runner.os }}-${{ matrix.shard }}-
+            nested-bazel-${{ runner.os }}-${{ env.NESTED_CACHE_SHARD }}-
 
       # bazelisk takes no cross-process lock, so on a cold cache every test
       # fetches Bazel at the same instant -- measured: 7 of the 9 core tests,
@@ -398,8 +405,9 @@ jobs:
       # A PR's runtime actions miss main's cache; built here, no group pays them inside its timeout.
       # Step timeouts below the job's: an overrun fails the step instead of
       # cancelling the job, so the nested cache is still saved.
+      # The warmup test carries no shard tag, so core's filter is the one that selects it.
       - name: Warm the nested runtime actions
-        if: matrix.shard == 'core'
+        if: matrix.shard != 'npm'
         timeout-minutes: 45
         run: |
           set -o pipefail
@@ -460,7 +468,9 @@ jobs:
           done
 
       - name: Bound the nested disk cache before it is saved
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        if: >-
+          ${{ !cancelled() && github.ref == 'refs/heads/main' &&
+              !startsWith(matrix.shard, 'roundtrip-') }}
         run: tools/ci/trim_disk_cache.sh /mnt/rules_ts_it/disk_cache "$NESTED_DISK_CACHE_MAX_BYTES"
 
       # A timed-out cold build still produces valid content-addressed outputs;
@@ -469,6 +479,7 @@ jobs:
       - uses: actions/cache/save@v6
         if: >-
           ${{ !cancelled() && github.ref == 'refs/heads/main' &&
+              !startsWith(matrix.shard, 'roundtrip-') &&
               steps.nested-cache.outcome == 'success' &&
               steps.nested-cache.outputs.cache-hit != 'true' }}
         with:
