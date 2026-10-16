@@ -1096,3 +1096,85 @@ func TestListingCache_AliasImportedAddListsNothingAgain(t *testing.T) {
 	}
 	same()
 }
+
+// The verifier stands for tsgo wherever a listing is patched, so a fact that
+// later eligibility consumes must not compare equal when it differs.
+func TestListingParity_RejectsChangesToConsumedFacts(t *testing.T) {
+	typescript := "TypeScript, Declaration."
+	listed := func() *program {
+		return &program{
+			Listing: explainfiles.Listing{
+				Files: []string{"app/a.ts", "app/b.ts", "app/g.d.ts"},
+				Roots: []string{"app/a.ts", "app/b.ts"},
+				Types: []explainfiles.TypeEntry{{Entry: "g", File: "app/g.d.ts"}},
+				Unresolved: []explainfiles.Unresolved{{Kind: explainfiles.Reference, From: "app/a.ts", Specifier: "./gone.d.ts",
+					Candidates: []explainfiles.FailedLookup{{File: "app/gone.d.ts"}}}},
+			},
+			candidates: []resolutionCandidate{{from: "app/b.ts", specifier: "#lib/x", path: "app/lib/x.ts", file: true}},
+			resolution: resolutionFacts{
+				Kinds:           []string{"Module resolution kind is not specified, using 'Bundler'."},
+				RelativeTargets: []string{typescript}, Substitutions: []string{"#lib/*\x00./lib/*\x00app"}, SubstitutionTargets: []string{typescript},
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(got, want *program)
+	}{
+		{"an extra edge where tsgo lists none", func(got, _ *program) {
+			got.Edges = []explainfiles.Edge{{Kind: explainfiles.Import, From: "app/a.ts", To: "app/b.ts", Specifier: "./b"}}
+		}},
+		{"a type entry moved from explicit to implicit", func(got, _ *program) { got.Types, got.Implicit = nil, got.Types }},
+		{"a missing unresolved import", func(got, _ *program) { got.Unresolved = nil }},
+		{"a changed probe of an unresolved import", func(got, _ *program) {
+			got.Unresolved[0].Candidates = []explainfiles.FailedLookup{{File: "app/gone.ts"}}
+		}},
+		{"a changed paths substitution", func(got, _ *program) { got.resolution.Substitutions = []string{"#lib/*\x00./src/*\x00app"} }},
+		{"a relative target tsgo traces is missing", func(got, _ *program) { got.resolution.RelativeTargets = []string{"JavaScript."} }},
+		{"a second resolution kind dropped", func(_, want *program) {
+			want.resolution.Kinds = append(want.resolution.Kinds, "Explicitly specified module resolution kind: 'Node10'.")
+		}},
+		{"a dropped rootDirs fact", func(_, want *program) { want.resolution.RootDirs = true }},
+		{"a listing tsgo refused", func(_, want *program) { want.refused = "tsgo exit status 2: error TS5083: Cannot read file" }},
+		{"a changed refusal", func(got, want *program) {
+			got.refused, want.refused = "a config in the chain is unreadable", "tsgo exit status 2: error TS5083: Cannot read file"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, want := listed(), listed()
+			tc.change(got, want)
+			if listingDifference(got, want) == "" {
+				t.Error("the verifier found no difference")
+			}
+		})
+	}
+	t.Run("order, block numbering and facts kept from a dropped resolution", func(t *testing.T) {
+		got, want := listed(), listed()
+		slices.Reverse(got.Files)
+		got.candidates[0].block = 7
+		got.resolution.Substitutions = append(got.resolution.Substitutions, "#old/*\x00./old/*\x00app")
+		if diff := listingDifference(got, want); diff != "" {
+			t.Errorf("the verifier rejects an equivalent listing:\n%s", diff)
+		}
+	})
+}
+
+// A patch keeps the facts of an import it drops, and a later edit may patch by them.
+func TestListingCache_ASecondEditPatchesByARetainedFact(t *testing.T) {
+	l := newListingRuns(t, aliasFixture())
+	l.list("app/tsconfig.json")
+	writeWorkspace(t, l.root, map[string]string{"app/shared/fmt.ts": "export const fmt = 1;\n"})
+	dropped, fresh := l.list("app/tsconfig.json"), l.fresh("app/tsconfig.json")
+	if l.runs != 1 || len(dropped.resolution.Substitutions) <= len(fresh.resolution.Substitutions) {
+		t.Fatalf("dropping the only #shared import did not patch and retain its substitution (%d runs): %v", l.runs, lastPatchRefusal.Load())
+	}
+	if diff := listingDifference(dropped, fresh); diff != "" {
+		t.Errorf("the verifier rejects a patch that retains a fact:\n%s", diff)
+	}
+	writeWorkspace(t, l.root, map[string]string{"app/shared/fmt.ts": "import { util } from '#shared/util';\nexport const fmt = util;\n"})
+	if got := l.list("app/tsconfig.json"); l.runs != 1 {
+		t.Errorf("the retained substitution did not patch the import that uses it (%d runs): %v", l.runs, lastPatchRefusal.Load())
+	} else if diff := listingDifference(got, l.fresh("app/tsconfig.json")); diff != "" {
+		t.Errorf("the patch that used a retained fact differs from tsgo's:\n%s", diff)
+	}
+}
