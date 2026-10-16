@@ -25,7 +25,7 @@ var listingInProcessMode = "on"
 // startTsgo starts a listing's tsgo process; a test counts them through it.
 var startTsgo = (*exec.Cmd).Start
 
-// One gate per tsgo binary for the run, so every listing shares its parses.
+// One gate per tsgo binary for the run, so the walk's listings share their parses.
 var inProcessGates sync.Map
 
 var errInProcessOff = errors.New("-ts_listing_inproc=off")
@@ -40,6 +40,16 @@ func inProcessCompiler(tsgo string) (*listing.Compiler, error) {
 		return releaseCompiler(tsgo)
 	}))
 	return gate.(func() (*listing.Compiler, error))()
+}
+
+// dropParses frees the parses of the walk's listings; a listing in Resolve parses again.
+func dropParses() {
+	inProcessGates.Range(func(_, gate any) bool {
+		if compiler, _ := gate.(func() (*listing.Compiler, error))(); compiler != nil {
+			compiler.DropParses()
+		}
+		return true
+	})
 }
 
 // listingHow is how the listings of tsgo run, for -ts_verbose.

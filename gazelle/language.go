@@ -459,6 +459,7 @@ func (l *tsLang) DoneGeneratingRules() {
 	l.programs.ruleListsMayChange()
 	if l.programs != nil {
 		l.programs.stopPrefetch()
+		dropParses()
 		l.programs.reportCensus()
 		l.programs.reportUnlisted()
 		l.programs.reportUnowned()
