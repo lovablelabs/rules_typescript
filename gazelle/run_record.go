@@ -701,10 +701,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 		}
 		if dirs != nil {
 			tryFastPath(fs, c, file, rec, dirs, stamps)
-			// This process waits out the child, so the listings a declined fast path read leave with it.
-			if fastPathDecoded.Load() {
-				debug.FreeOSMemory()
-			}
+			releaseDeclinedFastPath()
 		}
 	}
 	candidate := fmt.Sprintf("%s.candidate.%d", file, os.Getpid())
@@ -1024,4 +1021,13 @@ func runSelfTo(stdoutTo, stderrTo io.Writer, args []string, env ...string) (int,
 		return 128 + int(status.Signal()), stdout.Bytes(), stderr.Bytes()
 	}
 	return cmd.ProcessState.ExitCode(), stdout.Bytes(), stderr.Bytes()
+}
+
+// This process waits out the child, so the listings a declined fast path read,
+// and the strings their decode interned, leave with it.
+func releaseDeclinedFastPath() {
+	if fastPathDecoded.Load() {
+		listingStrings.Clear()
+		debug.FreeOSMemory()
+	}
 }

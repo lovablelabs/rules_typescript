@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"cmp"
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -336,7 +334,10 @@ func loadListing(id listingID, subject string) (*program, bool) {
 		return nil, false
 	}
 	listingHits.Add(1)
-	return remember(id.key, entry, programFromEntry(entry, subject)), false
+	loadedListings.Store(id.key, entry)
+	p := programFromEntry(entry, subject)
+	p.key = id.key
+	return p, false
 }
 
 func keepPatched(id listingID, entry *cachedListing, p *program) *program {
@@ -366,78 +367,6 @@ func patchFromFamily(id listingID, subject string) (*program, bool) {
 	}
 	listingStale.Add(1)
 	return nil, false
-}
-
-func readListing(file string) (*cachedListing, error) {
-	data, err := readListingFile(file)
-	if err != nil {
-		return nil, err
-	}
-	return decodeEntry(file, data)
-}
-
-func decodeEntry(file string, data []byte) (*cachedListing, error) {
-	d, err := decodeHead(file, data)
-	if err != nil {
-		return nil, err
-	}
-	return d.rest()
-}
-
-// entryFormat is the layout of an entry file: an entryHead, then the rest of the
-// entry, so the fast path declines on what the head holds without decoding the rest.
-const entryFormat = 1
-
-// entryHead shares no field name with cachedListing, so an older binary fails to decode it as one.
-type entryHead struct {
-	HeadFormat    int
-	HeadRoot      string
-	HeadSources   map[string]cachedSource
-	HeadFilesList []string
-	HeadEdges     []explainfiles.Edge
-}
-
-type entryDecoder struct {
-	file string
-	dec  *gob.Decoder
-	head entryHead
-}
-
-func decodeHead(file string, data []byte) (*entryDecoder, error) {
-	d := &entryDecoder{file: file, dec: gob.NewDecoder(bytes.NewReader(data))}
-	if err := d.dec.Decode(&d.head); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
-	}
-	if d.head.HeadFormat != entryFormat {
-		return nil, fmt.Errorf("%s: entry format %d, not %d", file, d.head.HeadFormat, entryFormat)
-	}
-	return d, nil
-}
-
-// headEntry is the entry as far as its head holds it.
-func (d *entryDecoder) headEntry() *cachedListing {
-	h := d.head
-	return &cachedListing{Root: h.HeadRoot, Sources: h.HeadSources, FilesList: h.HeadFilesList, Listing: explainfiles.Listing{Edges: h.HeadEdges}}
-}
-
-func (d *entryDecoder) rest() (*cachedListing, error) {
-	var entry cachedListing
-	if err := d.dec.Decode(&entry); err != nil {
-		return nil, fmt.Errorf("%s: %w", d.file, err)
-	}
-	h := d.head
-	entry.Root, entry.Sources, entry.FilesList, entry.Listing.Edges = h.HeadRoot, h.HeadSources, h.HeadFilesList, h.HeadEdges
-	return &entry, nil
-}
-
-func encodeEntry(w io.Writer, entry *cachedListing) error {
-	enc := gob.NewEncoder(w)
-	if err := enc.Encode(entryHead{entryFormat, entry.Root, entry.Sources, entry.FilesList, entry.Listing.Edges}); err != nil {
-		return err
-	}
-	rest := *entry
-	rest.Root, rest.Sources, rest.FilesList, rest.Listing.Edges = "", nil, nil, nil
-	return enc.Encode(&rest)
 }
 
 // familyCandidates bounds how many of a family's latest entries a new files
@@ -615,13 +544,6 @@ func writeListingAsync(file string, entry *cachedListing) {
 		defer pendingSaves.CompareAndDelete(file, written)
 		writeListingFile(file, entry)
 	})
-}
-
-func readListingFile(file string) ([]byte, error) {
-	if written, ok := pendingSaves.Load(file); ok {
-		<-written.(chan struct{})
-	}
-	return os.ReadFile(file)
 }
 
 // includeRoots are the directories a config's include globs enumerate: each

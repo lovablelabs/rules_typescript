@@ -41,6 +41,7 @@ type listingPredecode struct {
 
 type predecodeJob struct {
 	key     string
+	verify  bool
 	once    sync.Once
 	ahead   bool
 	decoded decodedListing
@@ -65,38 +66,20 @@ func (d decodedListing) matches(again decodedListing) bool {
 func (j *predecodeJob) run(ahead bool) {
 	j.once.Do(func() {
 		j.ahead = ahead
-		j.decoded = decodeListing(j.key)
-		if ahead && j.decoded.entry != nil {
-			internEntry(j.decoded.entry)
-		}
+		j.decoded = decodeListing(j.key, j.verify)
 	})
 }
 
-// decodeListing reads key's entry and whether everything it read is unchanged.
-func decodeListing(key string) decodedListing {
-	file := filepath.Join(listingCacheDir, key)
-	data, err := readListingFile(file)
-	if err != nil {
-		return decodedListing{err: err}
-	}
-	entry, err := decodeEntry(file, data)
+// decodeListing reads key's entry and whether everything it read is unchanged; verify also sums its bytes.
+func decodeListing(key string, verify bool) decodedListing {
+	entry, sum, err := readListingSum(filepath.Join(listingCacheDir, key), verify)
 	if err != nil {
 		return decodedListing{err: err}
 	}
 	return decodedListing{
 		entry: entry,
 		fresh: listingFingerprint(entry.Reads, entry.Dirs) == entry.Fingerprint,
-		sum:   sha256.Sum256(data),
-	}
-}
-
-// internEntry lets an entry decoded ahead drop its own copies of strings other entries hold, as the walk does on a hit.
-func internEntry(entry *cachedListing) {
-	internProgram(&program{Listing: entry.Listing})
-	for i := range entry.Candidates {
-		c := &entry.Candidates[i]
-		c.From, c.Specifier, c.Path = internString(c.From), internString(c.Specifier), internString(c.Path)
-		c.Resolved, c.Skipped = internString(c.Resolved), internString(c.Skipped)
+		sum:   sum,
 	}
 }
 
@@ -145,7 +128,7 @@ func (d *listingPredecode) start(dir string, verify bool) {
 	queue := make([]*predecodeJob, len(keys))
 	jobs := make(map[string]*predecodeJob, len(keys))
 	for i, key := range keys {
-		queue[i] = &predecodeJob{key: key}
+		queue[i] = &predecodeJob{key: key, verify: verify}
 		jobs[key] = queue[i]
 	}
 	d.mu.Lock()
@@ -178,7 +161,7 @@ func (d *listingPredecode) take(key string) (entry *cachedListing, fresh bool, e
 	}
 	d.mu.Unlock()
 	if job == nil {
-		return decodeListing(key).result()
+		return decodeListing(key, verify).result()
 	}
 	job.run(false)
 	if !job.ahead {
@@ -186,7 +169,7 @@ func (d *listingPredecode) take(key string) (entry *cachedListing, fresh bool, e
 		return job.decoded.result()
 	}
 	d.ahead.Add(1)
-	if verify && !job.decoded.matches(decodeListing(key)) {
+	if verify && !job.decoded.matches(decodeListing(key, true)) {
 		return nil, false, fmt.Errorf("typescript: -ts_parallel=verify: %w: %s", errPredecodeMismatch, key)
 	}
 	return job.decoded.result()

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1511,16 +1510,15 @@ func keepEntryHeads(t *testing.T, cache string) {
 	cut := 0
 	for _, f := range files {
 		file := filepath.Join(cache, f.Name())
-		data, err := os.ReadFile(file)
-		if err != nil || f.IsDir() {
+		if f.IsDir() {
 			continue
 		}
-		d, err := decodeHead(file, data)
+		entry, err := readListing(file)
 		if err != nil {
 			continue
 		}
 		var head bytes.Buffer
-		if err := gob.NewEncoder(&head).Encode(d.head); err != nil {
+		if err := encodeListing(&head, entry, false); err != nil {
 			t.Fatal(err)
 		}
 		writeFile(t, file, head.String())
@@ -1770,5 +1768,26 @@ func TestFastPath_AGainedDirectoryTheRunLookedUpDeclines(t *testing.T) {
 	}
 	if why := facts.readsNoneOf("/repo", map[string]string{"/repo/zz": ""}, nil); why != nil {
 		t.Errorf("a gained directory sorting after every lookup was declined: %v", why)
+	}
+}
+
+// The decoder interns every string, so a parent that kept the intern table held
+// every entry a declined fast path read while it waited out the child.
+func TestFastPath_ADeclineLeavesNoDecodedStringInterned(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "entry")
+	unique := "declined-" + t.Name()
+	writeListingFile(file, &cachedListing{Root: "/repo", Fingerprint: unique})
+	h, err := decodeHead(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.rest(); err != nil {
+		t.Fatal(err)
+	}
+	was := fastPathDecoded.Swap(true)
+	t.Cleanup(func() { fastPathDecoded.Store(was) })
+	releaseDeclinedFastPath()
+	if _, held := listingStrings.Load(unique); held {
+		t.Errorf("%q is still interned after a declined fast path", unique)
 	}
 }
