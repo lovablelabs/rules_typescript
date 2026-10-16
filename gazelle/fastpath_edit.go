@@ -24,8 +24,10 @@ type sourceDelta struct {
 	// names are each changed directory's entry names now; before are those it had
 	// before the edit, beside the names of entries nothing read, as they are now.
 	names, before map[string][]string
-	// newDirs are the gained directories nothing reads, with their dirLines.
+	// newDirs are the gained directories nothing reads, with their dirLines;
+	// sourced are, by repository path, those whose tree holds gained sources and nothing else.
 	newDirs map[string]string
+	sourced map[string]bool
 }
 
 func (d *sourceDelta) has(rel string) bool {
@@ -75,7 +77,7 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 			listed[parentDir(f)][path.Base(f)] = true
 		}
 	}
-	delta := &sourceDelta{gained: map[string]bool{}, lost: map[string]bool{}, names: map[string][]string{}, before: map[string][]string{}, newDirs: map[string]string{}}
+	delta := &sourceDelta{gained: map[string]bool{}, lost: map[string]bool{}, names: map[string][]string{}, before: map[string][]string{}, newDirs: map[string]string{}, sourced: map[string]bool{}}
 	walked := setOf(rec.dirs)
 	for _, i := range moved {
 		rel, ok := repoDir(repoRoot, rec.dirs[i])
@@ -114,11 +116,23 @@ func sourceChanges(rec *runRecord, facts *importFacts, repoRoot string, dirs []s
 		var added []string
 		was, added = newSubdirs(was, unwalked, rec.sums[i])
 		for _, name := range added {
-			tree, why := outsideTree(filepath.Join(rec.dirs[i], name), path.Join(rel, name), buildNames, skip, stamps)
+			tree, sources, why := outsideTree(filepath.Join(rec.dirs[i], name), path.Join(rel, name), buildNames, skip, stamps)
 			if why != nil {
 				return nil, why
 			}
 			maps.Copy(delta.newDirs, tree)
+			for _, f := range sources {
+				delta.gained[f] = true
+			}
+			for d, line := range tree {
+				at, _ := repoDir(repoRoot, d)
+				for e := range dirEntries(at, line, nil) {
+					delta.names[at] = append(delta.names[at], e.name)
+				}
+				if len(sources) > 0 {
+					delta.sourced[at] = true
+				}
+			}
 		}
 		for _, e := range was {
 			delta.before[rel] = append(delta.before[rel], e.name)
@@ -184,40 +198,51 @@ func newSubdirs(was []shapeEntry, unwalked []string, sum uint64) ([]shapeEntry, 
 	return was, nil
 }
 
-// outsideTree is every directory under gained directory dir with its dirLine,
-// as long as none holds a BUILD file, a link, a program source or a file the
-// extension or Gazelle reads by its name: a walk of it then generates nothing.
-func outsideTree(dir, rel string, buildNames []string, skip string, stamps *newest) (map[string]string, *decline) {
+// outsideTree is every directory under gained directory dir with its dirLine, and its
+// sources when it holds no other file; none may hold a BUILD file, a link or a file
+// read by its name, so a walk of it generates nothing but those sources' srcs.
+func outsideTree(dir, rel string, buildNames []string, skip string, stamps *newest) (map[string]string, []string, *decline) {
 	tree := map[string]string{}
+	var sources []string
+	other := ""
 	for queue := []string{dir}; len(queue) > 0; queue = queue[1:] {
 		d := queue[0]
 		if _, seen := tree[d]; seen {
-			return nil, declined(declineInputs, "%s, a gained directory, lists %s twice", rel, d)
+			return nil, nil, declined(declineInputs, "%s, a gained directory, lists %s twice", rel, d)
 		}
 		if filepath.Base(d) == ".git" {
-			return nil, declined(declineExcluded, "the walk skips .git, which %s holds", rel)
+			return nil, nil, declined(declineExcluded, "the walk skips .git, which %s holds", rel)
 		}
 		line, stamp, err := dirLine(d, buildNames, skip)
 		stamps.see(stamp)
 		if err != nil || line == "absent" {
-			return nil, declined(declineInputs, "%s, a gained directory, does not read back", rel)
+			return nil, nil, declined(declineInputs, "%s, a gained directory, does not read back", rel)
 		}
 		tree[d] = line
+		under, _ := filepath.Rel(dir, d)
 		for entry := range strings.SplitSeq(line, "\n") {
 			kind, rest, _ := strings.Cut(entry, " ")
 			name, _, _ := cutFields(rest, 5)
+			f := path.Join(rel, filepath.ToSlash(under), name)
 			switch {
 			case entry == "":
 			case kind == "d" && (rest == "." || rest == ".." || strings.ContainsRune(rest, '/')):
-				return nil, declined(declineInputs, "%s, a gained directory, holds an entry whose name the record cannot read back", rel)
+				return nil, nil, declined(declineInputs, "%s, a gained directory, holds an entry whose name the record cannot read back", rel)
 			case kind == "d":
 				queue = append(queue, filepath.Join(d, rest))
+			case kind == "f" && patchableSource(f):
+				sources = append(sources, f)
 			case kind != "f" || programCandidate(name) || readByGazelle(name):
-				return nil, declined(declineInputs, "%s, a gained directory, holds %s", rel, entry)
+				return nil, nil, declined(declineInputs, "%s, a gained directory, holds %s", rel, entry)
+			default:
+				other = entry
+			}
+			if len(sources) > 0 && other != "" {
+				return nil, nil, declined(declineInputs, "%s, a gained directory, holds %s beside %s", rel, other, sources[0])
 			}
 		}
 	}
-	return tree, nil
+	return tree, sources, nil
 }
 
 // packageEdit is one package's ts_compile whose srcs gain and lose the delta's
@@ -238,8 +263,8 @@ type packageEdit struct {
 // the sources of the same rule and directory that stand for each one.
 type deltaProof struct {
 	edits []*packageEdit
-	// mates are, for each gained or lost source, the other sources its rule held
-	// in its directory before the edit; a gained one is resolved as they were.
+	// mates are, for each gained or lost source, the other sources its rule held in
+	// its directory, or above a gained one, before the edit; a gained one is resolved as they were.
 	mates map[string][]string
 	// owners are each delta source's package edit.
 	owners map[string]*packageEdit
@@ -354,8 +379,8 @@ func repoIgnoredDirectories(repoRoot string) ([]string, *decline) {
 }
 
 // proveDelta places every gained and lost source in its directory's package's
-// ts_compile, next to another source of that rule in the same directory, so
-// that only the rule's srcs list tells the two apart.
+// ts_compile, next to another source of that rule in the same directory, or the
+// nearest one above a gained directory, so that only the rule's srcs list tells the two apart.
 func proveDelta(rec *runRecord, facts *importFacts, repoRoot string, buildNames []string, dirs []string, delta *sourceDelta, cliExcludes string) (*deltaProof, *decline) {
 	if len(facts.Overrides) > 0 {
 		return nil, declined(declineOverride, "a TypeScript resolve directive could name a source the record never saw: %s", facts.Overrides[0])
@@ -368,6 +393,11 @@ func proveDelta(rec *runRecord, facts *importFacts, repoRoot string, buildNames 
 	for i, dir := range rec.dirs {
 		if rel, ok := repoDir(repoRoot, dir); ok {
 			walked[rel] = i
+		}
+	}
+	for dir := range delta.newDirs {
+		if rel, ok := repoDir(repoRoot, dir); ok {
+			walked[rel] = -1
 		}
 	}
 	listed := map[string]bool{}
@@ -426,10 +456,20 @@ func proveDelta(rec *runRecord, facts *importFacts, repoRoot string, buildNames 
 		if edit.srcs[label] == gained {
 			return nil, declined(declineOwner, "%s's srcs already say what the edit did to %s", ruleLabel(edit), f)
 		}
-		for src := range edit.srcs {
-			mate := path.Join(edit.pkg, src)
-			if parentDir(mate) == dir && mate != f && !delta.gained[mate] && listed[mate] && classify(mate) == libraryFile && rawTypeScript(mate) {
-				proof.mates[f] = append(proof.mates[f], mate)
+		// A gained directory's source stands with the nearest sources of its rule
+		// above it, when no directory between them holds a package's manifest or config.
+		for at := dir; len(proof.mates[f]) == 0; at = parentDir(at) {
+			for src := range edit.srcs {
+				mate := path.Join(edit.pkg, src)
+				if parentDir(mate) == at && mate != f && !delta.gained[mate] && listed[mate] && classify(mate) == libraryFile && rawTypeScript(mate) {
+					proof.mates[f] = append(proof.mates[f], mate)
+				}
+			}
+			if !delta.sourced[dir] || at == edit.pkg || len(proof.mates[f]) > 0 {
+				break
+			}
+			if i, ok := walked[at]; ok && i >= 0 && slices.ContainsFunc(strings.Split(dirs[i], "\n"), namesReadEntry) {
+				return nil, declined(declineOwner, "%s, between %s and the sources of %s, holds a file the extension reads by its name", at, f, ruleLabel(edit))
 			}
 		}
 		// A lost source's directory keeps a source of the rule, which keeps its package scope.
@@ -452,6 +492,11 @@ func proveDelta(rec *runRecord, facts *importFacts, repoRoot string, buildNames 
 		proof.edits = append(proof.edits, edits[pkg])
 	}
 	return proof, nil
+}
+
+func namesReadEntry(entry string) bool {
+	e, _ := dirEntryOf("", entry, nil)
+	return readByGazelle(e.name)
 }
 
 // sourceNameDecline refuses a name anything but its rule's srcs reads: a test
@@ -534,8 +579,8 @@ func ruleLabel(e *packageEdit) string {
 	return "//" + e.pkg + ":" + e.r.Name()
 }
 
-// packageFor is the package of the walked directory dir: the nearest walked
-// directory at or above it with a BUILD file, which must be a program package
+// packageFor is the package of the walked or gained directory dir: the nearest
+// walked directory at or above it with a BUILD file, which must be a program package
 // and hold its ts_compile; nothing marks the rule or its srcs as kept.
 func packageFor(dir string, walked map[string]int, dirs, buildNames []string, programs map[string]bool, repoRoot string, edits map[string]*packageEdit) (*packageEdit, *decline) {
 	for pkg := dir; ; pkg = parentDir(pkg) {
@@ -545,6 +590,9 @@ func packageFor(dir string, walked map[string]int, dirs, buildNames []string, pr
 		i, seen := walked[pkg]
 		if !seen {
 			return nil, declined(declineOwner, "%s, above %s, is not walked", orRepoRoot(pkg), dir)
+		}
+		if i < 0 {
+			continue
 		}
 		build := ""
 		for _, name := range buildNames {

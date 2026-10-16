@@ -10,7 +10,7 @@ import (
 
 func (s *programStore) resolveCompilerConfig(c *config.Config, cfg string, dirInfo func(string) (walk.DirInfo, error)) (*tsconfig.Resolved, error) {
 	return tsconfig.ResolveWithAdmission(filepath.Join(c.RepoRoot, filepath.FromSlash(cfg)), func(absolute string) error {
-		noteRead(absolute)
+		noteWholeRead(absolute)
 		rel, err := filepath.Rel(c.RepoRoot, absolute)
 		if err != nil || !firstParty(filepath.ToSlash(rel)) {
 			return err

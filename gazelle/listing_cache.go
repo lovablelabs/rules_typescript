@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -70,7 +71,11 @@ type cachedListing struct {
 	Listing     explainfiles.Listing
 	Candidates  []cachedCandidate
 	Reads, Dirs []string
-	Fingerprint string
+	// Configs are the reads the program takes its compiler options from; with
+	// PackageExtends, one of them extends a package's config, which they do not name.
+	Configs        []string
+	PackageExtends bool
+	Fingerprint    string
 	// For patchListing: the stat line of each read, the name digest of each
 	// dir, and each listed source's specifiers, at the time of the listing.
 	Root                  string
@@ -84,6 +89,8 @@ type cachedListing struct {
 	Unmatched    []string
 	// A files-list projection's files, as its key names them.
 	FilesList []string
+	// StaleDiagnostics says a patch took a JSON content edit, which may move tsgo's diagnostics.
+	StaleDiagnostics bool
 }
 
 type cachedCandidate struct {
@@ -321,6 +328,11 @@ func loadListing(id listingID, subject string) (*program, bool) {
 		listingStale.Add(1)
 		return nil, false
 	}
+	if listingVerbose && entry.StaleDiagnostics {
+		log.Printf("typescript: listing cache: %s listed again: a patch kept diagnostics -ts_verbose logs", subject)
+		listingStale.Add(1)
+		return nil, false
+	}
 	listingHits.Add(1)
 	return remember(id.key, entry, programFromEntry(entry, subject)), false
 }
@@ -363,11 +375,67 @@ func readListing(file string) (*cachedListing, error) {
 }
 
 func decodeEntry(file string, data []byte) (*cachedListing, error) {
-	var entry cachedListing
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&entry); err != nil {
+	d, err := decodeHead(file, data)
+	if err != nil {
+		return nil, err
+	}
+	return d.rest()
+}
+
+// entryFormat is the layout of an entry file: an entryHead, then the rest of the
+// entry, so the fast path declines on what the head holds without decoding the rest.
+const entryFormat = 1
+
+// entryHead shares no field name with cachedListing, so an older binary fails to decode it as one.
+type entryHead struct {
+	HeadFormat    int
+	HeadRoot      string
+	HeadSources   map[string]cachedSource
+	HeadFilesList []string
+	HeadEdges     []explainfiles.Edge
+}
+
+type entryDecoder struct {
+	file string
+	dec  *gob.Decoder
+	head entryHead
+}
+
+func decodeHead(file string, data []byte) (*entryDecoder, error) {
+	d := &entryDecoder{file: file, dec: gob.NewDecoder(bytes.NewReader(data))}
+	if err := d.dec.Decode(&d.head); err != nil {
 		return nil, fmt.Errorf("%s: %w", file, err)
 	}
+	if d.head.HeadFormat != entryFormat {
+		return nil, fmt.Errorf("%s: entry format %d, not %d", file, d.head.HeadFormat, entryFormat)
+	}
+	return d, nil
+}
+
+// headEntry is the entry as far as its head holds it.
+func (d *entryDecoder) headEntry() *cachedListing {
+	h := d.head
+	return &cachedListing{Root: h.HeadRoot, Sources: h.HeadSources, FilesList: h.HeadFilesList, Listing: explainfiles.Listing{Edges: h.HeadEdges}}
+}
+
+func (d *entryDecoder) rest() (*cachedListing, error) {
+	var entry cachedListing
+	if err := d.dec.Decode(&entry); err != nil {
+		return nil, fmt.Errorf("%s: %w", d.file, err)
+	}
+	h := d.head
+	entry.Root, entry.Sources, entry.FilesList, entry.Listing.Edges = h.HeadRoot, h.HeadSources, h.HeadFilesList, h.HeadEdges
 	return &entry, nil
+}
+
+func encodeEntry(w io.Writer, entry *cachedListing) error {
+	enc := gob.NewEncoder(w)
+	if err := enc.Encode(entryHead{entryFormat, entry.Root, entry.Sources, entry.FilesList, entry.Listing.Edges}); err != nil {
+		return err
+	}
+	rest := *entry
+	rest.Root, rest.Sources, rest.FilesList, rest.Listing.Edges = "", nil, nil, nil
+	return enc.Encode(&rest)
 }
 
 // familyCandidates bounds how many of a family's latest entries a new files
@@ -492,6 +560,9 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 		resolved, err := tsconfig.ResolveWithAdmission(cfg, func(path string) error {
 			if !isProjection(path) {
 				entry.Reads = append(entry.Reads, path)
+				entry.Configs = append(entry.Configs, path)
+				f, err := tsconfig.Read(path)
+				entry.PackageExtends = entry.PackageExtends || err == nil && slices.ContainsFunc(f.Extends, tsconfig.PackageForm)
 			}
 			return nil
 		})
