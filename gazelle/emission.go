@@ -35,25 +35,72 @@ type emissionGraph struct {
 	outputsGeneration int
 	// Bumped at every rule store except a resolved TypeScript rule stored again unchanged.
 	rulesGeneration int
-	// observeBuilds' crawl memo: targets whose references were followed, and the
-	// packages they read. A rule edit in one of those packages clears it.
-	crawled, crawledPkgs map[string]bool
-	lastTouched          string
+	// observeBuilds' crawl memo, kept across the walk. crawledDirs adds the read packages'
+	// ancestors; storing a rule at one of crawledMisses, labels reached without one, drops it.
+	crawled                    map[string]crawledTarget
+	crawledTargets             map[string][]string
+	crawledDirs, crawledMisses map[string]bool
+	// Directories with this language disabled that Gazelle has yet to merge, which it does
+	// after their subtree and before any callback outside it; no callback here sees that merge.
+	pendingDisabled map[string]bool
+	// The lockfile whose workspace members the memo's npm labels were mapped through.
+	crawledLock *npmLock
+	// Crawled directories touched since reviewCrawl last checked them.
+	touchedDirs map[string]bool
+	lastTouched string
+}
+
+type crawledTarget struct {
+	kind       string
+	references []string
+	deps       int
 }
 
 func (g *emissionGraph) crawlMemo() {
 	if g.crawled == nil {
-		g.crawled, g.crawledPkgs = map[string]bool{}, map[string]bool{}
+		g.crawled, g.crawledTargets = map[string]crawledTarget{}, map[string][]string{}
+		g.crawledDirs, g.crawledMisses, g.touchedDirs = map[string]bool{}, map[string]bool{}, map[string]bool{}
+		g.crawledLock = g.lock
+	}
+}
+
+func (g *emissionGraph) crawledPackage(pkg string) {
+	for dir := pkg; !g.crawledDirs[dir]; dir = parentDir(dir) {
+		g.crawledDirs[dir] = true
+		if dir == "" {
+			break
+		}
 	}
 }
 
 // touch marks the package a callback edits. Gazelle's Fix and merge rewrite only
 // the BUILD file of the directory a callback ran for, after it returns.
 func (g *emissionGraph) touch(pkg string) {
-	if g.crawledPkgs[pkg] || g.crawledPkgs[g.lastTouched] {
-		g.crawled = nil
-	}
+	g.touchCrawled(pkg)
+	g.touchCrawled(g.lastTouched)
 	g.lastTouched = pkg
+	for dir := range g.pendingDisabled {
+		if dir != "" && pkg != dir && !strings.HasPrefix(pkg, dir+"/") {
+			delete(g.pendingDisabled, dir)
+			g.touchCrawled(dir)
+		}
+	}
+}
+
+func (g *emissionGraph) disableDir(dir string) {
+	if g == nil {
+		return
+	}
+	if g.pendingDisabled == nil {
+		g.pendingDisabled = map[string]bool{}
+	}
+	g.pendingDisabled[dir] = true
+}
+
+func (g *emissionGraph) touchCrawled(dir string) {
+	if g.crawledDirs[dir] {
+		g.touchedDirs[dir] = true
+	}
 }
 
 func (s *programStore) touchPackage(pkg string) {
@@ -124,8 +171,10 @@ func (g *emissionGraph) bump(key string) {
 		g.crawled = nil
 		return
 	}
-	if g.crawledPkgs[own.Pkg] {
+	if g.crawledMisses[key] {
 		g.crawled = nil
+	} else {
+		g.touchCrawled(own.Pkg)
 	}
 	if g.versions == nil {
 		g.versions = map[string]int{}
