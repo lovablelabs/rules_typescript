@@ -35,10 +35,13 @@ type emissionGraph struct {
 	// Bumped at every rule store except a resolved TypeScript rule stored again unchanged.
 	rulesGeneration int
 	// observeBuilds' crawl memo, kept across the walk. crawledDirs adds the read packages'
-	// ancestors; storing a rule at one of crawledMisses, labels reached without one, drops it.
+	// ancestors; crawledMisses are the labels reached without a rule, or outside this repo.
 	crawled                    map[string]crawledTarget
 	crawledTargets             map[string][]string
 	crawledDirs, crawledMisses map[string]bool
+	// readers maps a memo label to the crawled rules whose references name it.
+	readers map[string][]string
+	crawl   *crawlRun
 	// Directories with this language disabled that Gazelle has yet to merge, which it does
 	// after their subtree and before any callback outside it; no callback here sees that merge.
 	pendingDisabled map[string]bool
@@ -55,11 +58,66 @@ type crawledTarget struct {
 	deps       int
 }
 
+// crawlRun is the running crawl's labels with the origin each was first pushed with,
+// and the ones an invalidation took out of the memo, which the crawl follows again.
+type crawlRun struct {
+	seen  map[string]int32
+	again []queuedLabel
+}
+
+type queuedLabel struct {
+	key string
+	// The chain of deps the label was pushed through, or -1; only the BUILD-edit facts read it.
+	origin int32
+}
+
 func (g *emissionGraph) crawlMemo() {
 	if g.crawled == nil {
-		g.crawled, g.crawledTargets = map[string]crawledTarget{}, map[string][]string{}
+		g.crawled, g.crawledTargets, g.readers = map[string]crawledTarget{}, map[string][]string{}, map[string][]string{}
 		g.crawledDirs, g.crawledMisses, g.touchedDirs = map[string]bool{}, map[string]bool{}, map[string]bool{}
 		g.crawledLock = g.lock
+	}
+}
+
+// invalidate takes key and every crawled rule that reaches it out of the memo.
+func (g *emissionGraph) invalidate(key string) {
+	for stack := []string{key}; len(stack) > 0; {
+		key := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, crawled := g.crawled[key]; !crawled && !g.crawledMisses[key] {
+			continue
+		}
+		delete(g.crawled, key)
+		delete(g.crawledMisses, key)
+		if origin, seen := g.crawl.seenAt(key); seen {
+			g.crawl.again = append(g.crawl.again, queuedLabel{key, origin})
+		}
+		stack = append(stack, g.readers[key]...)
+		delete(g.readers, key)
+	}
+}
+
+func (c *crawlRun) seenAt(key string) (int32, bool) {
+	if c == nil {
+		return 0, false
+	}
+	origin, seen := c.seen[key]
+	return origin, seen
+}
+
+// invalidateDir takes out what a crawl loaded dir for: loading a package loads its ancestors.
+func (g *emissionGraph) invalidateDir(dir string) {
+	for pkg, keys := range g.crawledTargets {
+		if within(pkg, dir) {
+			for _, key := range keys {
+				g.invalidate(key)
+			}
+		}
+	}
+	for key := range g.crawledMisses {
+		if l, err := parseLabel(key); err == nil && l.Repo == "" && within(l.Pkg, dir) {
+			g.invalidate(key)
+		}
 	}
 }
 
@@ -166,12 +224,12 @@ func declaresOutputs(r *rule.Rule) bool {
 func (g *emissionGraph) bump(key string) {
 	own, err := parseLabel(key)
 	if err != nil {
+		// No crawl follows an unparsable label, such as the "" of a nameless exports_files or package.
 		g.epoch++
-		g.crawled = nil
 		return
 	}
 	if g.crawledMisses[key] {
-		g.crawled = nil
+		g.invalidate(key)
 	} else {
 		g.touchCrawled(own.Pkg)
 	}
