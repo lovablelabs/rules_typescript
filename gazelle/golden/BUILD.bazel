@@ -1,7 +1,7 @@
 load("@gazelle//:def.bzl", "gazelle_generation_test")
 
-# Kept out of //gazelle, which every consumer loads for :typescript: Gazelle
-# 0.54 fails this macro's load on gazelle_timeout_seconds, which 0.47 needs.
+# Kept out of //gazelle, which every consumer loads for :typescript. No
+# gazelle_timeout_seconds: 0.54 rejects it, so this needs the root's 0.54 override.
 #
 # Each //gazelle:testdata/<case> is a workspace: BUILD.in before the run,
 # BUILD.out and expected{Stderr,ExitCode}.txt after.
@@ -10,6 +10,5 @@ gazelle_generation_test(
     name = "gazelle_golden_test",
     size = "medium",
     gazelle_binary = "//gazelle:gazelle_typescript",
-    gazelle_timeout_seconds = 60,
     test_data = ["//gazelle:golden_testdata"],
 )

@@ -134,7 +134,7 @@ go_test(
     ],
 )
 
-# e2e/gazelle_054 runs these over Gazelle 0.54's update loop.
+# e2e/basic runs these on the Gazelle floor's update loop.
 filegroup(
     name = "test_srcs",
     testonly = True,
@@ -150,8 +150,9 @@ gazelle_binary(
 
 filegroup(
     name = "golden_testdata",
+    testonly = True,
     srcs = glob(["testdata/**"]),
-    visibility = ["//gazelle/golden:__pkg__"],
+    visibility = ["//visibility:public"],
 )
 
 # Go and proto are here because this repo generates BUILD files for its own .go

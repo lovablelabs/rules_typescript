@@ -11,4 +11,3 @@
   `diff` and `print` all see the finished files. `-ts_resolve_record=verify`
   now replays the record and checks it against a full pass with the record
   off, so it sees what the replay wrote rather than what it held in memory.
-  `e2e/gazelle_054` runs most of the extension's tests under Gazelle 0.54.

@@ -225,10 +225,17 @@ bcr_test_module:
       - "9.x"
   tasks:
     run_tests:
+      # The Gazelle floor suite tests the ruleset itself; GitHub CI runs it.
       build_targets:
         - "//..."
+        - "-//:gazelle_proto_test"
+        - "-//:gazelle_test"
+        - "-//:gazelle_golden_test"
       test_targets:
         - "//..."
+        - "-//:gazelle_proto_test"
+        - "-//:gazelle_test"
+        - "-//:gazelle_golden_test"
       build_flags:
         - "--keep_going"
       test_flags:

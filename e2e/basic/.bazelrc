@@ -1,3 +1,7 @@
+# A direct dep the graph resolves to another version, such as Gazelle past its
+# floor or rules_go, fails instead of warning.
+common --check_direct_dependencies=error
+
 # Correctness: hermetic action environment so PATH is not leaked into actions.
 build --incompatible_strict_action_env
 

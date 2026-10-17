@@ -24,7 +24,7 @@ local_path_override(
     path = "../..",
 )
 
-bazel_dep(name = "gazelle", version = "0.47.0")
+bazel_dep(name = "gazelle", version = "0.54.0")
 
 # Temporary until upstream ships the sandbox resource-directory fix:
 # https://github.com/hermeticbuild/hermetic-llvm/blob/v0.8.21/toolchain/merged_resource_directory.bzl

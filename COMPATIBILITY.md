@@ -26,6 +26,14 @@ The `//ts:*` build flags carry `scope = "target"`, so Bazel 9 builds exec
 tools with their defaults. Bazel 7 ignores the attribute and passes a set value
 into the exec configuration; whether Bazel 8 accepts it is unverified.
 
+## bazel-gazelle
+
+| bazel-gazelle | Status |
+|---------------|--------|
+| 0.54.0 | Supported; the ruleset's own build, examples and integration tests |
+| 0.51.3 | Supported floor; `e2e/basic` pins it |
+| < 0.51.3 | Not supported: rules_go 0.62 requires 0.51.3, so the graph raises it |
+
 ## Platforms
 
 | Platform | Status |
