@@ -476,6 +476,13 @@ func (l *tsLang) finishRules() {
 			}
 		}
 	}
+	// A program the pass visits after completing it still owes the visit its pre-completion dependencies.
+	before := map[string][]string{}
+	for key := range l.programs.completePrograms {
+		if r := l.programs.semanticRule(key); r != nil {
+			before[key], _ = runtimeDependencies(r)
+		}
+	}
 	seen := map[string]bool{}
 	var visit func(string, string)
 	visit = func(key, consumer string) {
@@ -526,7 +533,7 @@ func (l *tsLang) finishRules() {
 		if consumer != "" && incomplete != "" {
 			log.Fatalf("typescript: %s requires the runtime closure of %s, but its %s is an expression; automatic publication cannot establish its runtime dependencies. Did you mean to use literal dependency and forwarding labels, or keep the whole consuming rule and maintain its runtime closure manually?", consumer, key, incomplete)
 		}
-		for _, dep := range dependencies {
+		for _, dep := range slices.Concat(before[key], dependencies) {
 			visit(emissionLabel(repo, own.Pkg, dep), consumer)
 		}
 	}
@@ -547,16 +554,17 @@ func (l *tsLang) finishRules() {
 	for _, rooted := range []bool{true, false} {
 		for {
 			completed := false
-			for key, complete := range l.programs.completePrograms {
-				if rooted && !seen[key] {
+			for _, key := range slices.Sorted(maps.Keys(l.programs.completePrograms)) {
+				complete := l.programs.completePrograms[key]
+				if complete == nil || rooted && !seen[key] {
 					continue
 				}
 				delete(l.programs.completePrograms, key)
-				var promote func(string)
-				if rooted {
-					promote = func(dep string) { visit(dep, key) }
+				cx := &programCompletion{s: l.programs, repo: repo, rooted: rooted}
+				complete(cx)
+				for _, dep := range cx.reached {
+					visit(dep, key)
 				}
-				complete(promote)
 				completed = true
 			}
 			if !completed {
@@ -595,6 +603,69 @@ func (l *tsLang) finishRules() {
 			}
 		}
 	}
+}
+
+// programCompletion is what one program's completion asks of the emission pass.
+//
+// It answers each owner's emission mode from the plan, completes an owner whose
+// program is still pending before the answer, and collects the labels the
+// completion reaches; finishRules visits them once the completion returns.
+type programCompletion struct {
+	s    *programStore
+	repo string
+	// Whether the emission pass reached the completing program.
+	rooted  bool
+	reached []string
+}
+
+// reach notes that the completion reached key.
+func (cx *programCompletion) reach(key string) {
+	if cx.rooted {
+		cx.reached = append(cx.reached, key)
+	}
+}
+
+// ownerMode is the emission mode of the owner key names.
+func (cx *programCompletion) ownerMode(key string) emissionMode {
+	cx.reach(key)
+	target, owner := cx.s.ruleTarget(cx.repo, key)
+	if owner == nil || owner.Kind() != "ts_compile" && owner.Kind() != "ts_test" {
+		return opaqueEmission
+	}
+	var promoted *rule.Rule
+	if cx.rooted {
+		promoted = cx.promotion(key, target)
+	}
+	if complete := cx.s.completePrograms[target]; complete != nil {
+		delete(cx.s.completePrograms, target)
+		if promoted != nil {
+			promoted.SetAttr("emit", true)
+		}
+		complete(cx)
+	}
+	if promoted != nil {
+		return emittedEmission
+	}
+	return ruleEmission(owner)
+}
+
+// promotion is the rule visiting key sets emit = True on, when that rule is the owner target.
+func (cx *programCompletion) promotion(key, target string) *rule.Rule {
+	g := cx.s.emission
+	if g == nil || g.lock.memberCompilerTarget(cx.repo, key) != "" || g.lock.memberCompilerTarget(cx.repo, target) != "" {
+		return nil
+	}
+	r := g.rules[target]
+	own, err := parseLabel(target)
+	semantic := cx.s.semanticRule(target)
+	if r == nil || err != nil || semantic == nil {
+		return nil
+	}
+	if kind := semantic.Kind(); kind != "ts_compile" && kind != "ts_test" ||
+		!cx.s.generatedPackages[own.Pkg] || r.ShouldKeep() || attrKept(r, "emit") {
+		return nil
+	}
+	return r
 }
 
 func (s *programStore) exportPackageScopes() {

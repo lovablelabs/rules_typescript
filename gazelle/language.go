@@ -671,25 +671,14 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 		deps := resolveEdges(c, ix, r, imps, from)
 		retainTestRoots(c, r, from, sourceRoots)
 		if !effective.ShouldKeep() && tc.programs.inputs[from.Pkg].program != nil && managedProgramRule(r, from.Pkg) {
-			tc.programs.completePrograms[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)] = func(promote func(string)) {
+			tc.programs.completePrograms[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)] = func(cx *programCompletion) {
 				g := tc.programs.emission
 				live := g.rules[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)]
 				called := map[string]bool{}
 				sourceOwner := func(dep string) emissionMode {
 					key := emissionLabel(c.RepoName, from.Pkg, dep)
 					called[key] = true
-					if promote != nil {
-						promote(key)
-					}
-					key, owner := tc.programs.ruleTarget(c.RepoName, key)
-					if owner == nil || owner.Kind() != "ts_compile" && owner.Kind() != "ts_test" {
-						return opaqueEmission
-					}
-					if complete := tc.programs.completePrograms[key]; complete != nil {
-						delete(tc.programs.completePrograms, key)
-						complete(promote)
-					}
-					return ruleEmission(owner)
+					return cx.ownerMode(key)
 				}
 				deps := resolveEdges(c, ix, r, imps, from, sourceOwner)
 				removeSuppliedProgramInputs(c, r, from, sourceRoots, sourceOwner, called, deps)
@@ -697,10 +686,8 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 				retainTestRoots(c, r, from, sourceRoots)
 				filename := filepath.Join(c.RepoRoot, filepath.FromSlash(from.Pkg), c.DefaultBuildFileName())
 				rule.MergeRules(r, live, tsKinds()[r.Kind()].ResolveAttrs, filename)
-				if promote != nil {
-					for _, dep := range live.AttrStrings("deps") {
-						promote(emissionLabel(c.RepoName, from.Pkg, dep))
-					}
+				for _, dep := range live.AttrStrings("deps") {
+					cx.reach(emissionLabel(c.RepoName, from.Pkg, dep))
 				}
 				if imps.srcDrops != nil {
 					imps.srcDrops.report(live)
