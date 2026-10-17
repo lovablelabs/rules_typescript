@@ -56,7 +56,7 @@ type programStore struct {
 	repoConfig        *config.Config
 	emission          *emissionGraph
 	inputs            map[string]programInput
-	completePrograms  map[string]func(promote func(string))
+	completePrograms  map[string]func(cx *programCompletion)
 	index             *resolve.RuleIndex
 	tsgoFlag          string
 	verbose           bool
@@ -104,7 +104,7 @@ type programInput struct {
 func newProgramStore() *programStore {
 	return &programStore{
 		inputs:            map[string]programInput{},
-		completePrograms:  map[string]func(promote func(string)){},
+		completePrograms:  map[string]func(cx *programCompletion){},
 		programs:          map[string]*program{},
 		configs:           map[string]string{},
 		packages:          map[string]map[string]bool{},
