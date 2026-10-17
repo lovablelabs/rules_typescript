@@ -927,6 +927,44 @@ func programInputFiles(c *config.Config, r *rule.Rule, file *rule.File) map[reso
 	return inputs
 }
 
+type inputFilesKey struct {
+	c    *config.Config
+	pkg  string
+	name string
+}
+
+// publishPackageScope and a completed program rewrite an owner's input lists in place without a store, so an entry keeps the lists it read.
+type inputFilesEntry struct {
+	emission        *emissionGraph
+	rulesGeneration int
+	lists           [][]string
+	inputs          map[resolve.ImportSpec]inputRole
+}
+
+// storedInputFiles is programInputFiles of a stored owner in pkg; callers must not mutate the map.
+func (s *programStore) storedInputFiles(pkg string, owner *rule.Rule) map[resolve.ImportSpec]inputRole {
+	c := s.inputs[pkg].config
+	lists := make([][]string, len(inputAttrs))
+	for i, attr := range inputAttrs {
+		lists[i] = owner.AttrStrings(attr)
+	}
+	memo := s.resolutionMemo()
+	key := inputFilesKey{c, pkg, owner.Name()}
+	g := s.emission
+	if e, ok := memo.inputFiles[key]; ok && e.emission == g && e.rulesGeneration == g.rulesGeneration &&
+		slices.EqualFunc(e.lists, lists, slices.Equal) {
+		return e.inputs
+	}
+	entry := inputFilesEntry{emission: g, rulesGeneration: g.rulesGeneration, lists: lists}
+	file := g.files[pkg]
+	if file == nil {
+		file = &rule.File{Pkg: pkg}
+	}
+	entry.inputs = programInputFiles(c, owner, file)
+	memo.inputFiles[key] = entry
+	return entry.inputs
+}
+
 func suppliedProgramInputs(c *config.Config, from label.Label, dependencies []string, sourceOwner func(string) emissionMode, scopeDemands map[resolve.ImportSpec]inputRole, memo *dependencyMemo) (map[resolve.ImportSpec]inputRole, map[string]bool) {
 	s := getConfig(c).programs
 	supplied := map[resolve.ImportSpec]inputRole{}
@@ -1076,11 +1114,7 @@ func (m *dependencyMemo) programInputs(key, pkg string, owner *rule.Rule) map[re
 	if inputs, ok := m.inputs[key]; ok {
 		return inputs
 	}
-	file := m.s.emission.files[pkg]
-	if file == nil {
-		file = &rule.File{Pkg: pkg}
-	}
-	inputs := programInputFiles(m.s.inputs[pkg].config, owner, file)
+	inputs := m.s.storedInputFiles(pkg, owner)
 	m.inputs[key] = inputs
 	return inputs
 }
@@ -1821,11 +1855,7 @@ func ruleHolding(c *config.Config, ix *resolve.RuleIndex, spec resolve.ImportSpe
 		if required == sourceRole {
 			return false
 		}
-		file := s.emission.files[found.Label.Pkg]
-		if file == nil {
-			file = &rule.File{Pkg: found.Label.Pkg}
-		}
-		role, present := programInputFiles(s.inputs[found.Label.Pkg].config, owner, file)[spec]
+		role, present := s.storedInputFiles(found.Label.Pkg, owner)[spec]
 		return present && role != sourceRole && role <= required
 	}
 	owners := slices.DeleteFunc(ix.FindRulesByImport(spec, languageName), func(found resolve.FindResult) bool { return !eligible(found) })
