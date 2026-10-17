@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1951,14 +1952,18 @@ func multisetMinus(a, b []string) []string {
 
 // verifyListing is -ts_listing_patch_verify: a listing tsgo did not print for
 // args must be the one it prints for the tree as it is.
-func verifyListing(ctx context.Context, repoRoot, tsgo, subject string, args []string, got *program, how string) {
+func verifyListing(ctx context.Context, repoRoot, tsgo, subject string, args []string, got *program, how string) error {
 	fresh, err := uncachedListing(ctx, repoRoot, tsgo, subject, args)
+	if err != nil && errors.Is(context.Cause(ctx), errListingUntaken) {
+		return err
+	}
 	if err != nil {
 		log.Fatalf("typescript: -ts_listing_patch_verify: %v", err)
 	}
 	if diff := listingDifference(got, fresh); diff != "" {
 		log.Fatalf("typescript: -ts_listing_patch_verify: the %s listing of %s differs from tsgo's:\n%s", how, subject, diff)
 	}
+	return nil
 }
 
 func writeListing(key string, entry *cachedListing) {

@@ -1029,7 +1029,9 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	id := listingKey(repoRoot, tsgo, subject, args)
 	if p, patched := loadListing(id, subject); p != nil {
 		if patched && listingPatchVerify {
-			verifyListing(ctx, repoRoot, tsgo, subject, args, p, "patched")
+			if err := verifyListing(ctx, repoRoot, tsgo, subject, args, p, "patched"); err != nil {
+				return nil, err
+			}
 		}
 		return p, nil
 	}
@@ -1042,7 +1044,7 @@ func runListingContext(ctx context.Context, repoRoot, tsgo, subject string, args
 	if ok {
 		remove()
 		if err == nil && listingPatchVerify {
-			verifyListing(ctx, repoRoot, tsgo, subject, args, p, "narrowed")
+			err = verifyListing(ctx, repoRoot, tsgo, subject, args, p, "narrowed")
 		}
 	}
 	if err == nil {
@@ -1065,7 +1067,7 @@ func runListingUncached(ctx context.Context, repoRoot, tsgo, subject string, arg
 		p, err := listInProcess(ctx, compiler, repoRoot, subject, args)
 		if !errors.Is(err, listing.ErrUnsupported) {
 			if err == nil && listingInProcessMode == "verify" {
-				verifyInProcess(ctx, repoRoot, tsgo, subject, args, p)
+				err = verifyInProcess(ctx, repoRoot, tsgo, subject, args, p)
 			}
 			return p, err
 		}
