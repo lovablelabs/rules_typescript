@@ -1215,6 +1215,50 @@ func TestEmission_CrawlFollowsADepAddedAfterItsPackageWasCrawled(t *testing.T) {
 		{"the lockfile installed after the crawl", map[string]string{"app": "ts_compile(name = \"app\", deps = [\"@npm//:foo\"])\n", "packages/foo": "ts_compile(name = \"foo\")\n"}, func(s *store, files map[string]*rule.File) {
 			s.emission.lock = &npmLock{members: map[string]string{"foo": "packages/foo"}}
 		}, "//packages/foo"},
+		{"a dep replaced in a crawled rule", map[string]string{"app": "ts_compile(name = \"app\", deps = [\"//lib\"])\n", "lib": "ts_compile(name = \"lib\", deps = [\"//y\"])\n", "y": "ts_compile(name = \"y\")\n", "z": "ts_compile(name = \"z\")\n"}, func(s *store, files map[string]*rule.File) {
+			files["lib"].Rules[0].SetAttr("deps", []string{"//z"})
+			s.touchPackage("lib")
+		}, "//z"},
+		{"deps merged into a workspace member a crawled rule reaches through the lockfile", map[string]string{"app": "ts_compile(name = \"app\", deps = [\"@npm//:foo\"])\n", "packages/foo": "ts_compile(name = \"foo\")\n", "z": "ts_compile(name = \"z\")\n"}, func(s *store, files map[string]*rule.File) {
+			s.emission.lock = &npmLock{members: map[string]string{"foo": "packages/foo"}}
+			s.observeBuild("app", func(dir string) (walk.DirInfo, error) { return walk.DirInfo{File: files[dir]}, nil })
+			files["packages/foo"].Rules[0].SetAttr("deps", []string{"//z"})
+			s.touchPackage("packages/foo")
+		}, "//z"},
+		{"a crawled rule changed to another kind with new deps", map[string]string{"app": "ts_compile(name = \"app\", deps = [\"//lib\"])\n", "lib": "ts_test(name = \"lib\")\n", "z": "ts_compile(name = \"z\")\n"}, func(s *store, files map[string]*rule.File) {
+			files["lib"].Rules[0].SetKind("ts_compile")
+			files["lib"].Rules[0].SetAttr("deps", []string{"//z"})
+			s.touchPackage("lib")
+		}, "//z"},
+		{"deps merged into a rule two readers below the crawl's seed", map[string]string{"app": "ts_compile(name = \"app\", deps = [\"//mid\"])\n", "mid": "ts_compile(name = \"mid\", deps = [\"//lib\"])\n", "lib": "ts_compile(name = \"lib\")\n", "z": "ts_compile(name = \"z\")\n"}, func(s *store, files map[string]*rule.File) {
+			files["lib"].Rules[0].SetAttr("deps", []string{"//z"})
+			s.touchPackage("lib")
+		}, "//z"},
+		{"a rule merged into a package the crawl reached only through a source label", map[string]string{"app": "ts_compile(name = \"app\", srcs = [\"//lib:a.ts\"])\n", "lib": "\n"}, func(s *store, files map[string]*rule.File) {
+			rule.NewRule("ts_compile", "lib").Insert(files["lib"])
+			s.ruleListsMayChange()
+			s.touchPackage("lib")
+		}, "//lib"},
+		{"a rule merged into an ancestor of a package the crawl reached only through a source label", map[string]string{"app": "ts_compile(name = \"app\", srcs = [\"//b/lib:a.ts\"])\n", "b/lib": "\n", "b": "\n"}, func(s *store, files map[string]*rule.File) {
+			rule.NewRule("ts_compile", "y").Insert(files["b"])
+			s.ruleListsMayChange()
+			s.touchPackage("b")
+		}, "//b:y"},
+		{"a crawled rule replaced without a callback touch", app, func(s *store, files map[string]*rule.File) {
+			r := rule.NewRule("ts_compile", "lib")
+			r.SetAttr("deps", []string{"//z"})
+			s.emission.setRule("//lib", r)
+		}, "//z"},
+		{"deps merged into a root rule where TypeScript is disabled", map[string]string{"": "ts_compile(name = \"r\")\n", "app": "ts_compile(name = \"app\", deps = [\"//:r\"])\n", "z": "ts_compile(name = \"z\")\n"}, func(s *store, files map[string]*rule.File) {
+			s.emission.disableDir("")
+			s.touchPackage("z")
+			s.observeBuild("app", func(dir string) (walk.DirInfo, error) { return walk.DirInfo{File: files[dir]}, nil })
+			files[""].Rules[0].SetAttr("deps", []string{"//z"})
+			s.touchPackage("app")
+		}, "//z"},
+		{"a rule stored mid-crawl at a label a memo hit of the same crawl reads", crawledHit, func(s *store, files map[string]*rule.File) {
+			crawlPastAHit(s, files)
+		}, "//z"},
 	} {
 		t.Run(c.change, func(t *testing.T) {
 			files := map[string]*rule.File{}
@@ -1236,5 +1280,38 @@ func TestEmission_CrawlFollowsADepAddedAfterItsPackageWasCrawled(t *testing.T) {
 				t.Fatalf("the crawl kept its memo and never loaded %s after %s", c.want, c.change)
 			}
 		})
+	}
+}
+
+var crawledHit = map[string]string{"top": "ts_compile(name = \"top\", deps = [\"//n\"])\n", "n": "ts_compile(name = \"n\", deps = [\"//m\"])\n", "m": "\n", "p": "ts_compile(name = \"p\", deps = [\"//n\", \"//m:other\"])\n", "z": "ts_compile(name = \"z\")\n"}
+
+// crawlPastAHit crawls top, then from p skips n as a memo hit before loading m, which now stores //m.
+func crawlPastAHit(s *programStore, files map[string]*rule.File) {
+	dirInfo := func(dir string) (walk.DirInfo, error) { return walk.DirInfo{File: files[dir]}, nil }
+	s.observeBuild("top", dirInfo)
+	m := rule.NewRule("ts_compile", "m")
+	m.SetAttr("deps", []string{"//z"})
+	m.Insert(files["m"])
+	s.ruleListsMayChange()
+	s.observeBuild("p", dirInfo)
+}
+
+func TestEmission_CrawlRecordsTheDepChainOfALoadAfterAMidCrawlInvalidation(t *testing.T) {
+	files := map[string]*rule.File{}
+	for dir, src := range crawledHit {
+		f, err := rule.LoadData(dir+"/BUILD.bazel", dir, []byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[dir] = f
+	}
+	s := newProgramStore()
+	s.repoConfig = config.New()
+	s.emission = &emissionGraph{roots: map[string]bool{}, outputs: map[string]bool{}, rules: map[string]*rule.Rule{}, files: map[string]*rule.File{}}
+	s.buildFacts = newBuildFactsRecorder()
+	crawlPastAHit(s, files)
+	snap := &buildSnapshot{Edges: s.buildFacts.crawlEdges, Loads: s.buildFacts.crawlLoads}
+	if s.emission.rules["//z"] == nil || snap.cutLoad([]crawlEdge{{"//p", "//n"}}) == nil {
+		t.Fatalf("dropping //p's dep on //n leaves z unloaded, but the facts keep the load: %+v %v", snap.Loads, snap.Edges)
 	}
 }

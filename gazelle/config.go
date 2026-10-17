@@ -146,22 +146,29 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		return
 	}
 	s.reviewCrawl(dirInfo[0])
+	g := s.emission
 	mapped := func(key string) string {
-		if member := s.emission.lock.memberCompilerTarget(s.repoConfig.RepoName, key); member != "" {
+		if member := g.lock.memberCompilerTarget(s.repoConfig.RepoName, key); member != "" {
 			return member
 		}
 		return key
 	}
-	// origin is the chain of deps an entry was pushed through, or -1; only the BUILD-edit facts read it.
-	type queued struct {
-		key    string
-		origin int32
-	}
-	var queue []queued
+	run := &crawlRun{seen: map[string]int32{}}
+	prev := g.crawl
+	g.crawl = run
+	defer func() { g.crawl = prev }()
+	var queue []queuedLabel
 	push := func(key string, origin int32) {
-		queue = append(queue, queued{key, origin})
+		key = mapped(key)
 		if facts != nil {
-			facts.pushed(mapped(key), origin)
+			facts.pushed(key, origin)
+		}
+		if _, seen := run.seen[key]; seen {
+			return
+		}
+		run.seen[key] = origin
+		if _, hit := g.crawled[key]; !hit && !g.crawledMisses[key] {
+			queue = append(queue, queuedLabel{key, origin})
 		}
 	}
 	facts.startCrawl()
@@ -176,41 +183,40 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			}
 		}
 	}
-	seenTargets := map[string]bool{}
 	for len(queue) > 0 {
-		key, origin := mapped(queue[0].key), queue[0].origin
+		key, origin := queue[0].key, queue[0].origin
 		queue = queue[1:]
-		s.emission.crawlMemo()
-		if _, crawled := s.emission.crawled[key]; crawled || seenTargets[key] {
+		if _, crawled := g.crawled[key]; crawled || g.crawledMisses[key] {
 			continue
 		}
-		seenTargets[key] = true
 		target, err := parseLabel(key)
 		if err != nil || target.Repo != "" {
+			g.crawledMisses[key] = true
 			continue
 		}
 		load(target.Pkg)
-		if s.emission.crawled == nil {
-			// The dropped memo no longer watches the labels this crawl already passed.
-			clear(seenTargets)
-			seenTargets[key] = true
-		}
-		s.emission.crawlMemo()
-		s.emission.crawledPackage(target.Pkg)
+		queue = append(queue, run.again...)
+		run.again = run.again[:0]
+		g.crawledPackage(target.Pkg)
 		r := s.semanticRule(key)
 		if r == nil {
-			s.emission.crawledMisses[key] = true
+			g.crawledMisses[key] = true
 			continue
 		}
 		references, deps := crawlReferences(r)
-		s.emission.crawled[key] = crawledTarget{r.Kind(), references, deps}
-		s.emission.crawledTargets[target.Pkg] = append(s.emission.crawledTargets[target.Pkg], key)
+		g.crawled[key] = crawledTarget{r.Kind(), references, deps}
+		if !slices.Contains(g.crawledTargets[target.Pkg], key) {
+			g.crawledTargets[target.Pkg] = append(g.crawledTargets[target.Pkg], key)
+		}
 		editable := facts != nil && editableAttr(r.Kind(), "deps")
 		for i, text := range references {
 			if text == "" {
 				continue
 			}
 			next := emissionLabel(s.repoConfig.RepoName, target.Pkg, text)
+			if read := mapped(next); !strings.HasPrefix(read, "@") && !slices.Contains(g.readers[read], key) {
+				g.readers[read] = append(g.readers[read], key)
+			}
 			chain := origin
 			if i < deps && editable {
 				chain = facts.hop(key, next, origin)
@@ -240,46 +246,39 @@ func crawlReferences(r *rule.Rule) (references []string, deps int) {
 	return references, deps
 }
 
-// reviewCrawl keeps a stale crawl memo only if, in every directory touched since, a load
-// would store nothing and each crawled target has the same kind and references.
+// reviewCrawl takes out of the memo, per directory touched since, all a crawl loaded it for if a
+// load would store something there, else each crawled rule whose kind, references or deps changed.
 func (s *programStore) reviewCrawl(dirInfo func(string) (walk.DirInfo, error)) {
 	g := s.emission
 	if g.crawledLock != g.lock {
 		g.crawled = nil
 	}
 	g.crawlMemo()
-	if len(g.touchedDirs) == 0 {
-		return
+	// No callback runs outside the root, so a disabled root is reread at every review.
+	if g.pendingDisabled[""] {
+		g.touchCrawled("")
 	}
-	if s.crawlChanged(dirInfo) {
-		g.crawled = nil
-		g.crawlMemo()
-		return
-	}
-	clear(g.touchedDirs)
-}
-
-// Until Resolve sets the index, every change to what a crawl reads is a callback's touch, a rule store
-// or the lockfile; a merge into a disabled directory counts as a touch at the next callback outside it.
-func (s *programStore) crawlChanged(dirInfo func(string) (walk.DirInfo, error)) bool {
-	g := s.emission
+	// Until Resolve sets the index, every change to what a crawl reads is a callback's touch, a rule store
+	// or the lockfile; a merge into a disabled directory counts as a touch at the next callback outside it.
 	for dir := range g.touchedDirs {
 		if s.loadDir(dir, dirInfo, true) {
-			return true
+			g.invalidateDir(dir)
+			continue
 		}
-	}
-	for dir := range g.touchedDirs {
 		for _, key := range g.crawledTargets[dir] {
-			target, r := g.crawled[key], s.semanticRule(key)
-			if r == nil || r.Kind() != target.kind {
-				return true
+			target, crawled := g.crawled[key]
+			if !crawled {
+				continue
 			}
-			if references, deps := crawlReferences(r); deps != target.deps || !slices.Equal(references, target.references) {
-				return true
+			r := s.semanticRule(key)
+			if r == nil || r.Kind() != target.kind {
+				g.invalidate(key)
+			} else if references, deps := crawlReferences(r); deps != target.deps || !slices.Equal(references, target.references) {
+				g.invalidate(key)
 			}
 		}
 	}
-	return false
+	clear(g.touchedDirs)
 }
 
 // loadDir records dir's BUILD file, inputs and rules for observeBuilds, or with dryRun
