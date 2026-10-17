@@ -1,8 +1,10 @@
 package typescript
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/gob"
 	"io/fs"
 	"maps"
 	"os"
@@ -1176,5 +1178,20 @@ func TestListingCache_ASecondEditPatchesByARetainedFact(t *testing.T) {
 		t.Errorf("the retained substitution did not patch the import that uses it (%d runs): %v", l.runs, lastPatchRefusal.Load())
 	} else if diff := listingDifference(got, l.fresh("app/tsconfig.json")); diff != "" {
 		t.Errorf("the patch that used a retained fact differs from tsgo's:\n%s", diff)
+	}
+}
+
+// An older binary sharing the cache decodes an entry's first value as a whole
+// cachedListing; a head it took for one would hold no reads, and its fast path would replay.
+func TestListingCache_AnOlderBinaryCannotTakeAnEntryHeadForAnEntry(t *testing.T) {
+	var file bytes.Buffer
+	entry := &cachedListing{Root: "/repo", Sources: map[string]cachedSource{"a.ts": {Specs: []string{"./b"}}}, FilesList: []string{"a.ts"},
+		Reads: []string{"/repo/a.ts"}, ReadLines: []string{"f"}, PatchVersion: patchStateVersion}
+	if err := encodeEntry(&file, entry); err != nil {
+		t.Fatal(err)
+	}
+	var old cachedListing
+	if err := gob.NewDecoder(&file).Decode(&old); err == nil {
+		t.Errorf("an entry's head decodes as a cachedListing with %d read(s) and root %q", len(old.Reads), old.Root)
 	}
 }

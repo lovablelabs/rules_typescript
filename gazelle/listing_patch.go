@@ -3,7 +3,6 @@ package typescript
 import (
 	"cmp"
 	"context"
-	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,7 +39,7 @@ func refuse(reason string) *program {
 	return nil
 }
 
-const patchStateVersion = 6
+const patchStateVersion = 7
 
 type cachedSource struct {
 	Specs []string
@@ -92,15 +91,29 @@ func scanSum(src incremental.Scanned) uint64 {
 	if err != nil {
 		return 0
 	}
-	if sum := lineSum(fmt.Sprintf("%d %s", patchStateVersion, data)); sum > wholeScan {
+	if sum := lineSum(fmt.Sprintf("%d %s", patchStateVersion, data)); sum > jsonScan {
 		return sum
 	}
-	return wholeScan + 1
+	return jsonScan + 1
 }
 
-// wholeScan stands, in a run record's scans, for a read the extension made of a
-// source's whole content, which no scan sum covers; scanSum never returns it.
-const wholeScan uint64 = 1
+// In a run record's scans, wholeScan stands for a source the extension read whole, and
+// jsonScan for a JSON module a listing holds, whose content moves only tsgo's diagnostics.
+const (
+	wholeScan uint64 = 1
+	jsonScan  uint64 = 2
+)
+
+func jsonModule(file string) bool {
+	return path.Ext(file) == ".json" && !readByGazelle(path.Base(file)) && !strings.HasPrefix(file, "../") && !strings.Contains(file, "node_modules/")
+}
+
+// jsonModuleRead says whether the listing holds JSON file rel as a module and takes
+// no compiler options from it; an entry of an older patch state keeps no Configs.
+func (e *cachedListing) jsonModuleRead(rel string) bool {
+	return e.PatchVersion == patchStateVersion && !e.PackageExtends && jsonModule(rel) && slices.Contains(e.Listing.Files, rel) &&
+		!slices.Contains(e.Configs, filepath.Join(e.Root, filepath.FromSlash(rel)))
+}
 
 func patchableSource(rel string) bool {
 	return !strings.HasPrefix(rel, "../") && !strings.HasPrefix(rel, embeddedLibs) &&
@@ -561,6 +574,7 @@ type patcher struct {
 	// Reads the patch adds to the listing's, and files it drops from it.
 	newReads, dropped []string
 	refusal           string
+	jsonEdited        bool
 }
 
 func (t *patcher) fail(reason string) bool {
@@ -601,6 +615,9 @@ func tryPatchListing(entry *cachedListing, subject string, filesList []string) (
 	if entry.PatchVersion != patchStateVersion || entry.Sources == nil || entry.Config == nil ||
 		len(entry.ReadLines) != len(entry.Reads) || len(entry.DirDigests) != len(entry.Dirs) {
 		return nil, "no patch state"
+	}
+	if listingVerbose && entry.StaleDiagnostics {
+		return nil, "a patch kept diagnostics -ts_verbose logs"
 	}
 	t := &patcher{entry: entry, root: entry.Root, filesList: filesList, dirty: map[int]bool{}, scopes: map[string]string{}, nms: map[string]string{}}
 	p := t.patch(subject)
@@ -687,7 +704,8 @@ func (t *patcher) patch(subject string) *program {
 			} else {
 				t.sources[rel] = src
 			}
-		case path.Ext(rel) == ".json" && path.Base(rel) != "package.json":
+		case entry.jsonModuleRead(rel) && !listingVerbose:
+			t.jsonEdited = true
 		default:
 			t.fail("a changed read is not a listed source")
 			return nil
@@ -1616,6 +1634,7 @@ func (t *patcher) commit(dirsChanged bool, unmatched []string) {
 		entry.Unmatched = unmatched
 	}
 	entry.FilesList = t.filesList
+	entry.StaleDiagnostics = entry.StaleDiagnostics || t.jsonEdited
 	entry.Fingerprint = listingFingerprint(entry.Reads, entry.Dirs)
 }
 
@@ -1943,5 +1962,5 @@ func writeListing(key string, entry *cachedListing) {
 }
 
 func writeListingFile(file string, entry *cachedListing) {
-	writeAtomicallyWith(file, func(w io.Writer) error { return gob.NewEncoder(w).Encode(entry) })
+	writeAtomicallyWith(file, func(w io.Writer) error { return encodeEntry(w, entry) })
 }

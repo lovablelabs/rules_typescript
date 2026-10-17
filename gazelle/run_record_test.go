@@ -66,6 +66,16 @@ func copyTree(t *testing.T, root string) string {
 		if err != nil {
 			return err
 		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			link, err := os.Readlink(file)
+			if err == nil {
+				err = os.MkdirAll(filepath.Dir(filepath.Join(dst, rel)), 0o755)
+			}
+			if err == nil {
+				err = os.Symlink(link, filepath.Join(dst, rel))
+			}
+			return err
+		}
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return err

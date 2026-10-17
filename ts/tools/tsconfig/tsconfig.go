@@ -325,7 +325,7 @@ func ResolveExtends(dir, spec string) (string, bool) {
 		return "", false
 	}
 	relative := strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")
-	if !relative && !filepath.IsAbs(spec) {
+	if PackageForm(spec) {
 		warnPackageFormExtends(dir, spec)
 		return "", false
 	}
@@ -336,6 +336,11 @@ func ResolveExtends(dir, spec string) (string, bool) {
 		return spec, true
 	}
 	return filepath.Join(dir, filepath.FromSlash(spec)), true
+}
+
+// PackageForm says whether an extends value names a package, which resolves through node_modules.
+func PackageForm(spec string) bool {
+	return spec != "" && !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") && !filepath.IsAbs(spec)
 }
 
 var packageFormExtendsWarned sync.Map

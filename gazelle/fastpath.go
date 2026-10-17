@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -878,9 +879,9 @@ type fastPathDecision struct {
 	newDirs map[string]string
 }
 
-// readsNoneOf declines when the recorded run read a name in a gained
-// directory: every name of its parent, a path under it, or a declared output there.
-func (f *importFacts) readsNoneOf(repoRoot string, gained map[string]string) *decline {
+// readsNoneOf declines when the recorded run read a name in a gained directory: every name
+// of its parent, unless it holds only sources, which are no data files; a path under it; or an output.
+func (f *importFacts) readsNoneOf(repoRoot string, gained map[string]string, sourced map[string]bool) *decline {
 	outputs := slices.Concat(f.Trees, f.Produced)
 	for dir := range gained {
 		rel, ok := repoDir(repoRoot, dir)
@@ -890,7 +891,7 @@ func (f *importFacts) readsNoneOf(repoRoot string, gained map[string]string) *de
 		at, _ := slices.BinarySearch(f.names.Paths, rel+"/")
 		parent := parentDir(rel)
 		switch {
-		case has(f.names.Dirs, parent):
+		case has(f.names.Dirs, parent) && !sourced[rel]:
 			return declined(declineInputs, "the run read every name in %s, which gained %s", orRepoRoot(parent), rel)
 		case has(f.names.Paths, rel):
 			return declined(declineInputs, "the run looked up %s, now a gained directory", rel)
@@ -969,7 +970,7 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 		if delta, why = sourceChanges(rec, facts, repoRoot, dirs, moved, buildNames, filepath.Dir(snapFile), stamps); why != nil {
 			return nil, why
 		}
-		if why := facts.readsNoneOf(repoRoot, delta.newDirs); why != nil {
+		if why := facts.readsNoneOf(repoRoot, delta.newDirs, delta.sourced); why != nil {
 			return nil, why
 		}
 		if why := excludedNewDir(facts, repoRoot, cliExcludes, delta.newDirs); why != nil {
@@ -1027,16 +1028,21 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 	}
 	affected := map[int]bool{}
 	changedRel := map[string]bool{}
+	readSums, scans := map[string]uint64{}, rec.scansByRead()
 	for _, abs := range decision.changed {
 		rel, ok := repoRelative(repoRoot, abs)
 		if ok && delta.has(rel) {
 			continue
 		}
-		if !ok || !patchableSource(rel) {
+		jsonEdit := scans[abs] == jsonScan && scannedAs(abs, jsonScan)
+		if !ok || !patchableSource(rel) && !jsonEdit {
 			return nil, declined(declineNotSource, "%s changed and is no TypeScript source", abs)
 		}
 		if info, err := os.Lstat(abs); err != nil || !info.Mode().IsRegular() {
 			return nil, declined(declineNotSource, "%s is no longer a regular file", rel)
+		}
+		if jsonEdit {
+			continue
 		}
 		if len(sources[rel]) == 0 {
 			return nil, declined(declineNoListing, "%s is no source of a listing the recorded run used", rel)
@@ -1066,7 +1072,6 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 			}
 		}
 	}
-	readSums, scans := map[string]uint64{}, rec.scansByRead()
 	for i, read := range rec.reads {
 		readSums[read] = rec.sums[len(rec.dirs)+len(rec.files)+i]
 	}
@@ -1082,9 +1087,12 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 	defer func() { runInputs = saved }()
 	reads := listingReads{repoRoot: repoRoot, readSums: readSums, rootSums: rootSums, scans: scans, changed: changedRel, delta: delta, changedRoots: changedRoots}
 	if proof != nil {
-		reads.owners = map[string]string{}
+		reads.owners, reads.programs = map[string]string{}, map[string]string{}
 		for f, e := range proof.owners {
 			reads.owners[f] = e.pkg
+		}
+		for _, p := range facts.Programs {
+			reads.programs[p.Dir] = p.Listing
 		}
 	}
 	patches, why := patchListings(facts, affected, reads)
@@ -1150,6 +1158,10 @@ func unchangedScans(rec *runRecord, lines inputLines, buildNames []string) ([]st
 }
 
 func scannedAs(file string, sum uint64) bool {
+	if sum == jsonScan {
+		// -ts_verbose logs the diagnostics, which a JSON edit may move.
+		return !listingVerbose && jsonModule(file)
+	}
 	src, ok := scanFile(file)
 	return ok && src.sum == sum
 }
@@ -1163,11 +1175,14 @@ type listingReads struct {
 	changed            map[string]bool
 	delta              *sourceDelta
 	changedRoots       map[string]bool
-	// owners are each gained source's package.
-	owners map[string]string
+	// owners are each gained source's package, and programs each package's program listing.
+	owners, programs map[string]string
 	// scans are the record's scan sums, which a source a scan replay left stale in its entry still has.
 	scans map[string]uint64
 }
+
+// fastPathDecoded says the fast path decoded listing entries, whose memory a decline leaves to the collector.
+var fastPathDecoded atomic.Bool
 
 // patchListings patches every affected listing from its entry and every
 // files-list projection whose list the edit changes, a projection after the
@@ -1198,10 +1213,33 @@ func patchListings(facts *importFacts, affected map[int]bool, reads listingReads
 		}
 	}
 	order := slices.Sorted(maps.Keys(wanted))
-	entries := make([]*cachedListing, len(order))
+	if len(pending) > 0 {
+		fastPathDecoded.Store(true)
+	}
+	heads := make([]*entryDecoder, len(order))
+	bound := make([]*decline, len(order))
 	errs := make([]error, len(order))
 	parallel(len(order), func(j int) {
-		entries[j], errs[j] = readListing(filepath.Join(listingCacheDir, facts.Listings[order[j]].Key))
+		key := facts.Listings[order[j]].Key
+		file := filepath.Join(listingCacheDir, key)
+		data, err := readListingFile(file)
+		if err == nil {
+			heads[j], err = decodeHead(file, data)
+		}
+		if errs[j] = err; err == nil && heads[j].head.HeadRoot == reads.repoRoot {
+			bound[j] = boundToDecline(key, heads[j].headEntry(), heads[j].head.HeadFilesList, reads)
+		}
+	})
+	for _, why := range bound {
+		if why != nil {
+			return nil, why
+		}
+	}
+	entries := make([]*cachedListing, len(order))
+	parallel(len(order), func(j int) {
+		if errs[j] == nil {
+			entries[j], errs[j] = heads[j].rest()
+		}
 	})
 	type decodedEntry struct {
 		entry *cachedListing
@@ -1442,7 +1480,7 @@ func patchAffected(key string, entry *cachedListing, filesList []string, reads l
 			continue
 		}
 		if now := listingStats.Line(read); now != entry.ReadLines[i] {
-			if sum := reads.scans[read]; sum == 0 || entry.Sources[rel].Sum != sum || !regularLine(now) || !scannedAs(read, sum) {
+			if sum := reads.scans[read]; sum == 0 || entry.scanOf(i) != sum || !regularLine(now) || !scannedAs(read, sum) {
 				return fastPatch{}, declined(declineOtherRead, "listing %s: %s changed and the record does not say so", key, read), false
 			}
 			touched = true
@@ -1461,6 +1499,9 @@ func patchAffected(key string, entry *cachedListing, filesList []string, reads l
 	if !touched && slices.Equal(filesList, entry.FilesList) {
 		return fastPatch{}, nil, true
 	}
+	if why := boundToDecline(key, entry, filesList, reads); why != nil {
+		return fastPatch{}, why, false
+	}
 	// The patch leaves the entry's listing and candidates as they were until remember.
 	old := fastPatch{key: key, entry: entry, listing: entry.Listing, candidates: entry.Candidates}
 	p, why := tryPatchListing(entry, "", filesList)
@@ -1469,6 +1510,93 @@ func patchAffected(key string, entry *cachedListing, filesList []string, reads l
 	}
 	old.p = p
 	return old, nil, false
+}
+
+// boundToDecline is, from the entry alone, a decline checkPatch would reach only
+// after the patch copies the whole listing: a changed source drops an import whose
+// every edge reaches a kept source, or a gained source would take a package import implicitly.
+func boundToDecline(key string, entry *cachedListing, filesList []string, reads listingReads) *decline {
+	edges := map[importKey][]string{}
+	for _, e := range entry.Listing.Edges {
+		if reads.changed[e.From] {
+			k := importKey{e.From, e.Specifier}
+			edges[k] = append(edges[k], e.To)
+		}
+	}
+	for _, rel := range slices.Sorted(maps.Keys(reads.changed)) {
+		old, known := entry.Sources[rel]
+		if !known {
+			continue
+		}
+		now, ok := scanSpecs(filepath.Join(reads.repoRoot, filepath.FromSlash(rel)))
+		if !ok {
+			continue
+		}
+		before, after := writtenCounts(old.Specs), writtenCounts(now.Specs)
+		for _, text := range slices.Sorted(maps.Keys(before)) {
+			to := edges[importKey{rel, text}]
+			if after[text] < before[text] && len(to) > 0 && !slices.ContainsFunc(to, reads.delta.isLost) {
+				return declined(declineEdgeRemoved, "listing %s loses %s -> %s", key, rel, to[len(to)-1])
+			}
+		}
+	}
+	if reads.delta == nil {
+		return nil
+	}
+	implicit := map[[2]string]string{}
+	for _, f := range slices.Sorted(maps.Keys(reads.delta.gained)) {
+		pkg, owned := reads.owners[f]
+		if !owned || reads.programs[pkg] != key && !slices.Contains(filesList, f) {
+			continue
+		}
+		src, ok := scanSpecs(filepath.Join(reads.repoRoot, filepath.FromSlash(f)))
+		if !ok {
+			continue
+		}
+		class := [2]string{path.Ext(f), src.Rest}
+		text, seen := implicit[class]
+		if !seen {
+			text, _ = implicitBare(entry, class[0], class[1])
+			implicit[class] = text
+		}
+		if text != "" {
+			return declined(declineEdgeKind, "%s -> %q is no relative or subpath import", f, text)
+		}
+	}
+	return nil
+}
+
+// implicitBare is a package import a listed source with extension ext and scan
+// facts rest resolves beyond what it writes, which implicitFor gives a source
+// entering the listing; as there, a source resolving a written specifier twice is no sample.
+func implicitBare(entry *cachedListing, ext, rest string) (string, bool) {
+	resolved := map[importKey]int{}
+	for _, e := range entry.Listing.Edges {
+		if src, ok := entry.Sources[e.From]; ok && src.Rest == rest && path.Ext(e.From) == ext {
+			resolved[importKey{e.From, e.Specifier}]++
+		}
+	}
+	written := map[string]map[string]int{}
+	repeats := map[string]bool{}
+	var bare []string
+	for k, n := range resolved {
+		if written[k.from] == nil {
+			written[k.from] = writtenCounts(entry.Sources[k.from].Specs)
+		}
+		switch w := written[k.from][k.specifier]; {
+		case w == 0 && !relativeSpecifier(k.specifier) && !strings.HasPrefix(k.specifier, "#"):
+			bare = append(bare, k.specifier+"\x00"+k.from)
+		case w > 0 && n > w:
+			repeats[k.from] = true
+		}
+	}
+	slices.Sort(bare)
+	for _, b := range bare {
+		if text, from, _ := strings.Cut(b, "\x00"); !repeats[from] {
+			return text, true
+		}
+	}
+	return "", false
 }
 
 // listed proves each gained source a member of its package's program, reached
@@ -1666,6 +1794,10 @@ func checkPatch(facts *importFacts, ids map[string]int32, patch fastPatch, chang
 	}
 	for _, c := range patch.candidates {
 		probed[parentDir(c.Path)] = true
+	}
+	// The proof placed every new directory of sources in its package.
+	if delta != nil {
+		maps.Copy(probed, delta.sourced)
 	}
 	freshPaths := map[string]bool{}
 	probesMetadata := map[candidateKeyText]bool{}

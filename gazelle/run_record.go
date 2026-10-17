@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -700,6 +701,10 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 		}
 		if dirs != nil {
 			tryFastPath(fs, c, file, rec, dirs, stamps)
+			// This process waits out the child, so the listings a declined fast path read leave with it.
+			if fastPathDecoded.Load() {
+				debug.FreeOSMemory()
+			}
 		}
 	}
 	candidate := fmt.Sprintf("%s.candidate.%d", file, os.Getpid())
@@ -915,6 +920,9 @@ func (e *cachedListing) scanOf(i int) uint64 {
 	rel, ok := repoRelative(e.Root, e.Reads[i])
 	if !ok || !regularLine(e.ReadLines[i]) {
 		return 0
+	}
+	if e.jsonModuleRead(rel) {
+		return jsonScan
 	}
 	return e.Sources[rel].Sum
 }

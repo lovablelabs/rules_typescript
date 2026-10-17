@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -138,7 +139,7 @@ func TestFastPath_DeclinedEditsRunTheFullPass(t *testing.T) {
 		{"a new test source", declineNotSource, editFile("app/f.test.ts", "export const f = 6;\n")},
 		{"a new source beside a file of its stem", declineNotSource, editFile("app/b.tsx", "export const bx = 6;\n")},
 		{"a new source that makes its package an app", declineNotSource, editFile("app/main.ts", "export const m = 6;\n")},
-		{"a new source in a new directory", declineInputs, editFile("app/sub/f.ts", "export const f = 6;\n")},
+		{"a new source in a new directory no program includes", declineNotListed, editFile("app/sub/f.ts", "export const f = 6;\n")},
 		{"a new source beside a source no program lists", declineInputs, editFile("extra/y.ts", "export const y = 6;\n")},
 		{"a new source importing another rule's source", declineWalkConditional, editFile("app/f.ts", "import { x } from '../lib/x';\nexport const f = x;\n")},
 		{"a deleted source still imported", declineListingShape, removeFile("app/b.ts")},
@@ -636,8 +637,8 @@ func TestFastPath_AnEntryNothingReadsTakesTheFastPath(t *testing.T) {
 	}
 }
 
-// An entry the run read keeps the full pass: a JSON a source imports, a file a
-// listing probed for, a JSON whose name joins its package's srcs, a package.json.
+// An entry the run read keeps the full pass: a file a listing probed for, a JSON
+// whose name joins its package's srcs, a package.json.
 func TestFastPath_AnEntryTheRunReadsStillRunsTheFullPass(t *testing.T) {
 	requireTsgo(t)
 	tree := fastPathTree()
@@ -652,10 +653,6 @@ func TestFastPath_AnEntryTheRunReadsStillRunsTheFullPass(t *testing.T) {
 		name, code string
 		do         func(t *testing.T, root string)
 	}{
-		{"a new source beside an edited JSON a source imports", declineNotSource, func(t *testing.T, root string) {
-			newSource(t, root)
-			editFile("app/data.json", `{"d":5}`)(t, root)
-		}},
 		{"a new source beside a JSON its package gains as data", declineInputs, func(t *testing.T, root string) {
 			newSource(t, root)
 			editFile("app/messages/en.json", `{"greeting":"hello"}`)(t, root)
@@ -758,7 +755,7 @@ func TestFastPath_AGainedDirectoryTheRunReadsStillRunsTheFullPass(t *testing.T) 
 		// why is the decline's code and detail, where only one check may decline.
 		why string
 	}{
-		{"a directory with a source", nil, editFile("tools/emulator/x.ts", "export const x = 1;\n"), ""},
+		{"a directory with a source no program lists", nil, editFile("tools/emulator/x.ts", "export const x = 1;\n"), declineOwner + ")"},
 		{"a directory with a BUILD file", nil, editFile("tools/emulator/BUILD.bazel", ""), ""},
 		{"a directory with a package.json", nil, editFile("tools/emulator/deep/package.json", `{"name":"e"}`), ""},
 		{"a directory of data in a package", nil, editFile("data/fixtures/de.yaml", "greeting: hallo\n"), ""},
@@ -1191,6 +1188,349 @@ func TestFastPath_VerifyCatchesAForgedScanReplay(t *testing.T) {
 	}
 }
 
+// jsonModuleTree imports a JSON module, which tsgo lists whatever it holds;
+// with extended set, that JSON is also the config the program's tsconfig extends.
+func jsonModuleTree(extended bool) map[string]string {
+	tree := fastPathTree()
+	tree["app/c.ts"] = "import { b } from './b';\nimport en from './en.json';\nexport const c = b + en.hello;\n"
+	tree["app/en.json"] = `{"hello":1}`
+	tree["app/tsconfig.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true},"include":["*.ts"]}`
+	if extended {
+		tree["app/c.ts"] = "import base from './base.json';\nexport const c = base;\n"
+		tree["app/base.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true},"include":["*.ts"]}`
+		tree["app/tsconfig.json"] = `{"extends":"./base.json"}`
+	}
+	return tree
+}
+
+func TestFastPath_AJSONModuleContentEditReplays(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, jsonModuleTree(false))
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	for _, edit := range []struct {
+		files map[string]string
+		path  string
+	}{
+		{map[string]string{"app/en.json": `{"hello":2,"bye":"import x from './nope'"}`}, "fast path scan"},
+		{map[string]string{"app/en.json": `{"hello":3}`, "app/d.ts": "import { b } from './b';\nexport const d = b;\n"}, "fast path"},
+		{map[string]string{"app/en.json": `{"hello":4}`, "app/f.ts": "import { b } from './b';\nexport const f = b;\n"}, "fast path edit"},
+	} {
+		listings := listingFiles(t, cache)
+		writeWorkspace(t, root, edit.files)
+		time.Sleep(pastRacyWindow)
+		same := requireAsCacheless(t, root, edit.path)
+		out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache)
+		if !slices.Equal(paths, []string{edit.path}) {
+			t.Fatalf("the edit %v took %q, want %q and no full pass:\n%s", slices.Sorted(maps.Keys(edit.files)), paths, edit.path, out)
+		}
+		same()
+		if edit.path == "fast path scan" && !maps.Equal(listingFiles(t, cache), listings) {
+			t.Errorf("the replay of a JSON edit wrote the listing cache")
+		}
+	}
+}
+
+// A JSON a tsconfig extends is read for its options, whether or not a listing holds that
+// tsconfig, and under -ts_verbose a broken JSON's diagnostic is logged: both list again.
+func TestFastPath_AJSONEditTheRunReadsStillRunsTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	for _, edit := range []struct {
+		name     string
+		extended bool
+		file     string
+		body     string
+		args     []string
+		logs     string
+	}{
+		{"the extended config's include", true, "app/base.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true},"include":["a.ts","b.ts","c.ts"]}`, nil, ""},
+		{"a broken JSON under -ts_verbose", false, "app/en.json", `{"hello":`, []string{"-ts_verbose"}, "app/en.json(1,"},
+		{"a root config's base no listing reads as a config", false, "config/base.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["app/*.ts"]}`, nil, ""},
+		{"a config a package-form extends names", false, "packages/cfg/base.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":false}}`, nil, ""},
+		{"a config a package-form extends names, in the listing patch", false, "packages/cfg/base.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":false}}`, []string{"-ts_fastpath=off"}, ""},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			tree := jsonModuleTree(edit.extended)
+			if edit.file == "config/base.json" {
+				tree["tsconfig.json"] = `{"extends":"./config/base.json"}`
+				tree["config/base.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]}}`
+				tree["app/c.ts"] = "import base from '../config/base.json';\nexport const c = base;\n"
+			}
+			if edit.file == "packages/cfg/base.json" {
+				tree["packages/cfg/base.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true}}`
+				tree["app/tsconfig.json"] = `{"extends":"cfg/base.json","include":["*.ts"]}`
+				tree["app/c.ts"] = "import base from '../packages/cfg/base.json';\nexport const c = base;\n"
+			}
+			root := writeTree(t, tree)
+			if edit.file == "packages/cfg/base.json" {
+				if err := os.Symlink("../packages/cfg", filepath.Join(root, "node_modules/cfg")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cache := t.TempDir()
+			primeFastPath(t, root, cache, edit.args...)
+			editFile(edit.file, edit.body)(t, root)
+			time.Sleep(pastRacyWindow)
+			same := requireAsCacheless(t, root, edit.name)
+			out, paths := tracedGazelle(t, root, append([]string{"-ts_listing_cache=" + cache}, edit.args...)...)
+			if !slices.Equal(paths, []string{"full pass"}) || !strings.Contains(out, edit.logs) {
+				t.Errorf("%s took %q, want the full pass logging %q:\n%s", edit.name, paths, edit.logs, out)
+			}
+			same()
+		})
+	}
+}
+
+// tsgo's diagnostics print under -ts_verbose only, so a run without it may patch
+// a JSON content edit that moves them; a later -ts_verbose run lists again.
+func TestFastPath_AJSONEditPatchedWithoutVerboseStillLogsItsDiagnosticsUnderVerbose(t *testing.T) {
+	requireTsgo(t)
+	for _, c := range []struct {
+		args  []string
+		again bool
+	}{{[]string{"-ts_fastpath=off"}, false}, {nil, false}, {nil, true}} {
+		args := c.args
+		t.Run(fmt.Sprintf("patched by %v, edited again %t", args, c.again), func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, jsonModuleTree(false))
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			writeWorkspace(t, root, map[string]string{"app/en.json": `{"hello":`, "app/d.ts": "import { b } from './b';\nexport const d = b;\n"})
+			time.Sleep(pastRacyWindow)
+			if out, err := tsGazelle(t, root, append([]string{"-ts_listing_cache=" + cache}, args...)...); err != nil {
+				t.Fatalf("the run without -ts_verbose failed: %v\n%s", err, out)
+			}
+			if c.again {
+				writeWorkspace(t, root, map[string]string{"app/d.ts": "import { b } from './b';\nimport { c } from './c';\nexport const d = b + c;\n"})
+				time.Sleep(pastRacyWindow)
+			}
+			if out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_verbose"); err != nil || !strings.Contains(out, "app/en.json(1,") {
+				t.Errorf("the -ts_verbose run after the patch did not log the broken JSON's diagnostic (%v):\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestFastPath_VerifyCatchesAForgedJSONReplay(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, jsonModuleTree(true))
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	edited := filepath.Join(root, "app/base.json")
+	writeFile(t, edited, `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"resolveJsonModule":true},"include":["a.ts","b.ts","c.ts"]}`)
+	recordFile, rec := onlyRunRecord(t, cache)
+	j, found := slices.BinarySearch(rec.reads, edited)
+	if !found {
+		t.Fatalf("the record holds no read of %s", edited)
+	}
+	rec.scans[j] = jsonScan
+	writeRunRecord(t, recordFile, rec)
+	out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
+	if err == nil || !strings.Contains(out, "fast path: the full pass writes BUILD files the fast path does not") {
+		t.Errorf("verify passed a forged JSON replay: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(recordFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("verify kept the forged record: %v", err)
+	}
+}
+
+// newDirectoryTree's app program takes in sources from subdirectories.
+func newDirectoryTree() map[string]string {
+	tree := fastPathTree()
+	tree["app/tsconfig.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[]},"include":["**/*.ts"]}`
+	return tree
+}
+
+func TestFastPath_ANewDirectoryOfSourcesTakesTheFastPath(t *testing.T) {
+	requireTsgo(t)
+	for _, edit := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"a new directory with a source", map[string]string{"app/pages/p.ts": "import { b } from '../b';\nexport const p = b;\n"}},
+		{"a new nested directory with sources", map[string]string{
+			"app/pages/deep/q.ts": "export const q = 1;\n",
+			"app/pages/p.ts":      "import { q } from './deep/q';\nexport const p = q;\n",
+		}},
+		{"a new directory imported by an edit", map[string]string{
+			"app/pages/p.ts": "export const p = 1;\n",
+			"app/d.ts":       "import { p } from './pages/p';\nexport const d = p;\n",
+		}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, newDirectoryTree())
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			writeWorkspace(t, root, edit.files)
+			time.Sleep(pastRacyWindow)
+			same := requireAsCacheless(t, root, edit.name)
+			out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache)
+			if !slices.Equal(paths, []string{"fast path edit"}) {
+				t.Errorf("%s took %q, want the fast path edit and no full pass:\n%s", edit.name, paths, out)
+			}
+			same()
+		})
+	}
+}
+
+// A new directory whose file beside its source the package takes as data, or
+// whose source a package manifest between it and its rule's sources may claim, runs in full.
+func TestFastPath_ANewDirectoryTheProofCannotPlaceStillRunsTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	for _, edit := range []struct {
+		name, why    string
+		extra, files map[string]string
+	}{
+		{"a source beside a data file", declineInputs + "): app/pages, a gained directory, holds", map[string]string{"app/BUILD.bazel": ""}, map[string]string{
+			"app/pages/p.ts":     "export const p = 1;\n",
+			"app/pages/notes.md": "notes\n",
+		}},
+		{"a source under a package manifest", declineOwner + "): app/sub, between", map[string]string{"app/sub/package.json": `{"name":"sub","type":"commonjs"}`, "app/sub/notes.md": "notes\n"}, map[string]string{
+			"app/sub/pages/p.ts": "export const p = 1;\n",
+		}},
+	} {
+		for _, verbose := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/verbose=%t", edit.name, verbose), func(t *testing.T) {
+				t.Parallel()
+				tree := newDirectoryTree()
+				maps.Copy(tree, edit.extra)
+				root := writeTree(t, tree)
+				cache := t.TempDir()
+				args := []string{"-ts_listing_cache=" + cache}
+				if verbose {
+					args = append(args, "-ts_verbose")
+				}
+				primeFastPath(t, root, cache, args[1:]...)
+				writeWorkspace(t, root, edit.files)
+				time.Sleep(pastRacyWindow)
+				same := requireAsCacheless(t, root, edit.name)
+				out, err := tsGazelle(t, root, args...)
+				if err != nil {
+					t.Fatalf("%s: %v\n%s", edit.name, err, out)
+				}
+				if verbose && !strings.Contains(out, "fast path: declined ("+edit.why) {
+					t.Errorf("%s: want the fast path declined (%s:\n%s", edit.name, edit.why, out)
+				}
+				same()
+			})
+		}
+	}
+}
+
+// -ts_fastpath=verify runs the full pass behind a new directory's sources: a
+// record forged to drop the declared output a new source collides with fails the run and is removed.
+func TestFastPath_VerifyCatchesAForgedNewDirectory(t *testing.T) {
+	requireTsgo(t)
+	tree := newDirectoryTree()
+	tree["app/BUILD.bazel"] = "genrule(name = \"g\", outs = [\"pages/p.ts\"], cmd = \"true\")\n"
+	root := writeTree(t, tree)
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	recordFile, rec := onlyRunRecord(t, cache)
+	facts, err := decodeImportFacts(rec.facts)
+	if err != nil || !slices.Contains(facts.Produced, "app/pages/p.ts") {
+		t.Fatalf("the record does not declare app/pages/p.ts an output: %v", err)
+	}
+	facts.Produced = slices.DeleteFunc(facts.Produced, func(f string) bool { return f == "app/pages/p.ts" })
+	if rec.facts, err = facts.encode(); err != nil {
+		t.Fatal(err)
+	}
+	writeRunRecord(t, recordFile, rec)
+	writeFile(t, filepath.Join(root, "app/pages/p.ts"), "export const p = 1;\n")
+	time.Sleep(pastRacyWindow)
+	out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
+	if err == nil || !strings.Contains(out, "fast path: the full pass") {
+		t.Errorf("verify passed a forged new directory: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(recordFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("verify kept the forged record: %v", err)
+	}
+}
+
+// decideNow is the fast path's decision for the tree as it is now, in this
+// process, and how many listings it patched on the way.
+func decideNow(t *testing.T, root, cache string) (*decline, int64) {
+	t.Helper()
+	recordFile, rec := onlyRunRecord(t, cache)
+	savedDir, savedNames, savedStats := listingCacheDir, listingNames, listingStats
+	listingCacheDir = cache
+	listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+	t.Cleanup(func() { listingCacheDir, listingNames, listingStats = savedDir, savedNames, savedStats })
+	buildNames := []string{"BUILD.bazel", "BUILD"}
+	stamps := &newest{}
+	matched, dirs := rec.check(buildNames, cache, stamps)
+	if matched || dirs == nil {
+		t.Fatalf("the record matches (%t) or names no walked directory", matched)
+	}
+	before := listingPatched.Load()
+	_, why := decideFastPath(rec, root, "", buildNames, dirs, stamps, "", buildSnapshotFile(recordFile))
+	return why, listingPatched.Load() - before
+}
+
+// A listing is the costliest thing the fast path reads, and the full pass reads it again.
+func TestFastPath_AnEditBoundToDeclineDeclinesBeforePatchingAListing(t *testing.T) {
+	requireTsgo(t)
+	jsx := newDirectoryTree()
+	jsx["app/tsconfig.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":[],"jsx":"react-jsx","jsxImportSource":"dep"},"include":["**/*.ts","**/*.tsx"]}`
+	jsx["app/v.tsx"] = "export const v = <div>one</div>;\n"
+	jsx["node_modules/dep/package.json"] = `{"name":"dep","version":"1.0.0","types":"index.d.ts"}`
+	jsx["node_modules/dep/index.d.ts"] = "export declare const dep: number;\n"
+	jsx["node_modules/dep/jsx-runtime.d.ts"] = "export declare function jsx(...args: unknown[]): unknown;\n"
+	for _, edit := range []struct {
+		name, code string
+		tree       map[string]string
+		files      map[string]string
+	}{
+		{"an import dropped", declineEdgeRemoved, fastPathTree(), map[string]string{"app/a.ts": "import { x } from '../lib/x';\nexport const a = x;\n"}},
+		{"a new directory's JSX source", declineEdgeKind, jsx, map[string]string{"app/pages/p.tsx": "export const p = <div>two</div>;\n"}},
+	} {
+		t.Run(edit.name, func(t *testing.T) {
+			root := writeTree(t, edit.tree)
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			writeWorkspace(t, root, edit.files)
+			time.Sleep(pastRacyWindow)
+			keepEntryHeads(t, cache)
+			why, patched := decideNow(t, root, cache)
+			if why == nil || why.code != edit.code || patched != 0 {
+				t.Errorf("%s: declined %+v after patching %d listing(s), want %s from the entries' heads alone", edit.name, why, patched, edit.code)
+			}
+		})
+	}
+}
+
+// keepEntryHeads cuts every listing entry in cache down to its head.
+func keepEntryHeads(t *testing.T, cache string) {
+	t.Helper()
+	files, err := os.ReadDir(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := 0
+	for _, f := range files {
+		file := filepath.Join(cache, f.Name())
+		data, err := os.ReadFile(file)
+		if err != nil || f.IsDir() {
+			continue
+		}
+		d, err := decodeHead(file, data)
+		if err != nil {
+			continue
+		}
+		var head bytes.Buffer
+		if err := gob.NewEncoder(&head).Encode(d.head); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, file, head.String())
+		cut++
+	}
+	if cut == 0 {
+		t.Fatalf("no listing entry in %s", cache)
+	}
+}
+
 // A source the extension read whole by name, as a workers config is for its
 // wrangler literals, may matter beyond its scan, so the record keeps no scan of it.
 func TestFastPath_ASourceReadWholeByNameKeepsNoScan(t *testing.T) {
@@ -1420,15 +1760,15 @@ func TestImportFacts_AReplayKeepsTheWalksOwnReads(t *testing.T) {
 // lookup, must be judged without indexing past them.
 func TestFastPath_AGainedDirectoryTheRunLookedUpDeclines(t *testing.T) {
 	facts := &importFacts{names: nameReads{Paths: []string{"app/a.ts", "tools/thing"}}}
-	why := facts.readsNoneOf("/repo", map[string]string{"/repo/tools/thing": ""})
+	why := facts.readsNoneOf("/repo", map[string]string{"/repo/tools/thing": ""}, nil)
 	if why == nil || why.code != declineInputs {
 		t.Errorf("a gained directory the run looked up was not declined: %v", why)
 	}
 	under := &importFacts{names: nameReads{Paths: []string{"app/a.ts", "tools/thing/x.json"}}}
-	if why := under.readsNoneOf("/repo", map[string]string{"/repo/tools/thing": ""}); why == nil || why.code != declineInputs {
+	if why := under.readsNoneOf("/repo", map[string]string{"/repo/tools/thing": ""}, nil); why == nil || why.code != declineInputs {
 		t.Errorf("a gained directory holding a path the run looked up was not declined: %v", why)
 	}
-	if why := facts.readsNoneOf("/repo", map[string]string{"/repo/zz": ""}); why != nil {
+	if why := facts.readsNoneOf("/repo", map[string]string{"/repo/zz": ""}, nil); why != nil {
 		t.Errorf("a gained directory sorting after every lookup was declined: %v", why)
 	}
 }
