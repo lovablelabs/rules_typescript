@@ -65,7 +65,7 @@ func itemDigests() []struct {
 	}{
 		{"rule body", func() [sha256.Size]byte { return digestRuleBody(r).sum }, "e5c20ebfacfe434cd7b07724436495d5e1fcf0ab02f9bfd424140bf822bf1584"},
 		{"program", func() [sha256.Size]byte { return programDigest(p) }, "6bf73fa7144782d953f962d91c853f28d2386109c03671c1bab0c622fb2c3e38"},
-		{"listing entry", func() [sha256.Size]byte { return listingEntryDigest(entry) }, "ef5548cd37ae050484a2a6042cc96dd3c6c075de95c4203364af64d2aba1460e"},
+		{"listing entry", func() [sha256.Size]byte { return listingEntryDigest(entry) }, "08e0dbf75ea113aeabb3984edb0ac5f3e6235ea4bb01263a818682be878129d1"},
 	}
 }
 

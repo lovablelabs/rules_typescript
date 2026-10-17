@@ -845,5 +845,6 @@ func listingEntryDigest(entry *cachedListing) [sha256.Size]byte {
 	d.listing(&entry.Listing)
 	each(d, entry.Candidates, func(c cachedCandidate) { d.candidate(c.resolutionCandidate()) })
 	d.resolutionFacts(entry.Resolution)
+	d.str(entry.Refused)
 	return d.sum()
 }

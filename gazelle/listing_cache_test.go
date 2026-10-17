@@ -505,6 +505,8 @@ func TestListingPatch_MiscountsNoResolutionTsgoRepeats(t *testing.T) {
 
 var listingCacheLine = regexp.MustCompile(`listing cache \d+ hit\(s\), (\d+) patched, (\d+) new, (\d+) stale`)
 
+var listingCacheSummary = regexp.MustCompile(`(?m)^.*` + listingCacheLine.String() + `\n`)
+
 // The same edits through a whole run: the stale listing patched, none listed
 // again, and the BUILD files a cache-less run writes.
 func TestListingCache_AddOrRenameBesideATwiceResolvedImportListsNothingAgain(t *testing.T) {
@@ -1193,5 +1195,88 @@ func TestListingCache_AnOlderBinaryCannotTakeAnEntryHeadForAnEntry(t *testing.T)
 	var old cachedListing
 	if err := gob.NewDecoder(&file).Decode(&old); err == nil {
 		t.Errorf("an entry's head decodes as a cachedListing with %d read(s) and root %q", len(old.Reads), old.Root)
+	}
+}
+
+// A cache hit dropped tsgo's refusal of a program, so a rule keeping sources
+// over it was generated where a cache-less run fails.
+func TestListingCache_ARefusedProgramStaysRefusedOnACacheHit(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":      "module(name = \"refused_program\")\n",
+		"BUILD.bazel":       "",
+		"app/tsconfig.json": `{"compilerOptions":{"noLib":true,"types":[]},"files":["missing.ts"]}`,
+		"app/a.ts":          "export const a = 1;\n",
+	})
+	// A failing run may exit before its entry is written, so a passing run writes it.
+	cache := t.TempDir()
+	if out, err := tsGazelle(t, root, "-ts_listing_cache="+cache); err != nil {
+		t.Fatalf("the run writing the entry: %v\n%s", err, out)
+	}
+	if names, _ := os.ReadDir(cache); !slices.ContainsFunc(names, func(e os.DirEntry) bool { return isListingKey(e.Name()) }) {
+		t.Fatalf("the run wrote no listing entry: %v", names)
+	}
+	writeWorkspace(t, root, map[string]string{
+		"app/BUILD.bazel": loadDefs + "\"ts_compile\")\nts_compile(\n    name = \"app\",\n    srcs = [\"a.ts\"],  # keep\n)\n",
+	})
+	reference := copyTree(t, root)
+	want, wantErr := tsGazelle(t, reference)
+	want = strings.ReplaceAll(want, reference, root)
+	got, err := tsGazelle(t, root, "-ts_listing_cache="+cache)
+	got = listingCacheSummary.ReplaceAllString(got, "")
+	if wantErr == nil || err == nil || got != want {
+		t.Fatalf("a cache hit: gazelle %v, a cache-less run %v:\n%s\nwant:\n%s", err, wantErr, got, want)
+	}
+	if diff := snapshotDiff(buildFileBytes(t, reference), buildFileBytes(t, root)); diff != "" {
+		t.Fatalf("a cache hit: BUILD files differ from a cache-less run: %s", diff)
+	}
+}
+
+// A patch that drops a program's last file kept it listed where tsgo refuses it.
+func TestListingCache_APatchThatEmptiesARefusableProgramListsItAgain(t *testing.T) {
+	l := newListingRuns(t, map[string]string{
+		"app/tsconfig.json": `{"compilerOptions":{"noLib":true,"types":[],"strict":"yes"},"include":["src"]}`,
+		"app/src/a.ts":      "export const a = 1;\n",
+	})
+	if listed := l.list("app/tsconfig.json"); listed.refused != "" || len(listed.Diagnostics) == 0 {
+		t.Fatalf("want a listed program with a diagnostic, got refusal %q, diagnostics %v", listed.refused, listed.Diagnostics)
+	}
+	if err := os.Remove(filepath.Join(l.root, "app/src/a.ts")); err != nil {
+		t.Fatal(err)
+	}
+	got, want := l.list("app/tsconfig.json"), l.fresh("app/tsconfig.json")
+	if want.refused == "" || got.refused == "" {
+		t.Errorf("a cached run refused %q with files %v, tsgo refused %q", got.refused, got.Files, want.refused)
+	}
+}
+
+// A files entry missing when tsgo listed was no read of the listing, so a cache
+// hit kept the program without it once it was written.
+func TestListingCache_AFilesEntryWrittenAfterTheListingIsListed(t *testing.T) {
+	requireTsgo(t)
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"relative", map[string]string{"app/tsconfig.json": `{"compilerOptions":{"noLib":true,"types":[]},"files":["a.ts","late.ts"]}`}},
+		{"${configDir} in an extended config", map[string]string{
+			"base/tsconfig.json": `{"compilerOptions":{"noLib":true,"types":[]},"files":["${configDir}/a.ts","${configDir}/late.ts"]}`,
+			"app/tsconfig.json":  `{"extends":"../base/tsconfig.json"}`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeTree(t, map[string]string{
+				"MODULE.bazel": "module(name = \"files_entry\")\n",
+				"BUILD.bazel":  "",
+				"app/a.ts":     "export const a = 1;\n",
+			})
+			writeWorkspace(t, root, tc.files)
+			cache := t.TempDir()
+			recordGazelle(t, root, cache)
+			writeWorkspace(t, root, map[string]string{"app/late.ts": "export const late = 2;\n"})
+			same := requireAsCacheless(t, root, "a files entry written after the listing")
+			recordGazelle(t, root, cache)
+			same()
+		})
 	}
 }
