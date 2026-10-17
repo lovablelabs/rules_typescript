@@ -1830,17 +1830,16 @@ func ruleHolding(c *config.Config, ix *resolve.RuleIndex, spec resolve.ImportSpe
 	}
 	owners := slices.DeleteFunc(ix.FindRulesByImport(spec, languageName), func(found resolve.FindResult) bool { return !eligible(found) })
 	if len(owners) == 0 && s.emission != nil {
-		for key := range s.emission.rules {
-			lbl, err := parseLabel(key)
-			if err != nil {
-				continue
-			}
-			found := resolve.FindResult{Label: sourceLabelIdentity(lbl, language.GenerateArgs{Config: c})}
-			if required == scopeRole && found.Label.Pkg != scopePackage {
-				continue
-			}
-			if eligible(found) {
-				owners = append(owners, found)
+		index := s.storedHoldings(c.RepoName)
+		candidates := [][]resolve.FindResult{index.compilers[scopePackage]}
+		if required != scopeRole {
+			candidates = [][]resolve.FindResult{index.all, index.selves[selfKey(from)]}
+		}
+		for _, list := range candidates {
+			for _, found := range list {
+				if eligible(found) {
+					owners = append(owners, found)
+				}
 			}
 		}
 	}
@@ -1855,6 +1854,47 @@ func ruleHolding(c *config.Config, ix *resolve.RuleIndex, spec resolve.ImportSpe
 		return relativeLabel(owners[0].Label, from.Repo, from.Pkg).String(), true
 	}
 	return "", false
+}
+
+// Only a stored ts_compile, or the resolving rule itself, can hold an import the index does not.
+// Like protoIndex, valid while rulesGeneration holds; a package's configuration is set before Resolve reads its rules.
+type holdingIndex struct {
+	emission        *emissionGraph
+	rulesGeneration int
+	repo            string
+	all             []resolve.FindResult
+	compilers       map[string][]resolve.FindResult
+	selves          map[label.Label][]resolve.FindResult
+}
+
+func (s *programStore) storedHoldings(repo string) *holdingIndex {
+	g := s.emission
+	if h := s.holdingIndex; h != nil && h.emission == g && h.rulesGeneration == g.rulesGeneration && h.repo == repo {
+		return h
+	}
+	h := &holdingIndex{emission: g, rulesGeneration: g.rulesGeneration, repo: repo,
+		compilers: map[string][]resolve.FindResult{}, selves: map[label.Label][]resolve.FindResult{}}
+	for key := range g.rules {
+		lbl, err := parseLabel(key)
+		if err != nil {
+			continue
+		}
+		found := resolve.FindResult{Label: labelIdentity(lbl, repo, "")}
+		if owner := s.semanticRule(emissionLabel(repo, found.Label.Pkg, ":"+found.Label.Name)); owner != nil && owner.Kind() == "ts_compile" {
+			h.all = append(h.all, found)
+			h.compilers[found.Label.Pkg] = append(h.compilers[found.Label.Pkg], found)
+		} else {
+			h.selves[selfKey(found.Label)] = append(h.selves[selfKey(found.Label)], found)
+		}
+	}
+	s.holdingIndex = h
+	return h
+}
+
+// FindResult.IsSelfImport compares with label.Label.Equal, which ignores Canonical.
+func selfKey(l label.Label) label.Label {
+	l.Canonical = false
+	return l
 }
 
 func reportEdge(from label.Label, e explainfiles.Edge, why string,

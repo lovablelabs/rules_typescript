@@ -307,7 +307,7 @@ func TestResolveRecord_StateDigestClassifiesEveryField(t *testing.T) {
 		{reflect.TypeFor[programStore](), []string{"repoConfig", "emission", "inputs", "completePrograms", "index", "tsgoFlag", "verbose", "tsgo", "skipped",
 			"programs", "configs", "packages", "generatedPackages", "visited", "files", "walked", "bases", "extended", "foreign",
 			"foreignSaid", "vitestPrograms", "compilerPrograms", "wranglerConfigs", "installChecked", "regularFiles", "fullWalk",
-			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "prefetch", "resolution", "importFacts", "buildFacts", "early"}},
+			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "holdingIndex", "prefetch", "resolution", "importFacts", "buildFacts", "early"}},
 		{reflect.TypeFor[emissionGraph](), []string{"roots", "outputs", "rules", "files", "lock"},
 			[]string{"versions", "epoch", "listEpoch", "outputsGeneration", "rulesGeneration", "outputIndex", "registered", "crawled", "crawledPkgs", "lastTouched"}},
 		{reflect.TypeFor[program](), []string{"Listing", "candidates", "resolution", "config", "dir", "refused", "manifest", "key"}, []string{"bySource", "byImporter", "moduleEdges", "byDir"}},

@@ -81,6 +81,7 @@ type programStore struct {
 	regularFiles     map[string]bool
 	memo             *resolutionMemo
 	protoIndex       *protoIndex
+	holdingIndex     *holdingIndex
 	prefetch         *listingPrefetch
 	fullWalk         bool
 	manifests        map[string]*manifest
