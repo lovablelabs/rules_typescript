@@ -1216,22 +1216,23 @@ func patchListings(facts *importFacts, affected map[int]bool, reads listingReads
 	if len(pending) > 0 {
 		fastPathDecoded.Store(true)
 	}
-	heads := make([]*entryDecoder, len(order))
+	heads := make([]*entryHead, len(order))
 	bound := make([]*decline, len(order))
 	errs := make([]error, len(order))
 	parallel(len(order), func(j int) {
 		key := facts.Listings[order[j]].Key
-		file := filepath.Join(listingCacheDir, key)
-		data, err := readListingFile(file)
-		if err == nil {
-			heads[j], err = decodeHead(file, data)
-		}
-		if errs[j] = err; err == nil && heads[j].head.HeadRoot == reads.repoRoot {
-			bound[j] = boundToDecline(key, heads[j].headEntry(), heads[j].head.HeadFilesList, reads)
+		heads[j], errs[j] = decodeHead(filepath.Join(listingCacheDir, key))
+		if h := heads[j]; h != nil && h.entry.Root == reads.repoRoot {
+			bound[j] = boundToDecline(key, h.entry, h.entry.FilesList, reads)
 		}
 	})
 	for _, why := range bound {
 		if why != nil {
+			for _, h := range heads {
+				if h != nil {
+					h.close()
+				}
+			}
 			return nil, why
 		}
 	}

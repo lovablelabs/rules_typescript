@@ -25,6 +25,7 @@ go_library(
         "labels.go",
         "language.go",
         "listing_cache.go",
+        "listing_codec.go",
         "listing_patch.go",
         "listing_predecode.go",
         "manifest.go",

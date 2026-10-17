@@ -75,12 +75,13 @@ func TestListingPredecode_ServesAnEntryDecodedBeforeTheWalkAsks(t *testing.T) {
 // -ts_parallel=verify decodes each entry again on the main goroutine and must fail on any difference.
 func TestListingPredecode_VerifyFailsWhenAnEntryDiffersFromItsSequentialDecode(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		rewrite bool
-		wantErr bool
+		name           string
+		rewrite, fresh bool
+		wantErr        bool
 	}{
 		{name: "unchanged"},
 		{name: "rewritten after the decode", rewrite: true, wantErr: true},
+		{name: "rewritten after the decode, still fresh", rewrite: true, fresh: true, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := cachedEntries(t, "a.ts")["a.ts"]
@@ -88,6 +89,13 @@ func TestListingPredecode_VerifyFailsWhenAnEntryDiffersFromItsSequentialDecode(t
 			predecodes.wg.Wait()
 			if tc.rewrite {
 				entry := cachedListing{Listing: explainfiles.Listing{Files: []string{"other.ts"}}}
+				if tc.fresh {
+					old, err := readListing(filepath.Join(listingCacheDir, key))
+					if err != nil {
+						t.Fatal(err)
+					}
+					entry.Reads, entry.Dirs, entry.Fingerprint = old.Reads, old.Dirs, old.Fingerprint
+				}
 				writeListing(key, &entry)
 			}
 			_, _, err := predecodes.take(key)
