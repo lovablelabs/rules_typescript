@@ -32,7 +32,7 @@ func generateRules(args language.GenerateArgs) language.GenerateResult {
 	tc := getConfig(args.Config)
 	s := tc.programs
 	if err := s.inputs[args.Rel].discoveryErr; err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	s.visit(args.Rel, args.RegularFiles)
 	s.walked[args.Rel] = true
@@ -172,13 +172,13 @@ func nonPackageRules(args language.GenerateArgs, tc *tsConfig,
 ) language.GenerateResult {
 	switch tc.programs.metadataIdentity(args.Config, tsconfigIn(args.Rel)) {
 	case generatedInput:
-		log.Fatal(generatedDiscoveryConflict(tsconfigIn(args.Rel)))
+		fatal(generatedDiscoveryConflict(tsconfigIn(args.Rel)))
 	case unknownInput:
 		if args.File != nil {
 			for _, stored := range args.File.Rules {
 				r := canonicalRule(args.Config, stored)
 				if managedProgramRule(r, args.Rel) && !r.ShouldKeep() {
-					log.Fatal(tc.programs.incompleteOutput(tsconfigIn(args.Rel)))
+					fatal(tc.programs.incompleteOutput(tsconfigIn(args.Rel)))
 				}
 			}
 		}
@@ -485,7 +485,7 @@ func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.
 			}
 			if managesProgramClosure(effective) && !effective.IsEmpty(kinds[r.Kind()]) {
 				if err := compilerClosureError(imps.program, label.New(args.Config.RepoName, args.Rel, r.Name()).String(), effective.AttrString("tsconfig")); err != nil {
-					log.Fatal(err)
+					fatal(err)
 				}
 			}
 			if imps.program != nil {
@@ -728,7 +728,7 @@ func (s *programStore) vitestConfigIn(c *config.Config, rel string) string {
 		case authoredInput, generatedInput:
 			return name
 		case unknownInput:
-			log.Fatal(s.incompleteOutput(path.Join(rel, name)))
+			fatal(s.incompleteOutput(path.Join(rel, name)))
 		}
 	}
 	return ""
@@ -820,7 +820,7 @@ func configIsAbsent(expr bzl.Expr) bool {
 func selectedVitestConfig(args language.GenerateArgs, tc *tsConfig, selectedRule *rule.Rule) (attr, cfg string) {
 	unknown := func(reason string) (string, string) {
 		if !selectedRule.ShouldKeep() {
-			log.Fatalf("typescript: %s cannot establish its selected config root: %s; refusing to regenerate config runtime inputs. Did you mean to use a literal config label supplying one known file, set config = None, or keep the whole ts_test rule and maintain its runtime inputs manually?", label.New(args.Config.RepoName, args.Rel, selectedRule.Name()), reason)
+			fatalf("typescript: %s cannot establish its selected config root: %s; refusing to regenerate config runtime inputs. Did you mean to use a literal config label supplying one known file, set config = None, or keep the whole ts_test rule and maintain its runtime inputs manually?", label.New(args.Config.RepoName, args.Rel, selectedRule.Name()), reason)
 		}
 		return attr, ""
 	}
@@ -1368,7 +1368,7 @@ func (s *programStore) relocateSourceExports(c *config.Config, pkg string) {
 		}
 		list, err := exportSourceMembership(target)
 		if err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		list.List = slices.DeleteFunc(list.List, func(item bzl.Expr) bool {
 			return !boundary || sourceExportOwner(s, path.Join(pkg, item.(*bzl.StringExpr).Value)) != pkg
@@ -1393,7 +1393,7 @@ func (s *programStore) relocateSourceExports(c *config.Config, pkg string) {
 		}
 		list, err := exportSourceMembership(old)
 		if err != nil {
-			log.Fatalf("typescript: %s: %v; use literal source lists before creating package %s", s.emission.files[ancestor].Path, err, pkg)
+			fatalf("typescript: %s: %v; use literal source lists before creating package %s", s.emission.files[ancestor].Path, err, pkg)
 		}
 		var kept []bzl.Expr
 		var moved []string
@@ -1412,19 +1412,19 @@ func (s *programStore) relocateSourceExports(c *config.Config, pkg string) {
 			continue
 		}
 		if keptMembership {
-			log.Fatalf("typescript: %s: kept exports_files prevents creating package %s; remove # keep to relocate the exports to their canonical package", s.emission.files[ancestor].Path, pkg)
+			fatalf("typescript: %s: kept exports_files prevents creating package %s; remove # keep to relocate the exports to their canonical package", s.emission.files[ancestor].Path, pkg)
 		}
 		_, err = exportVisibility(c, old, ancestor)
 		if err != nil {
-			log.Fatalf("typescript: %s: %v; use explicit visibility labels before creating package %s", s.emission.files[ancestor].Path, err, pkg)
+			fatalf("typescript: %s: %v; use explicit visibility labels before creating package %s", s.emission.files[ancestor].Path, err, pkg)
 		}
 		licenses := old.AttrStrings("licenses")
 		licensesList, licensesLiteral := old.Attr("licenses").(*bzl.ListExpr)
 		if old.Attr("licenses") != nil && (!licensesLiteral || len(licensesList.List) != len(licenses)) {
-			log.Fatalf("typescript: %s: exports_files licenses is an expression; use explicit licenses before creating package %s", s.emission.files[ancestor].Path, pkg)
+			fatalf("typescript: %s: exports_files licenses is an expression; use explicit licenses before creating package %s", s.emission.files[ancestor].Path, pkg)
 		}
 		if !s.generatedPackages[ancestor] {
-			log.Fatalf("typescript: moving source exports from %s to %s requires both BUILD files in this update. Did you mean to include %s and enable TypeScript generation there?", orRepoRoot(ancestor), pkg, orRepoRoot(ancestor))
+			fatalf("typescript: moving source exports from %s to %s requires both BUILD files in this update. Did you mean to include %s and enable TypeScript generation there?", orRepoRoot(ancestor), pkg, orRepoRoot(ancestor))
 		}
 		list.List = kept
 		if len(kept) == 0 {
@@ -1432,7 +1432,7 @@ func (s *programStore) relocateSourceExports(c *config.Config, pkg string) {
 		} else if old.Attr("srcs") != nil {
 			old.SetAttr("srcs", list)
 		} else if err := old.UpdateArg(0, list); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 	}
 }

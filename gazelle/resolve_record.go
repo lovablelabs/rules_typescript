@@ -271,7 +271,7 @@ const resolveVerifyEnv = "RULES_TYPESCRIPT_GAZELLE_RESOLVE_RECORD_VERIFY"
 func noteVerifiedReplay() {
 	if file := os.Getenv(resolveVerifyEnv); file != "" {
 		if err := os.WriteFile(file, []byte("replayed"), 0o644); err != nil {
-			log.Fatalf("typescript: resolve record: %v", err)
+			fatalf("typescript: resolve record: %v", err)
 		}
 	}
 }
@@ -506,7 +506,7 @@ func (rec *resolveRecorder) applyReplay(s *programStore) {
 	}
 	pkgs := s.trackedFiles()
 	if !slices.Equal(pkgs, slices.Sorted(maps.Keys(files))) {
-		log.Fatalf("typescript: resolve record: the record holds other BUILD files than this run; rerun with -ts_resolve_record=off")
+		fatalf("typescript: resolve record: the record holds other BUILD files than this run; rerun with -ts_resolve_record=off")
 	}
 	recorded := make([]*rule.File, len(pkgs))
 	errs := make([]error, len(pkgs))
@@ -517,7 +517,7 @@ func (rec *resolveRecorder) applyReplay(s *programStore) {
 	for i, pkg := range pkgs {
 		f := s.emission.files[pkg]
 		if errs[i] != nil {
-			log.Fatalf("typescript: resolve record: %s: %v; rerun with -ts_resolve_record=off", f.Path, errs[i])
+			fatalf("typescript: resolve record: %s: %v; rerun with -ts_resolve_record=off", f.Path, errs[i])
 		}
 		f.File, f.Rules, f.Loads, f.Directives = recorded[i].File, recorded[i].Rules, recorded[i].Loads, recorded[i].Directives
 	}

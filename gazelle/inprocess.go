@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,10 +139,10 @@ func verifyInProcess(ctx context.Context, repoRoot, tsgo, subject string, args [
 		return err
 	}
 	if err != nil {
-		log.Fatalf("typescript: -ts_listing_inproc=verify: %v", err)
+		fatalf("typescript: -ts_listing_inproc=verify: %v", err)
 	}
 	if diff := inProcessDifference(got, want); diff != "" {
-		log.Fatalf("typescript: -ts_listing_inproc=verify: the in-process listing of %s differs from tsgo's:\n%s", subject, diff)
+		fatalf("typescript: -ts_listing_inproc=verify: the in-process listing of %s differs from tsgo's:\n%s", subject, diff)
 	}
 	return nil
 }

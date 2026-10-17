@@ -285,7 +285,7 @@ func (s *programStore) selectInputs(ix *resolve.RuleIndex) {
 		}
 		p, err := s.reconcileCompilerProgram(input.config, input.program, nil)
 		if err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if p != input.program {
 			input.program = s.withKeptSources(input.config, p, dir)
@@ -420,10 +420,10 @@ func (s *programStore) generationDisabled(dir string) bool {
 func (s *programStore) requireInput(c *config.Config, ix *resolve.RuleIndex, f, from string) inputIdentity {
 	identity := s.inputIdentity(c, ix, f)
 	if identity == unknownInput {
-		log.Fatal(s.incompleteOutput(f))
+		fatal(s.incompleteOutput(f))
 	}
 	if identity == unavailableInput {
-		log.Fatalf("typescript: %s imports %s: %s; remove the import or update Gazelle's exclusions", from, f, s.whyUnowned(f))
+		fatalf("typescript: %s imports %s: %s; remove the import or update Gazelle's exclusions", from, f, s.whyUnowned(f))
 	}
 	return identity
 }

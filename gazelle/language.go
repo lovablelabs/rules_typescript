@@ -194,7 +194,7 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	}
 	info, err := recordedDirInfo(rel)
 	if err != nil {
-		log.Fatalf("typescript: %s: %v", rel, err)
+		fatalf("typescript: %s: %v", rel, err)
 	}
 	l.programs.visit(rel, info.RegularFiles)
 	for _, base := range l.programs.bases[rel] {
@@ -629,7 +629,7 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 	check := func(file string) {
 		if tc.programs.requireInput(c, ix, file, from.String()) == generatedInput {
 			if producer, _ := tc.programs.outputProducer(file); producer == nil {
-				log.Fatalf("typescript: %s requires generated file %s, but only a generated tree or compiler owner declares it. Did you mean to declare the file as a scalar output for this attribute?", from, file)
+				fatalf("typescript: %s requires generated file %s, but only a generated tree or compiler owner declares it. Did you mean to declare the file as a scalar output for this attribute?", from, file)
 			}
 		}
 	}

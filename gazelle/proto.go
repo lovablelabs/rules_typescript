@@ -3,7 +3,6 @@ package typescript
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"maps"
 	"path"
 	"path/filepath"
@@ -303,19 +302,19 @@ func withProtoRules(args language.GenerateArgs, tc *tsConfig, res language.Gener
 	outputs := map[string]string{}
 	observations, err := tc.protos.externalObservations(tc.protos.observations[args.Rel])
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	for _, obs := range observations {
 		id := obs.identity
 		name := protoWrapperName(obs.native, id)
 		if generated[name] {
-			log.Fatalf("typescript: duplicate generated proto library %s; check native proto ownership", name)
+			fatalf("typescript: duplicate generated proto library %s; check native proto ownership", name)
 		}
 		generated[name] = true
 		for _, source := range obs.paths {
 			output := path.Join(id.OutDir, source)
 			if previous, ok := outputs[output]; ok {
-				log.Fatalf("typescript: %s and %s generate the same proto output %s; select one native owner", previous, name, output)
+				fatalf("typescript: %s and %s generate the same proto output %s; select one native owner", previous, name, output)
 			}
 			outputs[output] = name
 		}
@@ -486,7 +485,7 @@ func resolveProtoOutput(c *config.Config, ix *resolve.RuleIndex, file string, fr
 		return ""
 	}
 	if len(providers) != 1 {
-		log.Fatalf("typescript: %s has %d generated providers for %s; select exactly one native owner", from.String(), len(providers), file)
+		fatalf("typescript: %s has %d generated providers for %s; select exactly one native owner", from.String(), len(providers), file)
 	}
 	return relativeLabel(providers[0].Label, from.Repo, from.Pkg).String()
 }
@@ -502,7 +501,7 @@ func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r, effective *
 	p := tc.programs.compilerProgram(c, selected, from.Pkg)
 	if !effective.ShouldKeep() && (!attrKept(effective, "deps") || !attrKept(effective, "type_inputs")) {
 		if err := compilerClosureError(p, from.String(), selected); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 	}
 	if p != nil {
@@ -522,7 +521,7 @@ func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r, effective *
 	for _, native := range imps.nativeDeps {
 		found := protoWrapperProviders(c, ix, path.Join(imps.identity.owner, imps.identity.OutDir), native)
 		if len(found) != 1 {
-			log.Fatalf("typescript: %s: native dependency %s has %d generated providers in identity %s", from.String(), native.String(), len(found), imps.identity.Name)
+			fatalf("typescript: %s: native dependency %s has %d generated providers in identity %s", from.String(), native.String(), len(found), imps.identity.Name)
 		}
 		if found[0].Label != from {
 			deps[relativeLabel(found[0].Label, from.Repo, from.Pkg).String()] = true
@@ -534,7 +533,7 @@ func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r, effective *
 		}
 		found := protoProvider(imps.config, ix, path.Join(imps.identity.owner, imps.identity.OutDir), imp)
 		if len(found) != 1 {
-			log.Fatalf("typescript: %s: proto import %s has %d generated providers in identity %s; enable exactly one native owner for that identity", from.String(), imp, len(found), imps.identity.Name)
+			fatalf("typescript: %s: proto import %s has %d generated providers in identity %s; enable exactly one native owner for that identity", from.String(), imp, len(found), imps.identity.Name)
 		}
 		if found[0].Label != from {
 			deps[relativeLabel(found[0].Label, from.Repo, from.Pkg).String()] = true

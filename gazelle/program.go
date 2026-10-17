@@ -272,7 +272,7 @@ func listTsConfigProgram(c *config.Config, rel string, tc *tsConfig, dirInfo fun
 
 func (s *programStore) requireAuthoredScope(c *config.Config, from, file string) {
 	if err := s.authoredScopeError(c, from, file); err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 }
 
@@ -368,7 +368,7 @@ func (s *programStore) reportStemCollisions() {
 		}
 	}
 	if n > 0 {
-		log.Fatalf("typescript: %d .tsx file%s collide%s with a same-named .ts; rename one file of each pair",
+		fatalf("typescript: %d .tsx file%s collide%s with a same-named .ts; rename one file of each pair",
 			n, plural(n, "s"), plural(n, "", "s"))
 	}
 }
@@ -781,11 +781,11 @@ func (s *programStore) withSources(c *config.Config, p *program, sources []strin
 	}
 	tsgo, err := s.binary()
 	if err != nil {
-		log.Fatalf("typescript: %s: %v", p.config, err)
+		fatalf("typescript: %s: %v", p.config, err)
 	}
 	listed, err := s.listRoots(c.RepoRoot, p, tsgo, roots)
 	if err != nil {
-		log.Fatalf("typescript: %v", err)
+		fatalf("typescript: %v", err)
 	}
 	s.importFacts.rooted(listed, p, srcsOf, withSrcs)
 	return listed
@@ -862,7 +862,7 @@ func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg str
 		observe = dirInfo[0]
 	}
 	if _, err := s.resolveCompilerConfig(c, cfg, observe); errors.Is(err, tsconfig.ErrAdmission) {
-		log.Fatal(err)
+		fatal(err)
 	}
 	set := s.srcs(pkg, getConfig(c))
 	sources := s.keptProgramSources(c, pkg, dirInfo...)
@@ -888,11 +888,11 @@ func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg str
 		}
 		tsgo, err := s.binary()
 		if err != nil {
-			log.Fatalf("typescript: %s: %v", cfg, err)
+			fatalf("typescript: %s: %v", cfg, err)
 		}
 		p, err = s.discoverCompilerProgram(c, cfg, tsgo, observe)
 		if err != nil {
-			log.Fatalf("typescript: %v", err)
+			fatalf("typescript: %v", err)
 		}
 		if s.compilerPrograms == nil {
 			s.compilerPrograms = map[string]*program{}
@@ -938,11 +938,11 @@ func (s *programStore) configProgram(repoRoot, cfg string) *program {
 	}
 	tsgo, err := s.binary()
 	if err != nil {
-		log.Fatalf("typescript: %s: %v", cfg, err)
+		fatalf("typescript: %s: %v", cfg, err)
 	}
 	p, err := listVitestConfig(repoRoot, tsgo, cfg)
 	if err != nil {
-		log.Fatalf("typescript: %v", err)
+		fatalf("typescript: %v", err)
 	}
 	s.vitestPrograms[cfg] = p
 	return p
@@ -969,7 +969,7 @@ func (s *programStore) requireInstall(repoRoot string) {
 	}
 	s.installChecked = true
 	if why := installMissing(repoRoot); why != "" {
-		log.Fatalf("typescript: %s", why)
+		fatalf("typescript: %s", why)
 	}
 }
 
@@ -1203,11 +1203,11 @@ func listManifestProgram(c *config.Config, rel string, tc *tsConfig) {
 		return
 	}
 	if err != nil {
-		log.Fatalf("typescript: %v", err)
+		fatalf("typescript: %v", err)
 	}
 	p, err := listManifestRoots(repoRoot, path.Join(rel, "package.json"), tsgo, roots)
 	if err != nil {
-		log.Fatalf("typescript: %v", err)
+		fatalf("typescript: %v", err)
 	}
 	tc.programs.record(p)
 }

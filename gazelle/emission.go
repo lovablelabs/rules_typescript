@@ -3,7 +3,6 @@ package typescript
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"maps"
 	"path"
 	"path/filepath"
@@ -395,6 +394,7 @@ func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 		}
 		writeRunCandidate()
 	}()
+	exitOnDeferredFatal()
 	if l.programs == nil || l.programs.emission == nil {
 		return
 	}
@@ -419,6 +419,7 @@ func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 // finishRules is what AfterResolvingDeps does to every resolved rule: the
 // emission graph's runtime closure, emit, package scopes and source exports.
 func (l *tsLang) finishRules() {
+	exitOnDeferredFatal()
 	l.programs.ruleListsMayChange()
 	g := l.programs.emission
 	repo := l.programs.repoConfig.RepoName
@@ -518,20 +519,20 @@ func (l *tsLang) finishRules() {
 			if consumer != "" && ruleEmission(semantic) != emittedEmission {
 				declared := declaredSourceImports(l.programs.inputs[own.Pkg].config, semantic, g.files[own.Pkg])
 				if declared.incomplete != "" {
-					log.Fatalf("typescript: %s requires a runtime boundary from %s, but %s; source emission cannot establish whether unpublished TypeScript needs transformation. Did you mean to use explicit source-file labels or declare emit = True on the owner?", consumer, key, declared.incomplete)
+					fatalf("typescript: %s requires a runtime boundary from %s, but %s; source emission cannot establish whether unpublished TypeScript needs transformation. Did you mean to use explicit source-file labels or declare emit = True on the owner?", consumer, key, declared.incomplete)
 				}
 				for _, input := range declared.imports {
 					if rawTypeScript(input.Imp) {
-						log.Fatalf("typescript: %s requires emission from %s for runtime TypeScript input %s, but its effective emit value does not establish emitted JavaScript. Did you mean to include that package in this update, remove its keep marker, or declare emit = True on the owner?", consumer, key, input.Imp)
+						fatalf("typescript: %s requires emission from %s for runtime TypeScript input %s, but its effective emit value does not establish emitted JavaScript. Did you mean to include that package in this update, remove its keep marker, or declare emit = True on the owner?", consumer, key, input.Imp)
 					}
 				}
 			}
 		} else if kind == "ts_proto_library" && consumer != "" {
-			log.Fatalf("typescript: %s requires emitted JavaScript from %s, but ts_proto_library publishes TypeScript with fixed emit = False. Did you mean to use a source-capable consumer or a dependency that publishes emitted JavaScript?", consumer, key)
+			fatalf("typescript: %s requires emitted JavaScript from %s, but ts_proto_library publishes TypeScript with fixed emit = False. Did you mean to use a source-capable consumer or a dependency that publishes emitted JavaScript?", consumer, key)
 		}
 		dependencies, incomplete := runtimeDependencies(semantic)
 		if consumer != "" && incomplete != "" {
-			log.Fatalf("typescript: %s requires the runtime closure of %s, but its %s is an expression; automatic publication cannot establish its runtime dependencies. Did you mean to use literal dependency and forwarding labels, or keep the whole consuming rule and maintain its runtime closure manually?", consumer, key, incomplete)
+			fatalf("typescript: %s requires the runtime closure of %s, but its %s is an expression; automatic publication cannot establish its runtime dependencies. Did you mean to use literal dependency and forwarding labels, or keep the whole consuming rule and maintain its runtime closure manually?", consumer, key, incomplete)
 		}
 		for _, dep := range slices.Concat(before[key], dependencies) {
 			visit(emissionLabel(repo, own.Pkg, dep), consumer)
@@ -572,6 +573,7 @@ func (l *tsLang) finishRules() {
 			}
 		}
 	}
+	exitOnDeferredFatal()
 	l.programs.exportPackageScopes()
 	for key, r := range g.rules {
 		if r.PrivateAttr("_ts_scope_candidate") == true && len(r.AttrStrings("package_scopes")) == 0 {
@@ -599,7 +601,7 @@ func (l *tsLang) finishRules() {
 		}
 		if file.Content == nil && l.programs.bazelPackage(pkg) {
 			if err := l.programs.newPackageTargetConflict(pkg); err != nil {
-				log.Fatal(err)
+				fatal(err)
 			}
 		}
 	}
@@ -678,7 +680,7 @@ func (s *programStore) exportPackageScopes() {
 			}
 			list, err := exportSourceMembership(r)
 			if err != nil {
-				log.Fatal(err)
+				fatal(err)
 			}
 			for _, item := range list.List {
 				pending[emissionLabel(s.repoConfig.RepoName, pkg, ":"+item.(*bzl.StringExpr).Value)] = r
@@ -715,10 +717,10 @@ func (s *programStore) exportPackageScopes() {
 				s.relocateSourceExports(s.repoConfig, pkg)
 				visibility, exported, err := s.sourceVisibility(s.repoConfig, file, name)
 				if err != nil {
-					log.Fatalf("typescript: %s cannot retain package scope %s: %v. Did you mean to use literal source exports with visibility for the consuming package?", key, scope, err)
+					fatalf("typescript: %s cannot retain package scope %s: %v. Did you mean to use literal source exports with visibility for the consuming package?", key, scope, err)
 				}
 				if scopeVisibilityDenies(visibility, label.New(s.repoConfig.RepoName, pkg, name), consumer) {
-					log.Fatalf("typescript: %s requires package scope %s, but source visibility %v denies access. Did you mean to export that scope to the consuming package, or supply it through a compiler dependency?", key, scope, visibility)
+					fatalf("typescript: %s requires package scope %s, but source visibility %v denies access. Did you mean to export that scope to the consuming package, or supply it through a compiler dependency?", key, scope, visibility)
 				}
 				if exported {
 					continue
@@ -726,7 +728,7 @@ func (s *programStore) exportPackageScopes() {
 				sourceKey := emissionLabel(s.repoConfig.RepoName, pkg, ":"+name)
 				exports := pending[sourceKey]
 				if !s.generatedPackages[pkg] || file == nil || exports == nil && file.File == nil {
-					log.Fatalf("typescript: %s requires package scope %s without a source export in %s, which is not selected for publication. Did you mean to include %s in the Gazelle update?", key, scope, orRepoRoot(pkg), orRepoRoot(pkg))
+					fatalf("typescript: %s requires package scope %s without a source export in %s, which is not selected for publication. Did you mean to include %s in the Gazelle update?", key, scope, orRepoRoot(pkg), orRepoRoot(pkg))
 				}
 				if exports == nil {
 					exports = rule.NewRule("exports_files", "")
@@ -787,21 +789,21 @@ func (s *programStore) publishPackageScope(c *config.Config, scope string, consu
 	source := strings.TrimPrefix(scope, pkg+"/")
 	visibility, _, err := s.sourceVisibility(c, s.emission.files[pkg], source)
 	if err != nil {
-		log.Fatalf("typescript: %s cannot publish package scope %s: %v. Did you mean to use literal source exports, or keep an explicit compiler owner and maintain its visibility manually?", key, scope, err)
+		fatalf("typescript: %s cannot publish package scope %s: %v. Did you mean to use literal source exports, or keep an explicit compiler owner and maintain its visibility manually?", key, scope, err)
 	}
 	if scopeVisibilityDenies(visibility, label.New(c.RepoName, pkg, r.Name()), consumer) {
-		log.Fatalf("typescript: %s requires runtime package scope %s, but source visibility %v denies access to its automatic publisher %s. Did you mean to export that scope to the consuming package, or provide an explicit compiler owner with the required visibility?", consumer, scope, visibility, key)
+		fatalf("typescript: %s requires runtime package scope %s, but source visibility %v denies access to its automatic publisher %s. Did you mean to export that scope to the consuming package, or provide an explicit compiler owner with the required visibility?", consumer, scope, visibility, key)
 	}
 	for _, previous := range scopes {
 		policy, _, err := s.sourceVisibility(c, s.emission.files[pkg], previous)
 		if err != nil || !slices.Equal(policy, visibility) {
-			log.Fatalf("typescript: %s cannot publish package scopes %s and %s with different or unknown source visibility. Did you mean to provide explicit compiler owners with the required visibility?", key, previous, source)
+			fatalf("typescript: %s cannot publish package scopes %s and %s with different or unknown source visibility. Did you mean to provide explicit compiler owners with the required visibility?", key, previous, source)
 		}
 	}
 	if attrKept(r, "visibility") {
 		policy, err := exportVisibility(c, r, pkg)
 		if err != nil || !slices.Equal(policy, visibility) {
-			log.Fatalf("typescript: %s cannot publish package scope %s through kept visibility that differs from its source export. Did you mean to remove that keep marker, or keep the whole compiler owner and maintain its complete inputs and visibility manually?", key, scope)
+			fatalf("typescript: %s cannot publish package scope %s through kept visibility that differs from its source export. Did you mean to remove that keep marker, or keep the whole compiler owner and maintain its complete inputs and visibility manually?", key, scope)
 		}
 	}
 	r.SetAttr("visibility", visibility)

@@ -1,7 +1,9 @@
 package typescript
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"path"
@@ -3246,7 +3248,7 @@ func TestResolveEdges_UnownedClosureStopsAtExistingOwners(t *testing.T) {
 			tc.programs.programs["web"].Roots = []string{rootEdge.From}
 			tc.programs.selectProgram(c, tc.programs.programs["web"])
 			if owner == "dependency only" {
-				_, source, _ := edgeDep(c, ix, tc, rootEdge, label.New("", "web", "web_test"), map[string]bool{}, nil, nil)
+				_, source, _ := edgeDep(c, ix, tc, rootEdge, label.New("", "web", "web_test"), edgeReports{}, nil, nil)
 				if source {
 					t.Fatal("dependency-only resolver selected a direct source")
 				}
@@ -3477,4 +3479,35 @@ func configPrograms(byFrom map[string][]explainfiles.Edge) map[string]*program {
 		programs[file] = p
 	}
 	return programs
+}
+
+// The report must not depend on which importer of a file the walk pops first.
+func TestEdgeReports_NameTheSmallestImporterInFileOrder(t *testing.T) {
+	var out bytes.Buffer
+	flags := log.Flags()
+	log.SetOutput(&out)
+	log.SetFlags(0)
+	defer func() { log.SetOutput(os.Stderr); log.SetFlags(flags) }()
+	r := edgeReports{}
+	r.add(explainfiles.Edge{From: "web/z.ts", To: "web/b.ts"}, "b")
+	r.add(explainfiles.Edge{From: "web/y.ts", To: "web/a.ts"}, "a")
+	r.add(explainfiles.Edge{From: "web/x.ts", To: "web/b.ts"}, "b")
+	r.print(label.New("", "web", "web"))
+	want := "typescript: //web: web/y.ts imports web/a.ts: a; no dep\n" +
+		"typescript: //web: web/x.ts imports web/b.ts: b; no dep\n"
+	if got := out.String(); got != want {
+		t.Errorf("reports:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The fatal a run reports must not depend on the order it reaches programs and edges in.
+func TestDeferFatal_KeepsTheSmallestOffender(t *testing.T) {
+	defer func() { pendingFatal.f = nil }()
+	deferFatal(label.New("", "web", "web"), "web/a.ts", "web/c.ts", "web a c")
+	deferFatal(label.New("", "app", "app"), "app/b.ts", "app/z.ts", "app b z")
+	deferFatal(label.New("", "app", "app"), "app/b.ts", "app/y.ts", "app b y")
+	deferFatal(label.New("", "app", "app"), "app/c.ts", "app/a.ts", "app c a")
+	if message, _ := deferredFatalMessage(); message != "app b y" {
+		t.Errorf("deferred fatal = %q, want app b y", message)
+	}
 }
