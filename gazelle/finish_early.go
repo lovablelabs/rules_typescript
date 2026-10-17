@@ -2,7 +2,6 @@ package typescript
 
 import (
 	"bytes"
-	"log"
 	"maps"
 	"runtime"
 	"slices"
@@ -107,7 +106,7 @@ func (l *tsLang) mergeKinds(c *config.Config) map[string]rule.KindInfo {
 func (s *programStore) requireWritten(written []recordedFile) {
 	for _, f := range written {
 		if !bytes.Equal(s.emission.files[f.Pkg].Format(), f.Content) {
-			log.Fatalf("typescript: AfterResolvingDeps changes %s after Gazelle wrote it: this Gazelle writes first, and no generated rule reached Resolve, where the extension finishes its rules before the write. Did you mean to update a package this language generates rules for?", orRepoRoot(f.Pkg))
+			fatalf("typescript: AfterResolvingDeps changes %s after Gazelle wrote it: this Gazelle writes first, and no generated rule reached Resolve, where the extension finishes its rules before the write. Did you mean to update a package this language generates rules for?", orRepoRoot(f.Pkg))
 		}
 	}
 }

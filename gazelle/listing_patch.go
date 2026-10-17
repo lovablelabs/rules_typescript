@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"maps"
 	"os"
 	"path"
@@ -1958,10 +1957,10 @@ func verifyListing(ctx context.Context, repoRoot, tsgo, subject string, args []s
 		return err
 	}
 	if err != nil {
-		log.Fatalf("typescript: -ts_listing_patch_verify: %v", err)
+		fatalf("typescript: -ts_listing_patch_verify: %v", err)
 	}
 	if diff := listingDifference(got, fresh); diff != "" {
-		log.Fatalf("typescript: -ts_listing_patch_verify: the %s listing of %s differs from tsgo's:\n%s", how, subject, diff)
+		fatalf("typescript: -ts_listing_patch_verify: the %s listing of %s differs from tsgo's:\n%s", how, subject, diff)
 	}
 	return nil
 }

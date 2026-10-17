@@ -3,7 +3,6 @@ package typescript
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"slices"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -89,7 +88,7 @@ func (g *protoGraph) providers(c *config.Config, imp string) []*protoGraphNode {
 	if override, ok := resolve.FindRuleWithOverride(c, resolve.ImportSpec{Lang: "proto", Imp: imp}, "proto"); ok {
 		normalized := g.normalize(override)
 		if override.Repo != "" && override.Repo != c.RepoName && !normalized.Canonical {
-			log.Fatalf("typescript proto graph: apparent override %s is not a declared graph root; use its canonical native label", override.String())
+			fatalf("typescript proto graph: apparent override %s is not a declared graph root; use its canonical native label", override.String())
 		}
 		node := g.nodes[normalized.String()]
 		if node == nil {

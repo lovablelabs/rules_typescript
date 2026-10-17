@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -178,7 +179,7 @@ func automaticProgramImports(c *config.Config, consumer, sources *rule.Rule, f *
 	ignored := slices.ContainsFunc(f.Directives, func(d rule.Directive) bool { return d.Key == "ignore" })
 	closing, _ := getConfig(c).programs.dirWalked(f.Pkg)
 	if result.incomplete != "" && closing && managesProgramClosure(consumer) && !ignored && (len(c.Langs) == 0 || slices.Contains(c.Langs, languageName)) {
-		log.Fatalf("typescript: %s cannot discover its compiler closure: %s; use explicit source-file labels for automatic closure, or keep the whole rule or ignore its package and maintain sources and deps manually", label.New(c.RepoName, f.Pkg, consumer.Name()), result.incomplete)
+		fatalf("typescript: %s cannot discover its compiler closure: %s; use explicit source-file labels for automatic closure, or keep the whole rule or ignore its package and maintain sources and deps manually", label.New(c.RepoName, f.Pkg, consumer.Name()), result.incomplete)
 	}
 	return result.imports
 }
@@ -435,7 +436,8 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 	}
 	configImporters := map[string]bool{}
 	configUsesPool := false
-	reported := map[string]bool{}
+	reported := edgeReports{}
+	defer reported.print(from)
 	srcs := map[string]sourceInput{}
 	effective := tc.programs.semanticRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name))
 	if effective == nil {
@@ -524,9 +526,9 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 				if candidate.metadata {
 					switch tc.programs.metadataIdentity(c, candidate.path) {
 					case generatedInput:
-						log.Fatal(generatedDiscoveryConflict(candidate.path))
+						deferFatal(from, candidate.from, candidate.path, generatedDiscoveryConflict(candidate.path).Error())
 					case unknownInput:
-						log.Fatal(tc.programs.incompleteOutput(candidate.path))
+						deferFatal(from, candidate.from, candidate.path, tc.programs.incompleteOutput(candidate.path).Error())
 					}
 					continue
 				}
@@ -552,7 +554,8 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 			if linkedMember && (sourceMember || isDeclarationFile(e.From)) && configFiles == nil && strings.HasPrefix(e.From, from.Pkg+"/") &&
 				strings.HasPrefix(e.Specifier, ".") && firstParty(e.To) && isDeclarationFile(e.To) &&
 				!strings.HasPrefix(e.To, from.Pkg+"/") {
-				log.Fatalf("typescript: workspace member %s imports foreign declaration %s from %s; npm_store_member cannot preserve this relative layout. Did you mean to move the declaration inside the member or import it through a separately published package?", from, e.To, e.From)
+				deferFatal(from, e.From, e.To, fmt.Sprintf("typescript: workspace member %s imports foreign declaration %s from %s; npm_store_member cannot preserve this relative layout. Did you mean to move the declaration inside the member or import it through a separately published package?", from, e.To, e.From))
+				continue
 			}
 			if configFiles != nil && (e.Kind != explainfiles.Import || isDeclarationFile(e.From)) {
 				continue
@@ -787,13 +790,13 @@ func retainSourceImporters(c *config.Config, r *rule.Rule, from label.Label, p *
 	}
 	if kept {
 		if len(missing) > 0 {
-			log.Fatalf("typescript: %s retains compiler inputs requiring %s, but kept source_node_modules does not supply those importer scopes; retain their node_modules targets or keep the whole rule and maintain its compiler inputs manually", from, strings.Join(slices.Sorted(maps.Keys(missing)), ", "))
+			fatalf("typescript: %s retains compiler inputs requiring %s, but kept source_node_modules does not supply those importer scopes; retain their node_modules targets or keep the whole rule and maintain its compiler inputs manually", from, strings.Join(slices.Sorted(maps.Keys(missing)), ", "))
 		}
 	} else {
 		for _, text := range slices.Sorted(maps.Keys(importers)) {
 			_, target := tc.programs.ruleTarget(c.RepoName, emissionLabel(from.Repo, from.Pkg, text))
 			if target == nil || target.Kind() != "node_modules" {
-				log.Fatalf("typescript: %s retains compiler inputs requiring importer %s, but that node_modules target is not available; include its package in this Gazelle update or declare its importer target", from, text)
+				fatalf("typescript: %s retains compiler inputs requiring importer %s, but that node_modules target is not available; include its package in this Gazelle update or declare its importer target", from, text)
 			}
 		}
 	}
@@ -1567,7 +1570,7 @@ func removeSuppliedProgramInputs(c *config.Config, r *rule.Rule, from label.Labe
 		}
 		attr := inputAttrs[scopeDemands[spec]]
 		role := []string{"module", "runtime scope", "compiler"}[scopeDemands[spec]]
-		log.Fatalf("typescript: %s requires package scope %s, but kept %s omit it and deps do not supply its %s input; retain the scope or supply it through a compiler dependency", from, spec.Imp, attr, role)
+		fatalf("typescript: %s requires package scope %s, but kept %s omit it and deps do not supply its %s input; retain the scope or supply it through a compiler dependency", from, spec.Imp, attr, role)
 	}
 	for index, attr := range inputAttrs {
 		var retained []string
@@ -1609,13 +1612,13 @@ func configSrcPackage(tc *tsConfig, file, configDir string) string {
 }
 
 func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
-	e explainfiles.Edge, from label.Label, reported map[string]bool, srcs map[string]sourceInput, configFiles map[string]bool,
+	e explainfiles.Edge, from label.Label, reported edgeReports, srcs map[string]sourceInput, configFiles map[string]bool,
 	sourceOwner ...func(string) emissionMode) (dep string, source, owned bool) {
 	s := tc.programs
 	readsSources := func(owner string) bool {
 		mode := sourceOwner[0](owner)
 		if mode == unknownEmission && !isDeclarationFile(e.To) {
-			log.Fatalf("typescript: %s imports implementation %s from %s whose emit value is an expression; automatic closure cannot choose between its sources and declarations. Did you mean to give that owner a literal emit value, or keep the whole consuming rule and maintain its complete source/dependency inputs manually?", from, e.To, owner)
+			deferFatal(from, e.From, e.To, fmt.Sprintf("typescript: %s imports implementation %s from %s whose emit value is an expression; automatic closure cannot choose between its sources and declarations. Did you mean to give that owner a literal emit value, or keep the whole consuming rule and maintain its complete source/dependency inputs manually?", from, e.To, owner))
 		}
 		return mode == sourceEmission || mode != opaqueEmission && isDeclarationFile(e.To)
 	}
@@ -1693,14 +1696,15 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 				if generatedFile {
 					input = "generated " + input + " from " + label.New(from.Repo, pkg, producer.Name()).String()
 				}
-				log.Fatalf("typescript: %s imports %s, which ts_compile cannot accept as a source; use .ts/.tsx, .js/.mjs/.cjs, JSON or declarations, or use # gazelle:resolve typescript %s <owner label> for an existing compatible dependency", from, input, e.To)
+				deferFatal(from, e.From, e.To, fmt.Sprintf("typescript: %s imports %s, which ts_compile cannot accept as a source; use .ts/.tsx, .js/.mjs/.cjs, JSON or declarations, or use # gazelle:resolve typescript %s <owner label> for an existing compatible dependency", from, input, e.To))
+				return "", false, false
 			}
 			name := e.To
 			if pkg := configSrcPackage(tc, e.To, ""); pkg != "" {
 				name = strings.TrimPrefix(name, pkg+"/")
 			}
 			if _, ok := srcLabel(name); !ok {
-				reportEdge(from, e, "file name contains ':'; no Bazel label can name it", reported)
+				reported.add(e, "file name contains ':'; no Bazel label can name it")
 				return "", false, false
 			}
 			retainSourceInput(c, from, srcs, e.To, sourceRole)
@@ -1710,7 +1714,7 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 			return generated, true, false
 		}
 	}
-	reportEdge(from, e, s.whyUnowned(e.To), reported)
+	reported.add(e, s.whyUnowned(e.To))
 	return "", false, false
 }
 
@@ -1726,7 +1730,7 @@ func (s *programStore) exportedTo(c *config.Config, file string, consumer label.
 	name := strings.TrimPrefix(file, pkg+"/")
 	visibility, exported, err := s.sourceVisibility(c, s.emission.files[pkg], name)
 	if err != nil {
-		log.Fatalf("typescript: %s cannot retain %s beside its declaration: %v. Did you mean to use literal source exports with visibility for the consuming package?", consumer, file, err)
+		fatalf("typescript: %s cannot retain %s beside its declaration: %v. Did you mean to use literal source exports with visibility for the consuming package?", consumer, file, err)
 	}
 	return exported && !scopeVisibilityDenies(visibility, label.New(consumer.Repo, pkg, name), consumer)
 }
@@ -1927,14 +1931,72 @@ func selfKey(l label.Label) label.Label {
 	return l
 }
 
-func reportEdge(from label.Label, e explainfiles.Edge, why string,
-	said map[string]bool) {
-	if said[e.To] {
-		return
+// edgeReports is one program's unresolved imports: per imported file, its smallest importer and why.
+type edgeReports map[string]edgeReport
+
+type edgeReport struct{ from, why string }
+
+func (r edgeReports) add(e explainfiles.Edge, why string) {
+	if said, ok := r[e.To]; !ok || e.From < said.from {
+		r[e.To] = edgeReport{e.From, why}
 	}
-	said[e.To] = true
-	log.Printf("typescript: %s: %s imports %s: %s; no dep",
-		from, e.From, e.To, why)
+}
+
+func (r edgeReports) print(from label.Label) {
+	for _, to := range slices.Sorted(maps.Keys(r)) {
+		log.Printf("typescript: %s: %s imports %s: %s; no dep",
+			from, r[to].from, to, r[to].why)
+	}
+}
+
+// deferredFatal is an edge fatal the run reached and deferred.
+type deferredFatal struct {
+	program, file, edge, message string
+}
+
+// pendingFatal is the smallest offending (program, file, edge) the run has deferred.
+var pendingFatal struct {
+	sync.Mutex
+	f *deferredFatal
+}
+
+// deferFatal records a fatal edge and lets the pass continue, so the run
+// reports the same fatal whatever order it walks programs and edges in.
+func deferFatal(program label.Label, file, edge, message string) {
+	f := deferredFatal{program.String(), file, edge, message}
+	pendingFatal.Lock()
+	defer pendingFatal.Unlock()
+	if old := pendingFatal.f; old == nil || cmp.Or(cmp.Compare(f.program, old.program), cmp.Compare(f.file, old.file), cmp.Compare(f.edge, old.edge)) < 0 {
+		pendingFatal.f = &f
+	}
+}
+
+func deferredFatalMessage() (string, bool) {
+	pendingFatal.Lock()
+	defer pendingFatal.Unlock()
+	if pendingFatal.f == nil {
+		return "", false
+	}
+	return pendingFatal.f.message, true
+}
+
+// exitOnDeferredFatal ends the run with the deferred fatal, if any.
+func exitOnDeferredFatal() {
+	if message, ok := deferredFatalMessage(); ok {
+		log.Fatal(message)
+	}
+}
+
+// fatalf is log.Fatalf, except that a deferred edge fatal, reached first, is the one reported.
+func fatalf(format string, a ...any) {
+	exitOnDeferredFatal()
+	log.Fatalf(format, a...)
+}
+
+// fatal is log.Fatal, except that a deferred edge fatal, reached first, is the one reported.
+func fatal(a ...any) {
+	exitOnDeferredFatal()
+	log.Fatal(a...)
 }
 
 func compilerConfigSource(c *config.Config, selected, owner string,

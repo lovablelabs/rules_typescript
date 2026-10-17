@@ -990,7 +990,7 @@ func runSelf(args []string, env ...string) (int, []byte, []byte) {
 func runSelfTo(stdoutTo, stderrTo io.Writer, args []string, env ...string) (int, []byte, []byte) {
 	exe, err := os.Executable()
 	if err != nil {
-		log.Fatalf("typescript: run record: %v", err)
+		fatalf("typescript: run record: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(exe, args...)
@@ -1009,7 +1009,7 @@ func runSelfTo(stdoutTo, stderrTo io.Writer, args []string, env ...string) (int,
 		close(signals)
 	}()
 	if err := cmd.Start(); err != nil {
-		log.Fatalf("typescript: run record: %v", err)
+		fatalf("typescript: run record: %v", err)
 	}
 	go func() {
 		for s := range signals {

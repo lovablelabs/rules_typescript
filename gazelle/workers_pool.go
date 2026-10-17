@@ -125,7 +125,7 @@ func wranglerConfigRule(args language.GenerateArgs, tc *tsConfig,
 		tc.programs.observeWranglerConfig(args.Config, cfg)
 		file, err := tc.programs.wranglerConfigOf(args.Config, cfg)
 		if err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if file == "" {
 			return nil
@@ -163,7 +163,7 @@ func workersPoolImport(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
 		wrangler = ""
 		file, err := tc.programs.wranglerConfigOf(c, cfg)
 		if err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		if file != "" {
 			wrangler = wranglerConfigLabel(tc, file, cfg, from.Pkg)
@@ -174,7 +174,7 @@ func workersPoolImport(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
 		if previous := r.AttrString("workers_pool"); previous != "" && previous != importer {
 			resolution := workersPoolResolution(tc.lock, previous, from)
 			if resolution == "" || resolution != workersPoolResolution(tc.lock, importer, from) {
-				log.Fatalf("typescript: %s: config imports Workers pools from both %s and %s with different resolutions; one wrangler_config needs one pool resolution. Did you mean to split these configs into separate ts_test targets?", from, previous, importer)
+				fatalf("typescript: %s: config imports Workers pools from both %s and %s with different resolutions; one wrangler_config needs one pool resolution. Did you mean to split these configs into separate ts_test targets?", from, previous, importer)
 			}
 			if previous < importer {
 				importer = previous
@@ -231,6 +231,6 @@ func wranglerConfigLabel(tc *tsConfig, file, cfg, pkg string) string {
 	if source, ok := srcLabel(name); ok {
 		return source
 	}
-	log.Fatalf("typescript: %s names %s, which cannot be a Bazel file label; rename the Wrangler config", cfg, file)
+	fatalf("typescript: %s names %s, which cannot be a Bazel file label; rename the Wrangler config", cfg, file)
 	return ""
 }

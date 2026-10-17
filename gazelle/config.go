@@ -4,7 +4,6 @@ import (
 	"errors"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"io/fs"
-	"log"
 	"maps"
 	"os"
 	"path"
@@ -325,7 +324,7 @@ func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(
 	tc.programs.recordBuild(c, rel, f)
 
 	if err := configureProto(c, rel, f, tc); err != nil {
-		log.Fatalf("typescript: %v", err)
+		fatalf("typescript: %v", err)
 	}
 
 	// c.RepoRoot is the workspace root whichever directory Gazelle was pointed
@@ -344,7 +343,7 @@ func configureTsConfig(c *config.Config, rel string, f *rule.File, dirInfo func(
 		case err == nil:
 			tc.lock = l
 		case !errors.Is(err, fs.ErrNotExist):
-			log.Fatalf("typescript: %s: %v", pnpmLockfileName, err)
+			fatalf("typescript: %s: %v", pnpmLockfileName, err)
 		}
 	}
 
@@ -460,7 +459,7 @@ func (s *programStore) readSelectedConfig(c *config.Config, rel string) bool {
 		}
 		file, err := rule.LoadFile(filename, rel)
 		if err != nil {
-			log.Fatalf("typescript: reading selected config owner %s: %v", filename, err)
+			fatalf("typescript: reading selected config owner %s: %v", filename, err)
 		}
 		s.selectConfig(c, rel, file)
 		return true

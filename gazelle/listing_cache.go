@@ -309,7 +309,7 @@ func loadListing(id listingID, subject string) (*program, bool) {
 	}
 	entry, fresh, err := predecodes.take(id.key)
 	if errors.Is(err, errPredecodeMismatch) {
-		log.Fatal(err)
+		fatal(err)
 	}
 	if errors.Is(err, fs.ErrNotExist) && id.family != "" {
 		return patchFromFamily(id, subject)
