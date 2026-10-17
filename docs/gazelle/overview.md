@@ -25,8 +25,12 @@ rewrites Go BUILD files too.
 Add `gazelle` to `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "gazelle", version = "0.47.0")
+bazel_dep(name = "gazelle", version = "0.51.3")
 ```
+
+0.51.3 is the floor: rules_go 0.62, which the llvm toolchain module brings into
+every graph that depends on rules_typescript, requires it, so an older
+declaration resolves to 0.51.3 anyway.
 
 `rules_typescript` declares `rules_go`, `go_sdk` and `go_deps` as non-dev
 dependencies, so they propagate transitively via bzlmod. Consumers need only the

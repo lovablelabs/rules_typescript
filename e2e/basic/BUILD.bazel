@@ -1,4 +1,5 @@
-load("@gazelle//:def.bzl", "gazelle")
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary", "gazelle_generation_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_test")
 load("@npm//:defs.bzl", "npm_virtual_store")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
 load("@rules_typescript//ts:defs.bzl", "ts_binary", "ts_compile", "ts_config", "ts_pnpm")
@@ -7,6 +8,54 @@ gazelle(
     name = "gazelle",
     gazelle = "@rules_typescript//gazelle:gazelle_typescript",
     tags = ["manual"],
+)
+
+# The extension's tests and //gazelle/golden's cases on the Gazelle floor, whose
+# update loop resolves before it writes. .bcr/presubmit.yml leaves them out.
+gazelle_binary(
+    name = "gazelle_proto_test",
+    testonly = True,
+    languages = [
+        "@gazelle//language/proto",
+        "@rules_typescript//gazelle:typescript",
+    ],
+)
+
+# The skipped tests read files of rules_typescript's own tree by relative path.
+go_test(
+    name = "gazelle_test",
+    size = "large",
+    srcs = ["@rules_typescript//gazelle:test_srcs"],
+    args = ["-test.skip=^(TestDocs_|TestEdgeLabel_CuloriPairing$$|TestEdgeLabel_AugmentationNamesThePackage$$|TestOwner_SampleListingIsATestOnlyPackage$$|TestProgram_VitestConfigsDiscoveredAfterFirstListing$$)"],
+    data = [
+        ":gazelle_proto_test",
+        "@rules_typescript//gazelle:gazelle_typescript",
+    ],
+    embed = ["@rules_typescript//gazelle:typescript"],
+    env = {
+        "PROTO_GAZELLE": "$(rlocationpath :gazelle_proto_test)",
+        "TS_GAZELLE": "$(rlocationpath @rules_typescript//gazelle:gazelle_typescript)",
+    },
+    shard_count = 8,
+    deps = [
+        "@com_github_bazelbuild_buildtools//build",
+        "@gazelle//config",
+        "@gazelle//label",
+        "@gazelle//resolve",
+        "@gazelle//rule",
+        "@io_bazel_rules_go//go/runfiles",
+        "@rules_typescript//gazelle/incremental",
+        "@rules_typescript//gazelle/tsgolisting:listing",
+    ],
+)
+
+gazelle_generation_test(
+    name = "gazelle_golden_test",
+    size = "medium",
+    gazelle_binary = "@rules_typescript//gazelle:gazelle_typescript",
+    # 0.51.3's 2 s default per case is too short.
+    gazelle_timeout_seconds = 60,
+    test_data = ["@rules_typescript//gazelle:golden_testdata"],
 )
 
 npm_virtual_store(name = "node_modules/.pnpm")

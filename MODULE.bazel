@@ -44,13 +44,21 @@ gazelle_roundtrip_tarballs(
 
 # Non-dev, so a consumer's build loads //gazelle:BUILD.bazel and gets rules_go,
 # the Go SDK and the Go deps without declaring them.
-bazel_dep(name = "gazelle", version = "0.47.0")
+# 0.51.3 is the floor: rules_go 0.62, declared below and by llvm, requires it.
+bazel_dep(name = "gazelle", version = "0.51.3")
+
+# Root-only, so consumers keep the floor above. go_deps's hint to raise
+# gazelle/go.mod's v0.47.0 is expected.
+single_version_override(
+    module_name = "gazelle",
+    version = "0.54.0",
+)
 
 # Gazelle writes this name into the BUILD files of a repository with no
 # MODULE.bazel of its own; the ts extension's Go module repositories are such.
 bazel_dep(
     name = "rules_go",
-    version = "0.60.0",
+    version = "0.62.0",
     repo_name = "io_bazel_rules_go",
 )
 

@@ -28,7 +28,7 @@ func TestSnapshotVersionsComeFromTheRealModuleFile(t *testing.T) {
 }
 
 func TestScaffoldShape(t *testing.T) {
-	files := scaffold("my_project", "0.1.0", "0.47.0", "9.0.0", "")
+	files := scaffold("my_project", "0.1.0", "0.51.3", "9.0.0", "")
 	seen := map[string]bool{}
 	for _, f := range files {
 		if seen[f.path] {
@@ -48,7 +48,7 @@ func TestScaffoldShape(t *testing.T) {
 	module := body(t, files, "MODULE.bazel")
 	for _, want := range []string{
 		`bazel_dep(name = "rules_typescript", version = "0.1.0")`,
-		`bazel_dep(name = "gazelle", version = "0.47.0")`,
+		`bazel_dep(name = "gazelle", version = "0.51.3")`,
 		`register_toolchains("@rules_typescript//ts/toolchain:all")`,
 	} {
 		if !strings.Contains(module, want) {
@@ -59,7 +59,7 @@ func TestScaffoldShape(t *testing.T) {
 		t.Error("an empty --rules-path must not emit a local_path_override")
 	}
 
-	withOverride := body(t, scaffold("p", "0.1.0", "0.47.0", "9.0.0", "\nlocal_path_override(\n)\n"), "MODULE.bazel")
+	withOverride := body(t, scaffold("p", "0.1.0", "0.51.3", "9.0.0", "\nlocal_path_override(\n)\n"), "MODULE.bazel")
 	if !strings.Contains(withOverride, "local_path_override") {
 		t.Error("--rules-path must emit a local_path_override")
 	}

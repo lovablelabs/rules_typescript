@@ -129,7 +129,7 @@ git_override(
 
 register_toolchains("@rules_typescript//ts/toolchain:all")
 
-bazel_dep(name = "gazelle", version = "0.47.0")
+bazel_dep(name = "gazelle", version = "0.51.3")
 ```
 
 **Step 3.** Create `.bazelrc`:

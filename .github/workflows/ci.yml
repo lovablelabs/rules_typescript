@@ -250,9 +250,6 @@ jobs:
       - name: Test e2e/basic
         run: cd e2e/basic && bazel test //...
 
-      - name: Test e2e/gazelle_054
-        run: cd e2e/gazelle_054 && bazel test //...
-
   examples:
     name: Examples Build
     runs-on: ubuntu-latest
