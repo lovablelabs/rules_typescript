@@ -80,6 +80,7 @@ type resolutionMemo struct {
 	// Per directory: its indexed codegen tree and the trees declared at or above it.
 	indexedTrees  map[string]treeOwner
 	ancestorTrees map[string]ancestorTrees
+	inputFiles    map[inputFilesKey]inputFilesEntry
 }
 
 func (s *programStore) resolutionMemo() *resolutionMemo {
@@ -87,7 +88,7 @@ func (s *programStore) resolutionMemo() *resolutionMemo {
 	if s.memo == nil || s.memo.stamp != stamp {
 		s.memo = &resolutionMemo{stamp: stamp, identities: map[identityKey]inputIdentity{}, generated: map[generatedKey]bool{},
 			trees: map[string]treeOwner{}, producers: map[string]fileProducer{}, manifests: map[identityKey]*manifest{},
-			indexedTrees: map[string]treeOwner{}, ancestorTrees: map[string]ancestorTrees{}}
+			indexedTrees: map[string]treeOwner{}, ancestorTrees: map[string]ancestorTrees{}, inputFiles: map[inputFilesKey]inputFilesEntry{}}
 	}
 	return s.memo
 }
