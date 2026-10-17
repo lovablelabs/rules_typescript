@@ -3,10 +3,13 @@ package typescript
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +19,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
+	"github.com/microsoft/typescript-go/shim/listing"
 
 	"github.com/mikn/rules_typescript/gazelle/incremental"
 )
@@ -148,6 +152,157 @@ func TestPrefetch_StopCancelsTheRunningListingAndDropsQueuedOnes(t *testing.T) {
 	if got := calls(); !slices.Equal(got, want) {
 		t.Fatalf("listings = %v, want %v", got, want)
 	}
+}
+
+// -ts_listing_patch_verify aborted a large workspace's run with "tsconfig.json: context canceled":
+// the walk's end cancelled the verifying listing of a speculation nothing took.
+// -ts_listing_inproc=verify instead cached the listing it never checked, whatever cancelled it.
+func TestPrefetch_VerifySkipsOnlyAListingCancelledAsUntaken(t *testing.T) {
+	cases := []struct{ name, fails string }{
+		{"an untaken speculation cancelled at the walk's end", ""},
+		{"an untaken narrowed listing cancelled at the walk's end", ""},
+		{"tsgo failing the verifying listing", "exit status 2"},
+		{"a verifying listing that differs", "differs from tsgo's"},
+		{"a run cancelled otherwise", "context canceled"},
+		{"an untaken in-process listing cancelled at the walk's end", ""},
+		{"an in-process listing cancelled otherwise", "-ts_listing_inproc=verify: app/tsconfig.json: context canceled"},
+	}
+	if name := os.Getenv("RULES_TYPESCRIPT_VERIFY_CASE"); strings.Contains(name, "in-process") {
+		listInProcessUnderVerify(t, name)
+		return
+	} else if name != "" {
+		speculateUnderPatchVerify(t, name)
+		return
+	}
+	requireTsgo(t)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(binary, "-test.run=^TestPrefetch_VerifySkipsOnlyAListingCancelledAsUntaken$")
+			// rules_go filters shards before applying -test.run.
+			cmd.Env = append(os.Environ(), "RULES_TYPESCRIPT_VERIFY_CASE="+tc.name, "TEST_TOTAL_SHARDS=1")
+			out, err := cmd.CombinedOutput()
+			fails := tc.fails != ""
+			aborted := strings.Contains(string(out), "typescript: -ts_listing_")
+			if (err != nil) != fails || aborted != fails || !strings.Contains(string(out), tc.fails) {
+				t.Fatalf("exit: %v, want an abort on %q:\n%s", err, tc.fails, out)
+			}
+		})
+	}
+}
+
+func speculateUnderPatchVerify(t *testing.T, name string) {
+	l := newListingRuns(t, patchFixture())
+	narrowed := name == "an untaken narrowed listing cancelled at the walk's end"
+	roots := append(slices.Clone(projectionRoots), "app/src/view/w.tsx")
+	if narrowed {
+		l.list("app/tsconfig.json")
+		roots = []string{"app/src/a.ts", "app/src/b.ts", "app/src/c.ts", "app/src/lib/d.ts", "app/src/lib/index.ts", "app/src/view/v.tsx", "app/src/view/w.tsx", "app/tool.mjs"}
+	} else {
+		l.project("app/tsconfig.json", projectionRoots)
+	}
+	listingPatchVerify = true
+	started := make(chan struct{})
+	verifying := sync.OnceFunc(func() { close(started) })
+	listed := false
+	uncachedListing = func(ctx context.Context, repoRoot, tsgo, subject string, args []string) (*program, error) {
+		if narrowed && !listed {
+			listed = true
+			return runListingUncached(ctx, repoRoot, tsgo, subject, args)
+		}
+		verifying()
+		switch name {
+		case "tsgo failing the verifying listing":
+			return nil, fmt.Errorf("%s: exit status 2", subject)
+		case "a verifying listing that differs":
+			return &program{config: subject}, nil
+		}
+		<-ctx.Done()
+		return nil, fmt.Errorf("%s: %w", subject, context.Cause(ctx))
+	}
+	if name == "a run cancelled otherwise" {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		verifyListing(ctx, l.root, l.tsgo, "app/tsconfig.json", nil, &program{}, "patched")
+		t.Fatal("verification passed")
+	}
+	listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+	sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
+	if narrowed {
+		if _, err := listCompilerProgram(l.root, "app/tsconfig.json", l.tsgo, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pendingWrites.Wait()
+	cached := cacheEntries(t)
+	s := newProgramStore()
+	s.speculate(l.root, "app/tsconfig.json", l.tsgo, roots)
+	if strings.HasPrefix(name, "an untaken ") {
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the speculation listed nothing to verify")
+		}
+		s.stopPrefetch()
+		pendingWrites.Wait()
+		if now := cacheEntries(t); narrowed && now != cached {
+			t.Fatalf("the unverified listing was cached: %d entries, was %d", now, cached)
+		}
+		return
+	}
+	s.takeSpeculation(l.root, "app/tsconfig.json", l.tsgo, roots)
+	t.Fatal("verification passed")
+}
+
+func listInProcessUnderVerify(t *testing.T, name string) {
+	l := newListingRuns(t, patchFixture())
+	tsgo := releaseTsgo(t, l.tsgo, listing.Version())
+	listingInProcessMode = "verify"
+	if compiler, err := inProcessCompiler(tsgo); compiler == nil {
+		t.Fatal(err)
+	}
+	listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+	sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
+	s := newProgramStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	verifying := sync.OnceFunc(func() { close(started) })
+	startTsgo = func(cmd *exec.Cmd) error {
+		verifying()
+		if name == "an in-process listing cancelled otherwise" {
+			cancel()
+		} else {
+			<-s.prefetch.ctx.Done()
+		}
+		return cmd.Start()
+	}
+	if name == "an in-process listing cancelled otherwise" {
+		runListingContext(ctx, l.root, tsgo, "app/tsconfig.json", []string{"-p", "app/tsconfig.json", "--noEmit", "--listFilesOnly", "--explainFiles", "--pretty", "false"})
+		pendingWrites.Wait()
+		t.Fatalf("the listing was not verified, and %d entries are cached", cacheEntries(t))
+	}
+	s.speculate(l.root, "app/tsconfig.json", tsgo, projectionRoots)
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the speculation listed nothing to verify")
+	}
+	s.stopPrefetch()
+	pendingWrites.Wait()
+	if n := cacheEntries(t); n != 0 {
+		t.Fatalf("the unverified listing was cached: %d entries", n)
+	}
+}
+
+func cacheEntries(t *testing.T) int {
+	entries, err := os.ReadDir(listingCacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(entries)
 }
 
 // diskDirInfo is walk.GetDirInfo read straight from root's tree.

@@ -134,10 +134,10 @@ func (s exitStatus) Error() string {
 }
 
 // verifyInProcess is -ts_listing_inproc=verify: tsgo must list what got holds.
-func verifyInProcess(ctx context.Context, repoRoot, tsgo, subject string, args []string, got *program) {
+func verifyInProcess(ctx context.Context, repoRoot, tsgo, subject string, args []string, got *program) error {
 	want, err := listThroughTsgo(ctx, repoRoot, tsgo, subject, args)
-	if ctx.Err() != nil {
-		return
+	if err != nil && errors.Is(context.Cause(ctx), errListingUntaken) {
+		return err
 	}
 	if err != nil {
 		log.Fatalf("typescript: -ts_listing_inproc=verify: %v", err)
@@ -145,6 +145,7 @@ func verifyInProcess(ctx context.Context, repoRoot, tsgo, subject string, args [
 	if diff := inProcessDifference(got, want); diff != "" {
 		log.Fatalf("typescript: -ts_listing_inproc=verify: the in-process listing of %s differs from tsgo's:\n%s", subject, diff)
 	}
+	return nil
 }
 
 // inProcessDifference is how got, listed in process, differs from want,

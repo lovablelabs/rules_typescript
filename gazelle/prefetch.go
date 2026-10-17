@@ -25,7 +25,7 @@ type listingPrefetch struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
 	ctx       context.Context
-	cancel    context.CancelFunc
+	cancel    context.CancelCauseFunc
 	jobs      map[string]*listingJob
 	requested map[string]bool
 	// Keyed by speculationKey; a speculation runs ahead of every queued prefetch.
@@ -59,6 +59,8 @@ func (j *listingJob) run() {
 		j.p, j.err = listCompilerProgramContext(j.ctx, j.repoRoot, j.cfg, j.tsgo, nil, j.roots...)
 	})
 }
+
+var errListingUntaken = errors.New("no listing took it before the walk ended")
 
 var maxPrefetchWorkers = 8
 
@@ -134,7 +136,7 @@ func (s *programStore) prefetchListing(repoRoot, cfg, tsgo string) {
 
 func (s *programStore) listingPool() *listingPrefetch {
 	if s.prefetch == nil {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancelCause(context.Background())
 		s.prefetch = &listingPrefetch{ctx: ctx, cancel: cancel, jobs: map[string]*listingJob{}, requested: map[string]bool{}, speculations: map[string]*listingJob{}}
 		s.prefetch.cond = sync.NewCond(&s.prefetch.mu)
 	}
@@ -241,7 +243,7 @@ func (s *programStore) stopPrefetch() {
 	}
 	f.mu.Lock()
 	f.stopped = true
-	f.cancel()
+	f.cancel(errListingUntaken)
 	clear(f.jobs)
 	untaken := slices.Collect(maps.Values(f.speculations))
 	clear(f.speculations)
