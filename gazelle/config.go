@@ -121,6 +121,10 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 	if s.index != nil {
 		dirInfo = nil
 	}
+	var info func(string) (walk.DirInfo, error)
+	if len(dirInfo) > 0 {
+		info = dirInfo[0]
+	}
 	seenDirs := map[string]bool{}
 	facts := s.buildFacts
 	load := func(pkg string) {
@@ -133,40 +137,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			}
 		}
 		for _, dir := range slices.Backward(ancestors) {
-			f := s.emission.files[dir]
-			if len(dirInfo) > 0 {
-				if info, err := dirInfo[0](dir); err == nil {
-					if _, known := s.dirNames(dir); !known {
-						s.visit(dir, info.RegularFiles)
-						facts.loadedDir(dir)
-					}
-					if f == nil {
-						f = info.File
-					}
-				}
-			}
-			if f == nil {
-				continue
-			}
-			if s.emission.files[dir] != f {
-				facts.loadedDir(dir)
-			}
-			s.emission.setFile(dir, f)
-			if s.inputs[dir].config == nil {
-				s.inputs[dir] = programInput{config: s.buildConfig(dir)}
-				facts.loadedDir(dir)
-			}
-			if s.emission.registeredRules(dir, f) {
-				continue
-			}
-			for _, r := range f.Rules {
-				key := emissionLabel(s.repoConfig.RepoName, dir, ":"+r.Name())
-				if s.emission.rules[key] == nil {
-					s.emission.setRule(key, r)
-					facts.loadedDir(dir)
-				}
-			}
-			s.emission.recordRegistered(dir, f)
+			s.loadDir(dir, info, false)
 		}
 	}
 	for _, pkg := range pkgs {
@@ -175,6 +146,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 	if len(dirInfo) == 0 {
 		return
 	}
+	s.reviewCrawl(dirInfo[0])
 	mapped := func(key string) string {
 		if member := s.emission.lock.memberCompilerTarget(s.repoConfig.RepoName, key); member != "" {
 			return member
@@ -210,7 +182,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		key, origin := mapped(queue[0].key), queue[0].origin
 		queue = queue[1:]
 		s.emission.crawlMemo()
-		if seenTargets[key] || s.emission.crawled[key] {
+		if _, crawled := s.emission.crawled[key]; crawled || seenTargets[key] {
 			continue
 		}
 		seenTargets[key] = true
@@ -219,30 +191,22 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			continue
 		}
 		load(target.Pkg)
+		if s.emission.crawled == nil {
+			// The dropped memo no longer watches the labels this crawl already passed.
+			clear(seenTargets)
+			seenTargets[key] = true
+		}
 		s.emission.crawlMemo()
-		s.emission.crawledPkgs[target.Pkg] = true
+		s.emission.crawledPackage(target.Pkg)
 		r := s.semanticRule(key)
 		if r == nil {
+			s.emission.crawledMisses[key] = true
 			continue
 		}
-		s.emission.crawled[key] = true
-		references, _ := runtimeDependencies(r)
-		deps := len(references)
+		references, deps := crawlReferences(r)
+		s.emission.crawled[key] = crawledTarget{r.Kind(), references, deps}
+		s.emission.crawledTargets[target.Pkg] = append(s.emission.crawledTargets[target.Pkg], key)
 		editable := facts != nil && editableAttr(r.Kind(), "deps")
-		references = append(references, r.AttrStrings("source_node_modules")...)
-		switch r.Kind() {
-		case "ts_compile", "ts_test":
-			for _, attr := range inputAttrs {
-				references = append(references, r.AttrStrings(attr)...)
-			}
-			if r.Kind() == "ts_test" {
-				references = append(references, r.AttrString("runner"))
-			}
-		case "filegroup":
-			references = append(references, r.AttrStrings("srcs")...)
-		case "ts_proto_library":
-			references = append(references, r.AttrString("proto"))
-		}
 		for i, text := range references {
 			if text == "" {
 				continue
@@ -255,6 +219,123 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 			push(next, chain)
 		}
 	}
+}
+
+func crawlReferences(r *rule.Rule) (references []string, deps int) {
+	references, _ = runtimeDependencies(r)
+	deps = len(references)
+	references = append(references, r.AttrStrings("source_node_modules")...)
+	switch r.Kind() {
+	case "ts_compile", "ts_test":
+		for _, attr := range inputAttrs {
+			references = append(references, r.AttrStrings(attr)...)
+		}
+		if r.Kind() == "ts_test" {
+			references = append(references, r.AttrString("runner"))
+		}
+	case "filegroup":
+		references = append(references, r.AttrStrings("srcs")...)
+	case "ts_proto_library":
+		references = append(references, r.AttrString("proto"))
+	}
+	return references, deps
+}
+
+// reviewCrawl keeps a stale crawl memo only if, in every directory touched since, a load
+// would store nothing and each crawled target has the same kind and references.
+func (s *programStore) reviewCrawl(dirInfo func(string) (walk.DirInfo, error)) {
+	g := s.emission
+	if g.crawledLock != g.lock {
+		g.crawled = nil
+	}
+	g.crawlMemo()
+	if len(g.touchedDirs) == 0 {
+		return
+	}
+	if s.crawlChanged(dirInfo) {
+		g.crawled = nil
+		g.crawlMemo()
+		return
+	}
+	clear(g.touchedDirs)
+}
+
+// Until Resolve sets the index, every change to what a crawl reads is a callback's touch, a rule store
+// or the lockfile; a merge into a disabled directory counts as a touch at the next callback outside it.
+func (s *programStore) crawlChanged(dirInfo func(string) (walk.DirInfo, error)) bool {
+	g := s.emission
+	for dir := range g.touchedDirs {
+		if s.loadDir(dir, dirInfo, true) {
+			return true
+		}
+	}
+	for dir := range g.touchedDirs {
+		for _, key := range g.crawledTargets[dir] {
+			target, r := g.crawled[key], s.semanticRule(key)
+			if r == nil || r.Kind() != target.kind {
+				return true
+			}
+			if references, deps := crawlReferences(r); deps != target.deps || !slices.Equal(references, target.references) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// loadDir records dir's BUILD file, inputs and rules for observeBuilds, or with dryRun
+// only reports whether it would record anything.
+func (s *programStore) loadDir(dir string, dirInfo func(string) (walk.DirInfo, error), dryRun bool) bool {
+	facts := s.buildFacts
+	f := s.emission.files[dir]
+	if dirInfo != nil {
+		if info, err := dirInfo(dir); err == nil {
+			if _, known := s.dirNames(dir); !known {
+				if dryRun {
+					return true
+				}
+				s.visit(dir, info.RegularFiles)
+				facts.loadedDir(dir)
+			}
+			if f == nil {
+				f = info.File
+			}
+		}
+	}
+	if f == nil {
+		return false
+	}
+	if s.emission.files[dir] != f {
+		if dryRun {
+			return true
+		}
+		facts.loadedDir(dir)
+		s.emission.setFile(dir, f)
+	}
+	if s.inputs[dir].config == nil {
+		if dryRun {
+			return true
+		}
+		s.inputs[dir] = programInput{config: s.buildConfig(dir)}
+		facts.loadedDir(dir)
+	}
+	if s.emission.registeredRules(dir, f) {
+		return false
+	}
+	for _, r := range f.Rules {
+		key := emissionLabel(s.repoConfig.RepoName, dir, ":"+r.Name())
+		if s.emission.rules[key] == nil {
+			if dryRun {
+				return true
+			}
+			s.emission.setRule(key, r)
+			facts.loadedDir(dir)
+		}
+	}
+	if !dryRun {
+		s.emission.recordRegistered(dir, f)
+	}
+	return false
 }
 
 // clone returns a copy of the config, suitable for child directories that
