@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -22,6 +23,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
@@ -107,9 +109,12 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		store.roots = append(store.roots, filepath.ToSlash(rel))
 	}
 	if recursive := fs.Lookup("r"); recursive != nil {
-		store.recursive = recursive.Value.String() == "true"
+		// Gazelle 2's default -r=auto recurses only when no directory is named.
+		mode := recursive.Value.String()
+		store.recursive = mode == "true" || mode == "auto" && fs.NArg() == 0
 	}
 	getConfig(c).programs.fullWalk = store.recursive && slices.Equal(store.roots, []string{""})
+	lazyIndex.start(c.IndexLibraries && c.IndexLazy && !getConfig(c).programs.fullWalk)
 	if !getConfig(c).programs.fullWalk && listingCacheDir != "" && os.Getenv("GOGC") == "" {
 		// A partial run's heap is small, and GC at the default ratio was a third of its CPU;
 		// on a full run the same ratio raised peak RSS from 2.4 to 4.0 GB.
@@ -457,10 +462,78 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 			l.observeProgram(p)
 		}
 	}
+	res.RelsToIndex = append(res.RelsToIndex, lazyIndex.take()...)
 	s.resolution.noteGenerated(args, res)
 	s.early.noteGenerated(args, res)
 	s.buildFacts.generated(args, res)
 	return res
+}
+
+// lazyIndex collects, on a partial run under -index=lazy, every directory the
+// extension reads, which GenerateRules hands Gazelle to index before Resolve.
+var lazyIndex dirsRead
+
+type dirsRead struct {
+	mu         sync.Mutex
+	dirs, seen map[string]bool
+	late       map[string]string
+}
+
+func (d *dirsRead) start(on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dirs, d.seen, d.late = nil, nil, nil
+	if on {
+		d.dirs, d.seen, d.late = map[string]bool{}, map[string]bool{}, map[string]string{}
+	}
+}
+
+func (d *dirsRead) read(rel string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.dirs != nil && !d.seen[rel] {
+		d.seen[rel] = true
+		d.dirs[rel] = true
+	}
+}
+
+func (d *dirsRead) unseen(rel string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.seen != nil && !d.seen[rel]
+}
+
+// readLate notes rel, which a generated package's Imports read first.
+func (d *dirsRead) readLate(rel, pkg string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.late != nil {
+		d.late[rel] = pkg
+	}
+}
+
+// reportLate logs, once Resolve starts, each late read no later GenerateRules handed over.
+func (d *dirsRead) reportLate() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, rel := range slices.Sorted(maps.Keys(d.late)) {
+		log.Printf("typescript: -index=lazy: %s is first read while indexing //%s, after the last generated package, so Gazelle does not index it", rel, d.late[rel])
+	}
+	clear(d.late)
+}
+
+func (d *dirsRead) take() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.dirs) == 0 {
+		return nil
+	}
+	rels := slices.Sorted(maps.Keys(d.dirs))
+	clear(d.dirs)
+	for _, rel := range rels {
+		delete(d.late, rel)
+	}
+	return rels
 }
 
 func (l *tsLang) DoneGeneratingRules() {
@@ -487,7 +560,20 @@ func (l *tsLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve
 	if l.programs == nil {
 		return importsForRule(c, r, f)
 	}
-	specs := importsForRule(c, r, f, recordedDirInfo)
+	dirInfo := recordedDirInfo
+	if l.programs.walked[f.Pkg] {
+		// A generated package's crawl already read every directory its rules name;
+		// a first read here would come after its RelsToIndex.
+		dirInfo = func(rel string) (walk.DirInfo, error) {
+			late := lazyIndex.unseen(rel)
+			info, err := recordedDirInfo(rel)
+			if late && err == nil {
+				lazyIndex.readLate(rel, f.Pkg)
+			}
+			return info, err
+		}
+	}
+	specs := importsForRule(c, r, f, dirInfo)
 	l.programs.resolution.noteImports(c, r, f, specs)
 	return specs
 }
@@ -502,6 +588,7 @@ func (l *tsLang) Resolve(
 	imports any,
 	from label.Label,
 ) {
+	lazyIndex.reportLate()
 	s := getConfig(c).programs
 	if s.early != nil {
 		if !s.early.done {

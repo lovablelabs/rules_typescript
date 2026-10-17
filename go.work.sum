@@ -1,3 +1,5 @@
+github.com/bazel-contrib/bazel-gazelle/v2 v2.0.0-2 h1:lSINS7DK4xjm0Z4CBd7onO63uIe6WUsEZ/0voExa+JY=
+github.com/bazel-contrib/bazel-gazelle/v2 v2.0.0-2/go.mod h1:B76PjnaM2KyUG8ypV/ePHHDmGbyUNZ2PCEdEQIJISQM=
 github.com/bazelbuild/rules_go v0.60.0 h1:apGSxTTrFUyLNvX9NQmF4CbntWAO0/S5eALeVgB/6Qk=
 github.com/bazelbuild/rules_go v0.60.0/go.mod h1:CYcohJVxs4n7eftbC39GCqaEJm3E1EME+6QAkGguKoI=
 github.com/bmatcuk/doublestar/v4 v4.9.1 h1:X8jg9rRZmJd4yRy7ZeNDRnM+T3ZfHv15JiBJ/avrEXE=

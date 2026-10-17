@@ -16,8 +16,13 @@ The dev server does not type-check; type errors come from the editor and
 Gazelle generates a `dev` target for a tsconfig program with non-test sources
 and an application entry: a package index.html or a listed main.ts[x] or
 app.ts[x]. Gazelle manages `entry_point`, `node_modules`, `plugin` and
-`visibility`, and removes stale generated dev targets. It preserves `server`,
-`port`, `host`, `open` and values protected by `# keep`.
+`visibility`, and withdraws a `ts_dev_server` named `dev` (`dev_server` in a
+package named `dev`) outside an application package, wherever it runs program
+discovery, hand-written or not, unless a `# keep` above the rule holds it (a
+`# keep` on `entry_point` alone keeps the rule but drops `node_modules`,
+`plugin` and `visibility`). Gazelle keeps every other attribute as written
+(`server`, `port`, `host`, `open`, `react_refresh`, `vite_config`,
+`vite_config_srcs`) and every value under `# keep`.
 
 oj provides native React Fast Refresh. Leave `react_refresh` false on the oj
 path. Its serve root and cache location come from the launcher.
@@ -36,6 +41,7 @@ node_modules(
     hoist = "//:node_modules/.pnpm/node_modules",
 )
 
+# keep
 ts_dev_server(
     name = "dev",
     server = "@rules_typescript//vite:dev_server",

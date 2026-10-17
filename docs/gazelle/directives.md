@@ -55,9 +55,11 @@ ts_compile(
 )
 ```
 
-`visibility` is the common case: it is a merged attribute and every rule Gazelle
-generates carries `//visibility:public`, so without `# keep` a hand-narrowed
-visibility widens back on every run that re-emits the rule. See
+`visibility` is the common case: Gazelle merges it on every kind the table
+below lists it for and writes `//visibility:public` there (`ts_test` gets none;
+a `ts_compile` with empty `srcs`, written only to publish package scopes, takes
+the scopes' source visibility), so without `# keep` a hand-narrowed visibility
+widens back on every run that re-emits the rule. See
 [getting the clean-tree diff to empty](overview.md#getting-the-clean-tree-diff-to-empty).
 
 ### Attributes Gazelle Owns
@@ -67,12 +69,15 @@ is replaced unless a `# keep` holds it:
 
 | Rule | Attributes Gazelle owns |
 |------|-------------------------|
-| `ts_proto_library` | `proto`, `out_dir`, `tsconfig`, `node_modules`, `options`, `deps`, `type_inputs`, `visibility` |
-| `ts_compile` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `visibility` |
-| `ts_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
-| `ts_config` | `src`, `deps`, `visibility` |
+| `ts_proto_library` | `proto`, `out_dir`, `tsconfig`, `node_modules`, `source_node_modules`, `options`, `deps`, `type_inputs`, `visibility` |
+| `ts_compile` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `visibility` |
+| `ts_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
+| `ts_config` | `src`, `deps`, `jsx`, `module`, `visibility` |
+| `ts_dev_server` | `entry_point`, `node_modules`, `plugin`, `visibility` |
 | `filegroup(name = "vitest_config")` | `srcs`, `visibility` |
 | `filegroup(name = "wrangler_config")` | `srcs`, `visibility` |
+| `node_modules` | `deps`, `parent`, `hoist`, `visibility` |
+| `node_modules_member` | `member`, `visibility` |
 
 `emit` defaults to `False`. Gazelle writes `True` when a Node binary/test or package manifest requires built outputs, and propagates that requirement through resolved dependencies. A custom output consumer needs an explicit `emit = True` with `# keep`. Removing the built-output consumer removes its generated opt-in on the next run.
 
@@ -94,13 +99,21 @@ restates them. What a path-shaped `types` entry asks of Gazelle is the dep on
 the target that stages the file it names, written into `deps` like any other;
 see [a declaration the tsconfig names](overview.md#a-declaration-the-tsconfig-names).
 
-`ts_codegen`, `ts_dev_server`, `ts_pnpm` and `ts_add_package` are outside all
-of this: Gazelle writes none of them and touches none, so each comes through
-every run as written, load symbol included, `# keep` or not. A `ts_codegen` is
-read, for its `outs` and `out_dir`, and never rewritten.
+`ts_codegen`, `ts_pnpm` and `ts_add_package` are outside all of this: Gazelle
+writes none of them and touches none, so each comes through every run as
+written, load symbol included, `# keep` or not. A `ts_codegen` is read, for its
+`outs` and `out_dir`, and never rewritten. A `ts_dev_server` named `dev`
+(`dev_server` in a package named `dev`) is Gazelle's: written for an
+application package and withdrawn in every other directory where Gazelle runs
+program discovery, a hand-written one included, unless a `# keep` above the
+rule holds it (a `# keep` on `entry_point` alone keeps the rule but drops
+`node_modules`, `plugin` and `visibility`); see [the dev server
+setup](../guides/dev-server.md#setup).
 
 A directory that is not a package has every rule Gazelle would write there
 withdrawn, under the names it would use; `# keep` above such a rule holds it.
+Where program discovery is omitted, see
+[where a program is not](overview.md#where-a-program-is-not).
 
 `# keep` works at three granularities: one value, one attribute, one rule:
 

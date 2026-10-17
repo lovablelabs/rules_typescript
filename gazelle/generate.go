@@ -25,6 +25,7 @@ import (
 // generateRules writes one directory: a package's targets, or the withdrawal
 // of what an earlier run left where no program is.
 func generateRules(args language.GenerateArgs) language.GenerateResult {
+	noteLateLanguages(args.Config)
 	if isEditorProjectDir(args.Rel) {
 		return language.GenerateResult{}
 	}

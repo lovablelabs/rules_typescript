@@ -1,0 +1,7 @@
+# A direct dep the graph resolves to another version fails instead of warning.
+common --check_direct_dependencies=error
+
+build --incompatible_strict_action_env
+
+test --test_output=errors
+test --test_summary=terse

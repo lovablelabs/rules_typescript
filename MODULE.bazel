@@ -48,7 +48,7 @@ gazelle_roundtrip_tarballs(
 bazel_dep(name = "gazelle", version = "0.51.3")
 
 # Root-only, so consumers keep the floor above. go_deps's hint to raise
-# gazelle/go.mod's v0.47.0 is expected.
+# gazelle/go.mod's v0.51.3 is expected.
 single_version_override(
     module_name = "gazelle",
     version = "0.54.0",

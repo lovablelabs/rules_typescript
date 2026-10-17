@@ -214,6 +214,9 @@ var directiveFileLine = regexp.MustCompile(`^\s*#\s*gazelle:directive_file\s+(.*
 // snapshot is taken off the walk's goroutine, right after Gazelle read it.
 func recordedDirInfo(rel string) (walk.DirInfo, error) {
 	info, err := walk.GetDirInfo(rel)
+	if err == nil {
+		lazyIndex.read(rel)
+	}
 	in := runInputs
 	if in == nil || err != nil || in.key == "" {
 		return info, err
@@ -1029,5 +1032,17 @@ func releaseDeclinedFastPath() {
 	if fastPathDecoded.Load() {
 		listingStrings.Clear()
 		debug.FreeOSMemory()
+	}
+}
+
+// A Gazelle 2 language may configure only in Configure, after recordableRun.
+func noteLateLanguages(c *config.Config) {
+	if runInputs == nil {
+		return
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Exts)) {
+		if name != languageName && !strings.HasPrefix(name, "_") && !gazelleDefaults(name, c.Exts[name]) {
+			noteIncomplete("another language configures " + name)
+		}
 	}
 }

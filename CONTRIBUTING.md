@@ -285,6 +285,7 @@ bazel test //...
 | LSP | `bazel test //tests/lsp/...` | The tsserver resolution hook against a real tsserver |
 | Gazelle | `bazel test //gazelle/...` | Gazelle extension unit tests |
 | E2E | `cd e2e/basic && bazel test //...` | Real consumer workspace, plus the Gazelle extension's tests on the bazel-gazelle floor |
+| E2E, Gazelle 2 | `cd e2e/gazelle_latest && bazel test //...` | Most of the Gazelle extension's tests and golden cases on bazel-gazelle 2.0.0-beta.2 |
 | Test-source coverage | `tools/ci/check_test_sources.sh` | Every tracked test source is claimed by a target that runs |
 | Retired names | `tools/ci/check_retired_names.sh` | No tracked prose or code outside the changelog names a retired attribute, kind, provider, directive, export or path |
 

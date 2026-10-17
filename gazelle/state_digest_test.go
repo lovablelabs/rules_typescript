@@ -108,3 +108,36 @@ func allocatedPerCall(f func()) uint64 {
 	runtime.ReadMemStats(&after)
 	return (after.TotalAlloc - before.TotalAlloc) / n
 }
+
+type namedLanguage string
+
+func (n namedLanguage) Name() string { return string(n) }
+
+// Gazelle 2 tags generated rules with _gazelle_lang and _gazelle_kind; any
+// other private attribute of those types must still refuse to record.
+func TestStateDigest_Gazelle2PrivateAttributesDigestOnlyUnderTheirOwnKeys(t *testing.T) {
+	body := func(key string, value any) ruleBody {
+		r := rule.NewRule("ts_compile", "app")
+		r.SetPrivateAttr(key, value)
+		return digestRuleBody(r)
+	}
+	for _, tc := range []struct {
+		key   string
+		value any
+	}{{"_gazelle_lang", namedLanguage("typescript")}, {"_gazelle_kind", rule.KindInfo{}}} {
+		if got := body(tc.key, tc.value).opaque; got != "" {
+			t.Errorf("%s refused to record: %s", tc.key, got)
+		}
+	}
+	if body("_gazelle_lang", namedLanguage("typescript")).sum == body("_gazelle_lang", namedLanguage("proto")).sum {
+		t.Error("the language a rule's _gazelle_lang names is not digested")
+	}
+	for _, value := range []any{namedLanguage("typescript"), rule.KindInfo{}} {
+		if body("_other", value).opaque == "" {
+			t.Errorf("a %T under another private attribute was digested", value)
+		}
+	}
+	if gazelleDefaults("defaults", namedLanguage("defaults")) {
+		t.Error("a defaults config from another package was taken for language/defaults")
+	}
+}

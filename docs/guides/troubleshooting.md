@@ -367,12 +367,14 @@ Add node_modules = ":node_modules" pointing at a node_modules() target; the
 generated config resolves every bare specifier through that tree.
 ```
 
-For a hand-written `ts_dev_server`, name the importer's `node_modules`
-target. Gazelle writes that target in the importer's package. Its `deps`
-link every npm package the app imports; add `vite` when explicitly selecting
+For a hand-written `ts_dev_server`, under `# keep` so that Gazelle leaves it
+as written, name the importer's `node_modules` target. Gazelle writes that
+target in the importer's package. Its `deps` link every npm package the app
+imports; add `vite` when explicitly selecting
 `@rules_typescript//vite:dev_server`:
 
 ```python
+# keep
 ts_dev_server(
     name = "dev",
     entry_point = ":app",

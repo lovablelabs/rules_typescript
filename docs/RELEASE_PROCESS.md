@@ -18,10 +18,11 @@ Before releasing, ensure:
    bazel build --config=ci //... --output_groups=+_validation
    ```
    `e2e/` and `examples/` are separate workspaces, so they are separate
-   invocations. In each workspace, run `bazel run //:gazelle -- -mode=diff`
-   after `bazel run //:pnpm -- install --frozen-lockfile` where a root
+   invocations. In `e2e/basic` and each `examples/*` directory, run
+   `bazel run //:gazelle -- -mode=diff` after
+   `bazel run //:pnpm -- install --frozen-lockfile` where a root
    `pnpm-lock.yaml` exists. Then run `bazel test //...` in `e2e/basic` and
-   `bazel build //...` in each `examples/*` directory.
+   `e2e/gazelle_latest` and `bazel build //...` in each `examples/*` directory.
 
 2. **Determinism is verified**: `//tests/smoke:hello` and the four tools
    built from two empty output bases and compared byte for byte, which is

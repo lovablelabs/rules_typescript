@@ -1,0 +1,10 @@
+--- a/toolchain/merged_resource_directory.bzl
++++ b/toolchain/merged_resource_directory.bzl
+@@ -21,6 +21,7 @@
+         include_external_repositories = ["**"],
+         # Never import a prebuilt compiler's host runtime libraries.
+         include_srcs_patterns = [
++            parent_path,
+             parent_path + "/include/**",
+             parent_path + "/share/**",
+         ] + [path + "/**" for path in src_paths],

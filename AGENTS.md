@@ -42,6 +42,7 @@ bazel test //...                           # everything; `bazel query 'tests(//.
 bazel test --config=fast //...             # skips the nested-Bazel integration tests
 bazel build //... --output_groups=+_validation  # redundant if .bazelrc has it
 cd e2e/basic && bazel test //...           # e2e workspace (in .bazelignore)
+cd e2e/gazelle_latest && bazel test //...  # the Gazelle extension's tests on Gazelle 2
 cd examples/react-app && bazel test //...  # example workspace (in .bazelignore)
 
 # One integration test on its own. Each spawns a nested Bazel and is tagged

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
@@ -399,5 +400,26 @@ func rename(t *testing.T, from, to string) {
 	t.Helper()
 	if err := os.Rename(from, to); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Gazelle 2 lets a language configure only in Configure, after recordableRun
+// read c.Exts; the run must still refuse to record its unrecorded inputs.
+func TestRunRecord_ALanguageConfiguringAfterCheckFlagsIsNeverRecorded(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"MODULE.bazel":      "module(name = \"late_language\")\n",
+		"app/tsconfig.json": includeTs,
+		"app/a.ts":          "export const a = 1;\n",
+	})
+	saved := runInputs
+	t.Cleanup(func() { runInputs = saved })
+	in := &inputSet{files: map[string]string{}, dirs: map[string]*dirSnapshot{}, key: "k", repoRoot: root}
+	runInputs = in
+	t.Cleanup(in.pending.Wait)
+	generateAll(t, root, func(c *config.Config) {
+		c.Exts["late"] = struct{}{}
+	})
+	if !strings.Contains(in.incomplete, "another language configures late") {
+		t.Errorf("a run with another language's config is recordable; incomplete = %q", in.incomplete)
 	}
 }

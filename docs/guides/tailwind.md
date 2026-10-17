@@ -14,6 +14,7 @@ export default config;
 ```
 
 ```python
+# keep
 node_modules(
     name = "node_modules",
     deps = [
@@ -24,6 +25,7 @@ node_modules(
     hoist = ":node_modules/.pnpm/node_modules",
 )
 
+# keep
 ts_dev_server(
     name = "dev",
     server = "@rules_typescript//vite:dev_server",
@@ -38,6 +40,12 @@ All three packages have to be in the tree. `@tailwindcss/vite` reaches
 and `@tailwindcss/oxide` is a platform-specific native module: the lockfile
 carries twelve platform builds of it beside the wrapper package, and the npm tree
 places the one this host can load.
+
+Both rules are hand-written, so each carries `# keep`. Without it Gazelle
+rewrites the `node_modules` in a lockfile importer's package and withdraws it
+elsewhere, and rewrites the dev server's `entry_point`, `node_modules`,
+`plugin` and `visibility` in an application package and withdraws it
+elsewhere; see [the dev server setup](dev-server.md#setup).
 
 `//tests/tailwind` is the worked example: the dev server, started and
 interrogated over HTTP.

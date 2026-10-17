@@ -356,7 +356,8 @@ Delete it. `paths` here is Bazel's and resolves against no `baseUrl`; see
     [importing another target by bare specifier](../rules/ts-compile.md#importing-another-target-by-bare-specifier).
 
     Gazelle generates a default oj dev target for application entries and
-    updates its managed attributes. Explicit server choices and `# keep` values remain. See [Dev Server](../guides/dev-server.md).
+    updates its managed attributes. Every other attribute, such as an explicit
+    `server` or `port`, and every `# keep` value remain. See [Dev Server](../guides/dev-server.md).
 
 **Step 6.** Optional. Once a package's exports are all annotated, move it to
 Oxc's syntactic declaration emit, which takes type-checking off the critical

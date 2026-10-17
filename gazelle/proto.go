@@ -15,6 +15,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	gazelleproto "github.com/bazelbuild/bazel-gazelle/language/proto"
+	"github.com/bazelbuild/bazel-gazelle/pathtools"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
@@ -256,8 +257,26 @@ func managedProtoWrapper(c *config.Config, owner string, r *rule.Rule) bool {
 	return ((native.Repo == c.RepoName && within(native.Pkg, owner)) || native.Canonical) && r.Name() == protoWrapperName(native, &protoIdentity{Name: family, owner: owner})
 }
 
+// nativeProtoImports is what Gazelle's proto language indexes a proto_library
+// under; Gazelle 2's language/proto no longer exports the v1 Language to ask.
+func nativeProtoImports(r *rule.Rule, rel string) []resolve.ImportSpec {
+	strip := r.AttrString("strip_import_prefix")
+	if path.IsAbs(strip) {
+		strip = strip[len("/"):]
+	} else if strip != "" {
+		strip = path.Join(rel, strip)
+	}
+	srcs := r.AttrStrings("srcs")
+	specs := make([]resolve.ImportSpec, 0, len(srcs))
+	for _, src := range srcs {
+		if file := path.Join(rel, src); pathtools.HasPrefix(file, strip) {
+			specs = append(specs, resolve.ImportSpec{Lang: "proto", Imp: path.Join(r.AttrString("import_prefix"), pathtools.TrimPrefix(file, strip))})
+		}
+	}
+	return specs
+}
+
 func withProtoRules(args language.GenerateArgs, tc *tsConfig, res language.GenerateResult) language.GenerateResult {
-	nativeLanguage := gazelleproto.NewLanguage()
 	for _, native := range args.OtherGen {
 		if native.Kind() != "proto_library" {
 			continue
@@ -266,7 +285,7 @@ func withProtoRules(args language.GenerateArgs, tc *tsConfig, res language.Gener
 		if !ok {
 			continue
 		}
-		specs := nativeLanguage.Imports(args.Config, native, &rule.File{Pkg: args.Rel})
+		specs := nativeProtoImports(native, args.Rel)
 		var paths []string
 		for _, spec := range specs {
 			paths = append(paths, spec.Imp)
@@ -423,7 +442,6 @@ func (s *programStore) protoProviderIndex() *protoIndex {
 	}
 	index := &protoIndex{emission: g, rulesGeneration: g.rulesGeneration,
 		natives: map[resolve.ImportSpec][]label.Label{}, wrappers: map[resolve.ImportSpec][]label.Label{}}
-	nativeLanguage := gazelleproto.NewLanguage()
 	for key, r := range g.rules {
 		if r == nil {
 			continue
@@ -436,7 +454,7 @@ func (s *programStore) protoProviderIndex() *protoIndex {
 		effective := canonicalRule(ownerConfig, r)
 		f := &rule.File{Pkg: owner.Pkg}
 		if effective.Kind() == "proto_library" {
-			for _, spec := range nativeLanguage.Imports(ownerConfig, effective, f) {
+			for _, spec := range nativeProtoImports(effective, owner.Pkg) {
 				index.natives[spec] = append(index.natives[spec], absoluteProtoLabel(ownerConfig, owner, ""))
 			}
 		}

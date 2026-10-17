@@ -30,9 +30,18 @@ into the exec configuration; whether Bazel 8 accepts it is unverified.
 
 | bazel-gazelle | Status |
 |---------------|--------|
+| 2.0.0-beta.2 | Supported; `e2e/gazelle_latest` runs the golden cases and most of the extension's tests on it; most binary-driven tests pin `-r=true -index=true`, the run-record and fast-path tests run its defaults, and the lazy-index tests its `-index=lazy`. Under its default `-index=lazy`, a run never visits, so never reports, the files under a package outside the directories it updates |
+| Other versions above 0.54.0 | Untested; no workspace here resolves one |
 | 0.54.0 | Supported; the ruleset's own build, examples and integration tests |
+| Above 0.51.3, below 0.54.0 | Untested; no workspace here resolves one |
 | 0.51.3 | Supported floor; `e2e/basic` pins it |
 | < 0.51.3 | Not supported: rules_go 0.62 requires 0.51.3, so the graph raises it |
+
+Bazel resolves the highest version any module in the graph declares, and by
+default only warns when that differs from your own `bazel_dep`.
+`e2e/basic/.bazelrc` sets `--check_direct_dependencies=error`, so a graph that
+raises Gazelle past the declared 0.51.3 fails the build there instead of
+running the floor tests on a newer Gazelle.
 
 ## Platforms
 
