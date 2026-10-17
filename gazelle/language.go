@@ -191,6 +191,7 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 	l.programs.observeBuild(rel, recordedDirInfo)
 	if len(c.Langs) > 0 && !slices.Contains(c.Langs, languageName) {
 		l.programs.walked[rel] = false
+		l.programs.emission.disableDir(rel)
 	}
 	info, err := recordedDirInfo(rel)
 	if err != nil {

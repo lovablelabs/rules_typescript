@@ -309,7 +309,7 @@ func TestResolveRecord_StateDigestClassifiesEveryField(t *testing.T) {
 			"foreignSaid", "vitestPrograms", "compilerPrograms", "wranglerConfigs", "installChecked", "regularFiles", "fullWalk",
 			"manifests", "noLockSaid"}, []string{"memo", "protoIndex", "holdingIndex", "prefetch", "resolution", "importFacts", "buildFacts", "early"}},
 		{reflect.TypeFor[emissionGraph](), []string{"roots", "outputs", "rules", "files", "lock"},
-			[]string{"versions", "epoch", "listEpoch", "outputsGeneration", "rulesGeneration", "outputIndex", "registered", "crawled", "crawledPkgs", "lastTouched"}},
+			[]string{"versions", "epoch", "listEpoch", "outputsGeneration", "rulesGeneration", "outputIndex", "registered", "crawled", "crawledTargets", "crawledDirs", "crawledMisses", "pendingDisabled", "crawledLock", "touchedDirs", "lastTouched"}},
 		{reflect.TypeFor[program](), []string{"Listing", "candidates", "resolution", "config", "dir", "refused", "manifest", "key"}, []string{"bySource", "byImporter", "moduleEdges", "byDir"}},
 		{reflect.TypeFor[resolutionFacts](), []string{"Kinds", "RelativeTargets", "RootDirs", "Substitutions", "SubstitutionTargets"}, nil},
 		{reflect.TypeFor[programInput](), []string{"config", "program", "discoveryErr", "refresh"}, nil},
