@@ -79,19 +79,15 @@ func generateAll(t *testing.T, root string,
 	}
 	out.logged = captureLog(t, func() {
 		lang.Before(context.Background())
-		err := walk.Walk2(c, cexts, []string{root}, walk.VisitAllUpdateSubdirsMode, func(args walk.Walk2FuncArgs) walk.Walk2FuncResult {
-			if args.Update {
-				out.results[args.Rel] = generateRules(language.GenerateArgs{
-					Config: args.Config, Dir: args.Dir, Rel: args.Rel, File: args.File,
-					Subdirs: args.Subdirs, RegularFiles: args.RegularFiles, GenFiles: args.GenFiles,
+		walk.Walk(c, cexts, []string{root}, walk.VisitAllUpdateSubdirsMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
+			if update {
+				out.results[rel] = generateRules(language.GenerateArgs{
+					Config: c, Dir: dir, Rel: rel, File: f,
+					Subdirs: subdirs, RegularFiles: regularFiles, GenFiles: genFiles,
 				})
 			}
-			return walk.Walk2FuncResult{}
 		})
 		lang.DoneGeneratingRules()
-		if err != nil {
-			t.Fatal(err)
-		}
 	})
 	return out
 }
@@ -1019,10 +1015,8 @@ func TestGenerate_WithdrawsTheWranglerConfigFilegroupWithTheFile(t *testing.T) {
 	}
 }
 
-// The pooled shape end to end: the config's edge names the pool, so the test
-// names the filegroup, runs istanbul coverage and carries its package.
-func TestGenerate_APooledTestNamesTheWranglerConfigAndIstanbul(t *testing.T) {
-	root, _ := converge(t, map[string]string{
+func pooledWorkerTree() map[string]string {
+	return map[string]string{
 		"package.json":               `{"name":"w","devDependencies":{"@vitest/coverage-istanbul":"4.1.11"}}` + "\n",
 		pnpmLockfileName:             poolLock,
 		"node_modules/.modules.yaml": "layoutVersion: 5\n",
@@ -1040,7 +1034,13 @@ func TestGenerate_APooledTestNamesTheWranglerConfigAndIstanbul(t *testing.T) {
 		"worker/test/tsconfig.json": includeTs,
 		"worker/test/index.test.ts": "import { w } from \"../src/index\";\n" +
 			"export const t = w;\n",
-	})
+	}
+}
+
+// The pooled shape end to end: the config's edge names the pool, so the test
+// names the filegroup, runs istanbul coverage and carries its package.
+func TestGenerate_APooledTestNamesTheWranglerConfigAndIstanbul(t *testing.T) {
+	root, _ := converge(t, pooledWorkerTree())
 	test := onDiskRule(t, root, "worker/test", "ts_test", "test_test")
 	if got := test.AttrString("wrangler_config"); got != "//worker:"+
 		wranglerConfigTargetName {
@@ -1056,6 +1056,127 @@ func TestGenerate_APooledTestNamesTheWranglerConfigAndIstanbul(t *testing.T) {
 	wantStrings(t, "filegroup srcs", fg.AttrStrings("srcs"),
 		[]string{"wrangler.jsonc"})
 	assertNoDanglingLabels(t, root)
+}
+
+func TestGenerate_APartialRunUnderALazyIndexWritesWhatAFullIndexDoes(t *testing.T) {
+	tree := pooledWorkerTree()
+	tree["app/tsconfig.json"] = includeTs
+	tree["app/index.test.ts"] = "export const t = 1;\n"
+	tree["app/BUILD.bazel"] = loadDefs + `"ts_test")
+
+ts_test(
+    name = "app_test",
+    srcs = ["index.test.ts"],
+    config = "//worker:vitest_config",  # keep
+)
+`
+	root, _ := converge(t, tree)
+	converged := buildFileBytes(t, root)
+	written := map[string]map[string]string{}
+	for _, index := range []string{"all", "lazy"} {
+		if output, err := protoGazelle(t, root, "-index="+index, "app"); err != nil {
+			t.Fatalf("-index=%s: %v\n%s", index, err, output)
+		}
+		written[index] = buildFileBytes(t, root)
+		restoreBuildFiles(t, root, converged)
+	}
+	if !strings.Contains(written["all"]["app/BUILD.bazel"], `wrangler_config = "//worker:wrangler_config"`) {
+		t.Fatalf("the fixture's test names no wrangler_config:\n%s", written["all"]["app/BUILD.bazel"])
+	}
+	if diff := snapshotDiff(written["all"], written["lazy"]); diff != "" {
+		t.Errorf("a partial run under -index=lazy writes otherwise than under -index=all:\n%s", diff)
+	}
+}
+
+// Imports runs after GenerateRules hands Gazelle its RelsToIndex, so a directory
+// first read there would go unindexed under -index=lazy.
+func TestGenerate_ALazyPartialRunReadsNoNewDirectoryWhileIndexingWhatItGenerated(t *testing.T) {
+	tree := map[string]string{
+		"MODULE.bazel":      "module(name = \"late_reads\")\n",
+		"lib/tsconfig.json": includeTs,
+		"lib/l.ts":          "export const l = 1;\n",
+		"lib/BUILD.bazel":   "exports_files([\"l.ts\"])\n",
+		"other/BUILD.bazel": "filegroup(name = \"files\", srcs = [\"b.ts\"], visibility = [\"//visibility:public\"])\n",
+		"other/b.ts":        "import { l } from \"../lib/l\";\nexport const b = l;\n",
+		"alt/x.ts":          "export const x = 1;\n",
+		"alt/BUILD.bazel": loadDefs + `"ts_compile")
+
+filegroup(name = "files", srcs = ["x.ts"], visibility = ["//visibility:public"])
+
+# keep
+ts_compile(name = "alt", srcs = ["//lib:l.ts"], visibility = ["//visibility:public"])
+`,
+		"d/tsconfig.json": includeTs,
+		"d/m.ts":          "export const m = 1;\n",
+		"d/BUILD.bazel": loadDefs + `"ts_compile")
+
+ts_compile(
+    name = "d",
+    srcs = [
+        "m.ts",
+        "//alt:files",  # keep
+    ],
+    visibility = ["//visibility:public"],
+)
+`,
+		"app/tsconfig.json": includeTs,
+		"app/a.ts":          "import { l } from \"../lib/l\";\nimport { m } from \"../d/m\";\nexport const a = l + m;\n",
+		"app/BUILD.bazel": loadDefs + `"ts_compile")
+
+ts_compile(
+    name = "app",
+    srcs = [
+        "a.ts",
+        "//other:files",  # keep
+    ],
+)
+`,
+		"aa/tsconfig.json": includeTs,
+		"aa/x.ts":          "export const x = 1;\n",
+		"zz/tsconfig.json": includeTs,
+		"zz/z.ts":          "export const z = 1;\n",
+	}
+	for _, dirs := range [][]string{{"app"}, {"app", "zz"}, {"aa", "app"}} {
+		t.Run(strings.Join(dirs, "_"), func(t *testing.T) {
+			root := writeTree(t, tree)
+			authored := buildFileBytes(t, root)
+			written := map[string]map[string]string{}
+			for _, index := range []string{"all", "lazy"} {
+				output, err := protoGazelle(t, root, append([]string{"-index=" + index}, dirs...)...)
+				if err != nil {
+					t.Fatalf("-index=%s: %v\n%s", index, err, output)
+				}
+				if strings.Contains(output, "-index=lazy:") {
+					t.Errorf("-index=%s read a directory after its package was generated:\n%s", index, output)
+				}
+				written[index] = buildFileBytes(t, root)
+				restoreBuildFiles(t, root, authored)
+			}
+			if !strings.Contains(written["all"]["app/BUILD.bazel"], `"//alt"`) {
+				t.Fatalf("the fixture's app takes no dep on //alt:\n%s", written["all"]["app/BUILD.bazel"])
+			}
+			if diff := snapshotDiff(written["all"], written["lazy"]); diff != "" {
+				t.Errorf("a partial run under -index=lazy writes otherwise than under -index=all:\n%s", diff)
+			}
+		})
+	}
+}
+
+// The log is the only signal that a lazy run left a directory unindexed.
+func TestLazyIndex_ALateReadNoLaterPackageHandsOverIsLogged(t *testing.T) {
+	t.Cleanup(func() { lazyIndex.start(false) })
+	lazyIndex.start(true)
+	lazyIndex.readLate("lost", "app")
+	lazyIndex.readLate("handed", "app")
+	lazyIndex.read("handed")
+	lazyIndex.take()
+	logged := captureLog(t, lazyIndex.reportLate)
+	if !strings.Contains(logged, "lost is first read while indexing //app") {
+		t.Errorf("a late read left unindexed was not logged:\n%s", logged)
+	}
+	if strings.Contains(logged, "handed") {
+		t.Errorf("a late read a later package handed over was logged:\n%s", logged)
+	}
 }
 
 func TestGeneratedWranglerConfigCannotDisappearWithoutCheckoutCopy(t *testing.T) {

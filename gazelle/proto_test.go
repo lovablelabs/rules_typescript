@@ -12,8 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
-	gazelleproto "github.com/bazelbuild/bazel-gazelle/language/proto"
+	"github.com/bazelbuild/bazel-gazelle/repo"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
@@ -22,7 +23,27 @@ import (
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
 
+// nativeProtoResolver indexes a proto_library as Gazelle's proto language does.
+type nativeProtoResolver struct{}
+
+func (nativeProtoResolver) Name() string { return "proto" }
+
+func (nativeProtoResolver) Imports(_ *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
+	return nativeProtoImports(r, f.Pkg)
+}
+
+func (nativeProtoResolver) Embeds(*rule.Rule, label.Label) []label.Label { return nil }
+
+func (nativeProtoResolver) Resolve(*config.Config, *resolve.RuleIndex, *repo.RemoteCache, *rule.Rule, any, label.Label) {
+}
+
 func protoGazelle(t *testing.T, root string, args ...string) (string, error) {
+	t.Helper()
+	// Gazelle 0.51.3's defaults, which Gazelle 2 changed to -r=auto and -index=lazy.
+	return defaultFlagsGazelle(t, root, append([]string{"-r=true", "-index=true"}, args...)...)
+}
+
+func defaultFlagsGazelle(t *testing.T, root string, args ...string) (string, error) {
 	t.Helper()
 	binary, err := runfiles.Rlocation(os.Getenv("PROTO_GAZELLE"))
 	if err != nil {
@@ -66,6 +87,53 @@ ts_proto_config(
 		"schema/disabled/BUILD.bazel":    "# gazelle:ts_proto none\n",
 		"schema/disabled/disabled.proto": `syntax = "proto3"; package example.disabled; message Disabled {}`,
 		"ignored/BUILD.bazel":            "# gazelle:ts_proto plain\n",
+	}
+}
+
+// The cases follow transformImport in bazel-gazelle's language/proto/resolve.go.
+func TestNativeProtoImports_AWrongStripOrPrefixMissesProviders(t *testing.T) {
+	for _, tc := range []struct {
+		strip, prefix string
+		srcs, want    []string
+	}{
+		{srcs: []string{"a.proto"}, want: []string{"foo/bar/a.proto"}},
+		{strip: "/foo", srcs: []string{"a.proto"}, want: []string{"bar/a.proto"}},
+		{strip: "/foo", prefix: "x", srcs: []string{"a.proto"}, want: []string{"x/bar/a.proto"}},
+		{strip: "baz", srcs: []string{"baz/a.proto", "a.proto"}, want: []string{"a.proto"}},
+		{strip: "/other", srcs: []string{"a.proto"}},
+	} {
+		r := rule.NewRule("proto_library", "p")
+		r.SetAttr("srcs", tc.srcs)
+		if tc.strip != "" {
+			r.SetAttr("strip_import_prefix", tc.strip)
+		}
+		if tc.prefix != "" {
+			r.SetAttr("import_prefix", tc.prefix)
+		}
+		var got []string
+		for _, spec := range nativeProtoImports(r, "foo/bar") {
+			got = append(got, spec.Imp)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("strip %q, prefix %q, srcs %v: got %v, want %v", tc.strip, tc.prefix, tc.srcs, got, tc.want)
+		}
+	}
+}
+
+// Gazelle 2's -r=auto does not recurse below a named directory; earlier
+// releases default -r to true, so e2e/gazelle_latest alone sets GAZELLE_2.
+func TestProtoGenerationUnderGazelle2Defaults_ANamedOwnerRefusesAPartialUpdate(t *testing.T) {
+	if os.Getenv("GAZELLE_2") == "" {
+		t.Skip("needs Gazelle 2's -r=auto default")
+	}
+	root := writeTree(t, protoTree())
+	authored := buildFileBytes(t, root)
+	output, err := defaultFlagsGazelle(t, root, "schema")
+	if err == nil || !strings.Contains(output, "requires a complete recursive update") {
+		t.Errorf("a run naming the owner under the defaults did not refuse: %v\n%s", err, output)
+	}
+	if diff := snapshotDiff(authored, buildFileBytes(t, root)); diff != "" {
+		t.Errorf("a run naming the owner under the defaults wrote:\n%s", diff)
 	}
 }
 
@@ -171,7 +239,7 @@ func TestProtoExistingWrappersResolveWithoutRegeneratingTheirOwner(t *testing.T)
 				c := emptyConfig()
 				c.RepoName = "fixture"
 				ts := &tsLang{}
-				native := gazelleproto.NewLanguage()
+				native := nativeProtoResolver{}
 				ix := resolve.NewRuleIndex(func(r *rule.Rule, _ string) resolve.Resolver {
 					if r.Kind() == "proto_library" {
 						return native
@@ -235,7 +303,7 @@ func TestExcludedProtoOutputOverridePrecedesNativeProviderSelection(t *testing.T
 					t.Fatal(err)
 				}
 				(&resolve.Configurer{}).Configure(c, "", f)
-				ts, native := &tsLang{}, gazelleproto.NewLanguage()
+				ts, native := &tsLang{}, nativeProtoResolver{}
 				ix := resolve.NewRuleIndex(func(r *rule.Rule, _ string) resolve.Resolver {
 					if r.Kind() == "proto_library" {
 						return native
@@ -428,7 +496,7 @@ func TestProtoSelectionPreservesCompilerObservationUntilNativeIndexCompletes(t *
 	s.selectInput("app")
 	wantStrings(t, "provisional membership", s.programs["app"].Files, observation.Files)
 
-	native, ts := gazelleproto.NewLanguage(), &tsLang{}
+	native, ts := nativeProtoResolver{}, &tsLang{}
 	ix := resolve.NewRuleIndex(func(r *rule.Rule, _ string) resolve.Resolver {
 		if r.Kind() == "proto_library" {
 			return native

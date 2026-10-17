@@ -202,7 +202,7 @@ func TestPrefetch_ASubdirectoryConfigureWouldNotListIsNeverListed(t *testing.T) 
 		calls := fakeListings(t, 1, nil)
 		c := config.New()
 		c.RepoRoot = root
-		(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+		seedResolveConfig(c)
 		tc := defaultTsConfig()
 		tc.programs.tsgoFlag, tc.programs.fullWalk = tsgo, fullWalk
 		c.Exts[languageName] = tc
@@ -279,19 +279,15 @@ func walkWithListingCache(t *testing.T, root string, delay time.Duration) []list
 	}
 	captureLog(t, func() {
 		lang.Before(context.Background())
-		err := walk.Walk2(c, cexts, []string{root}, walk.VisitAllUpdateSubdirsMode, func(args walk.Walk2FuncArgs) walk.Walk2FuncResult {
-			if args.Update {
+		walk.Walk(c, cexts, []string{root}, walk.VisitAllUpdateSubdirsMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
+			if update {
 				lang.GenerateRules(language.GenerateArgs{
-					Config: args.Config, Dir: args.Dir, Rel: args.Rel, File: args.File,
-					Subdirs: args.Subdirs, RegularFiles: args.RegularFiles, GenFiles: args.GenFiles,
+					Config: c, Dir: dir, Rel: rel, File: f,
+					Subdirs: subdirs, RegularFiles: regularFiles, GenFiles: genFiles,
 				})
 			}
-			return walk.Walk2FuncResult{}
 		})
 		lang.DoneGeneratingRules()
-		if err != nil {
-			t.Fatal(err)
-		}
 	})
 	pendingWrites.Wait()
 	return spans
@@ -348,7 +344,7 @@ func TestPrefetch_ASubdirectoryWhoseDirectivesKeepItsListingIsPrefetched(t *test
 	fakeListings(t, 1, nil)
 	c := config.New()
 	c.RepoRoot = root
-	(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+	seedResolveConfig(c)
 	tc := defaultTsConfig()
 	tc.programs.tsgoFlag, tc.programs.fullWalk = tsgo, true
 	c.Exts[languageName] = tc

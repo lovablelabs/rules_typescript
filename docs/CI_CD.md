@@ -7,10 +7,10 @@ consumer workspace, which this repository's CI does not run.
 ## GitHub Actions CI
 
 `.github/workflows/ci.yml` runs on every push to `main`/`develop`, on every
-pull request, whichever branch it targets, and in the merge queue. It has six
+pull request, whichever branch it targets, and in the merge queue. It has seven
 jobs.
 
-The five jobs that run Bazel set it up with `bazel-contrib/setup-bazel@0.18.0`,
+The six jobs that run Bazel set it up with `bazel-contrib/setup-bazel@0.18.0`,
 sharing one set of caches (see [Caches](#caches)).
 
 ### Workflow Jobs
@@ -150,6 +150,13 @@ sharing one set of caches (see [Caches](#caches)).
      the site only on push to `main`, so without this step a broken nav or page
      reference is caught only after merge
 
+7. **E2E Tests (Gazelle 2)** (`e2e-gazelle-latest`)
+   - `bazel test //...` in `e2e/gazelle_latest`: the golden cases and most of
+     the extension's tests under bazel-gazelle 2.0.0-beta.2, most of them with
+     `-r=true -index=true` pinned
+   - Ubuntu only, in a job of its own so the `e2e` legs keep clear of their
+     timeout
+
 ### Caches
 
 All Bazel jobs pass setup-bazel the same `cache-version`, so on one OS they
@@ -177,7 +184,7 @@ no smaller job reserves an immutable key with a partial cache first.
   CI job never does
 - **No disk cache** for e2e/, examples/ and `determinism`. e2e/ and examples/
   are separate workspaces, where this ruleset is an external repository, so
-  no action key matches `main`'s, and four more namespaces do not fit;
+  no action key matches `main`'s, and five more namespaces do not fit;
   `determinism` builds from empty output bases on purpose
 - **Nested-Bazel caches** (`integration-tests`), one per leg, see job 5
 - **Download retries** in every CI invocation, the nested ones through the
@@ -292,6 +299,7 @@ bazel test --config=ci-integration //tests/integration/...
 # separate invocations — a --config cannot change workspace.
 cd e2e/basic && bazel run //:pnpm -- install --frozen-lockfile && \
   bazel run //:gazelle -- -mode=diff && bazel build //... && bazel test //...
+cd e2e/gazelle_latest && bazel test //...
 cd examples/basic && bazel run //:gazelle -- -mode=diff && bazel build //...
 ```
 

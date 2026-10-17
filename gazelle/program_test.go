@@ -16,7 +16,6 @@ import (
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
-	"github.com/bazelbuild/bazel-gazelle/resolve"
 
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
@@ -446,7 +445,7 @@ func TestProgram_InputsOverTheExtendsChain(t *testing.T) {
 func generateDir(t *testing.T, c *config.Config, root, rel string) string {
 	t.Helper()
 	cc := c.Clone()
-	(&resolve.Configurer{}).RegisterFlags(nil, "", cc)
+	seedResolveConfig(cc)
 	dir := filepath.Join(root, rel)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

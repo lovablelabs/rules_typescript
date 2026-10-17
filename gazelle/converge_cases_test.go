@@ -6,6 +6,7 @@ package typescript
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -68,7 +69,8 @@ func captureLog(t *testing.T, body func()) string {
 	t.Helper()
 	var buf bytes.Buffer
 	flags := log.Flags()
-	log.SetOutput(&buf)
+	// A log.Fatal inside body exits the test binary, so its message must reach stderr.
+	log.SetOutput(io.MultiWriter(&buf, os.Stderr))
 	log.SetFlags(0)
 	t.Cleanup(func() {
 		log.SetOutput(os.Stderr)

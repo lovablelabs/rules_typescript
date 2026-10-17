@@ -25,14 +25,21 @@ explicitly and follow the setup below.
 
 ## Setup
 
-Gazelle creates a `dev` target for a tsconfig program with non-test sources
-and a package index.html or listed main.ts[x] or app.ts[x]. Gazelle manages
-`entry_point`, `node_modules`, `plugin` and `visibility`, and removes stale
-generated dev targets. It preserves `server`, `port`, `host`, `open` and
-values protected by `# keep`.
+Gazelle creates a `dev` target for a tsconfig program with non-test sources and
+a package index.html or listed main.ts[x] or app.ts[x]. Gazelle manages
+`entry_point`, `node_modules`, `plugin` and `visibility`, and withdraws a
+`ts_dev_server` named `dev` (`dev_server` in a package named `dev`) outside an
+application package, wherever it runs program discovery, hand-written or not,
+unless a `# keep` above the rule holds it (a `# keep` on `entry_point` alone
+keeps the rule but drops `node_modules`, `plugin` and `visibility`). A
+hand-written dev server outside an application package needs `# keep` or
+another name. Gazelle keeps every other attribute as written (`server`,
+`port`, `host`, `open`, `react_refresh`, `vite_config`, `vite_config_srcs`) and
+every value under `# keep`.
 
 The examples and plugin details below select Vite explicitly. A hand-written
-target must name the application's `node_modules` tree; without it startup fails:
+target, under `# keep` so that Gazelle leaves it and its tree alone, must name
+the application's `node_modules` tree; without it startup fails:
 
 ```
 ts_dev_server: @@//src/app:dev has no node_modules attr, so the app's own
@@ -43,6 +50,7 @@ dependencies are not in runfiles.
 load("@rules_typescript//ts:defs.bzl", "ts_dev_server")
 load("@rules_typescript//npm:defs.bzl", "node_modules")
 
+# keep
 node_modules(
     name = "node_modules",
     deps = [
@@ -52,6 +60,7 @@ node_modules(
     hoist = "//:node_modules/.pnpm/node_modules",
 )
 
+# keep
 ts_dev_server(
     name = "dev",
     server = "@rules_typescript//vite:dev_server",
@@ -201,6 +210,7 @@ The `plugin` attribute wires `vite-plugin-bazel`, which:
 state across an HMR update. The package has to be in the `node_modules` tree:
 
 ```python
+# keep
 node_modules(
     name = "node_modules",
     deps = [
@@ -210,6 +220,7 @@ node_modules(
     hoist = "//:node_modules/.pnpm/node_modules",
 )
 
+# keep
 ts_dev_server(
     name = "dev",
     server = "@rules_typescript//vite:dev_server",

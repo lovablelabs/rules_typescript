@@ -10,6 +10,7 @@ import (
 	"hash"
 	"maps"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -310,6 +311,23 @@ func digestRuleBody(r *rule.Rule) ruleBody {
 				d.importSpec(spec)
 				d.bool(v[spec])
 			})
+		case rule.KindInfo:
+			// Static per binary; the record key digests the executable.
+			if key != "_gazelle_kind" {
+				d.refuse(fmt.Sprintf("private attribute %s holds a %T", key, v))
+				break
+			}
+			d.str(key)
+			d.str("kind")
+		case interface{ Name() string }:
+			// Gazelle 2 tags each generated rule with the extension that made it.
+			if key != "_gazelle_lang" {
+				d.refuse(fmt.Sprintf("private attribute %s holds a %T", key, v))
+				break
+			}
+			d.str(key)
+			d.str("lang")
+			d.str(v.Name())
 		default:
 			d.refuse(fmt.Sprintf("private attribute %s holds a %T", key, v))
 		}
@@ -401,7 +419,10 @@ func (d *stateHasher) config(c *config.Config) {
 			d.str(name)
 			d.tsConfig(ext)
 		default:
-			if !strings.HasPrefix(name, "_") {
+			if gazelleDefaults(name, ext) {
+				d.str(name)
+				d.str(fmt.Sprintf("%#v", ext))
+			} else if !strings.HasPrefix(name, "_") {
 				d.refuse("another language configures " + name)
 			}
 		}
@@ -847,4 +868,10 @@ func listingEntryDigest(entry *cachedListing) [sha256.Size]byte {
 	d.resolutionFacts(entry.Resolution)
 	d.str(entry.Refused)
 	return d.sum()
+}
+
+// Gazelle 2 builds language/defaults into every binary; its config is strings only.
+func gazelleDefaults(name string, ext any) bool {
+	t := reflect.TypeOf(ext)
+	return name == "defaults" && t != nil && strings.HasSuffix(t.PkgPath(), "/language/defaults")
 }

@@ -151,23 +151,58 @@ merges it into its BUILD file and finishes the rules, or replays the record,
 and Gazelle's own post-resolve merge then has nothing left to change, so every
 `-mode` writes or shows the finished files.
 
-An edit to TypeScript sources alone can still replay the run record, after
+Gazelle 2 builds `language/defaults` into every binary; that extension reads
+only BUILD file directives, so the resolve record digests its configuration
+and the run record, keyed before any directory is configured, still applies. Gazelle 2's
+`-r=auto` default recurses only when no directory is named. Under its
+`-index=lazy` default a partial run indexes the walked directories and those
+the extensions name; with each package it generates, `gazelle_typescript`
+names every directory it has read since the previous one, such as the package
+of a vitest config a test there names. Generating a package crawls every
+BUILD file its rules reach, so collecting a generated package's imports reads
+nothing new, and a first read there that no later package hands over is
+logged. Directories read only while
+Gazelle configures or indexes a directory it does not generate are not named.
+
+An edit to TypeScript sources can still replay the run record, after
 gazelle-rs's import fast path. The record also keeps what its `Resolve` did
 with the listings' edges: which files each selection reached and each walk
 started from, and what each edge from a rule's own sources resolved to. When
 every changed input is an existing source's content, the run patches the
-listings that read it, as a full run does, and replays the record if no
-listing gained or lost a file, root or edge other than the edit's new imports,
-and each new import is relative and resolves, in every selection and walk
-that reads the importer, the way an edge from another source of the same rule
-into the same file already does: to the rule itself, or to a dep the rule
-takes whatever its imports are. A body edit, which leaves the listings as they
-were, replays the same way. Anything else (a new, deleted or renamed file, a
-removed import, an import into a file no source of the rule already imports, a
-BUILD, config or `package.json` edit) runs in full, and `-ts_verbose` names the
-reason. `-ts_fastpath=verify` runs the full pass in `-mode=diff` after
-deciding to replay and fails, and drops the record, unless it changes nothing
-and exits and logs as the record does; `-ts_fastpath=off` never replays an
+listings that read it, as a full run does, and replays the record if no listing
+gained or lost a file, root or edge other than the edit's new imports, and each
+new import is relative or a `#` subpath import and resolves, in every selection
+and walk that reads the importer, the way an edge from another source of the
+same rule into the same file already does: to the rule itself, or to a dep the
+rule takes whatever its imports are. A body edit, which leaves the listings as
+they were, replays the same way, and so does a content edit to a JSON module a
+listing holds. In `-mode=fix`, a library source (not a test, declaration,
+JavaScript file, `main` or `app` entry or vitest config) added, deleted or
+renamed beside another source of the same `ts_compile` in its directory, or in
+a new directory of sources below one, can replay with that rule's `srcs`
+rewritten as a full run writes them, when every import of each source it adds
+or removes (a rename removes the old path and adds the new one) is a relative
+or `#` subpath import between listed sources and meets the same test against
+that rule's other sources there (an import a source renamed within its
+directory keeps, into the same file, meets it in the selections alone); so can
+a BUILD edit on its own that only drops entries from the `deps` of a generated
+`ts_compile` or `ts_test` without `# keep`, none of them the walk's only route
+to a directory it loaded; that replay writes the recorded file back. A new
+directory holding no TypeScript source, BUILD, program, config or manifest file
+can replay unchanged when the recorded run neither listed its parent's names
+nor looked up a path in it.
+Under `-ts_verbose`, which logs each listing's counts and diagnostics, an edit
+that adds an import, adds or removes a source or changes a JSON module runs in
+full instead. Anything else (another new,
+deleted or renamed file, a removed import, an import into a file no source of
+the rule already imports, any other BUILD edit, a config or `package.json`
+edit) runs in full, and `-ts_verbose` names the reason. `-ts_fastpath=verify`
+writes any `srcs` edit the replay makes, then runs the full pass in
+`-mode=diff` and fails, restoring the BUILD files and dropping the record,
+unless it changes nothing and exits and logs as the record does; for a BUILD
+edit it runs the full pass in place and fails, keeping what that pass wrote and
+dropping the record, unless it exits and logs as the record does and leaves the
+walked directories as the recorded run did. `-ts_fastpath=off` never replays an
 edit.
 
 ## The Package Model
@@ -337,8 +372,8 @@ is nothing.
 ### Where a Program Is Not
 
 A directory that is not a package gets `Empty` for every kind Gazelle writes --
-`ts_compile`, `ts_test`, `ts_config`, `filegroup(vitest_config)` and
-`filegroup(wrangler_config)` under the names it would use -- so a rule an
+`ts_compile`, `ts_test`, `ts_dev_server`, `ts_config`, `filegroup(vitest_config)`
+and `filegroup(wrangler_config)` under the names it would use -- so a rule an
 earlier run left there is withdrawn, and the run names the BUILD file to delete
 when one of them was in it: Gazelle cannot delete the file, and an empty BUILD
 file keeps the directory a Bazel package. Two things are written there all the
@@ -346,15 +381,18 @@ same: a `ts_config` over a `tsconfig.json` a program's `extends` chain names
 (the root's shared base), and at the repository root the filegroups over a
 config the tests below name and over the wrangler config it names. A directory
 inside a `ts_codegen`'s `out_dir` is that target's output: nothing under it is
-a source, and a BUILD file there is emptied and named the same way.
+a source, and a BUILD file there is emptied and named the same way. Where
+program discovery is omitted for a tsconfig Gazelle cannot identify, none of
+these rules is withdrawn, and a `ts_compile` or `ts_test` there under the names
+Gazelle would use, without `# keep`, fails the run.
 
 ## What Gazelle Writes
 
 | Rule | Name | Attributes Gazelle owns |
 |------|------|-------------------------|
-| `ts_compile` | the directory's basename, `root` at the repository root | `srcs`, `deps`, `tsconfig`, `visibility` |
-| `ts_test` | `<basename>_test` | `srcs`, `deps`, `tsconfig`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
-| `ts_config` | `tsconfig` | `src`, `deps`, `visibility` |
+| `ts_compile` | the directory's basename, `root` at the repository root | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `visibility` |
+| `ts_test` | `<basename>_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
+| `ts_config` | `tsconfig` | `src`, `deps`, `jsx`, `module`, `visibility` |
 | `ts_dev_server` | `dev` (`dev_server` when the compile target is `dev`) | `entry_point`, `plugin`, `node_modules`, `visibility` |
 | `filegroup` | `vitest_config` | `srcs`, `visibility` |
 | `filegroup` | `wrangler_config` | `srcs`, `visibility` |
@@ -367,17 +405,21 @@ library files, every owned declaration and the data files; a `ts_test` when it
 has a test file, holding the test files and every owned declaration, and the
 data files when no `ts_compile` is written; `tsconfig = ":tsconfig"` on both,
 naming the `ts_config` over the package's own `tsconfig.json`. A hand-written
-`ts_codegen` in the package's BUILD file is a dependency of every target Gazelle
-writes there; Gazelle never writes one. A program listing only declaration files
-writes neither target and says so under `-ts_verbose`. An application with non-test program
-sources and a package index.html or listed main.ts[x]/app.ts[x] also gets a
-default oj dev target. Gazelle updates its entry point, npm tree, plugin and
-visibility, and removes a generated dev target when its application entry
-disappears. It preserves `server`, `port`, `host`, `open` and `# keep` values
-([Dev Server](../guides/dev-server.md)).
-A src whose name Bazel cannot spell (a `:` in it) is dropped and named in the
-log; a name that opens a label (`@`, `//`) is pinned to the package with a
-leading `:`.
+`ts_codegen` in the package's BUILD file is a dependency of every target
+Gazelle writes there; Gazelle never writes one. A program listing only
+declaration files writes neither target and says so under `-ts_verbose`. An
+application with non-test program sources and a package index.html or listed
+main.ts[x]/app.ts[x] also gets a default oj dev target. Gazelle updates its
+entry point, npm tree, plugin and visibility, and withdraws a `ts_dev_server`
+named `dev` (`dev_server` in a package named `dev`) in every other directory
+where it runs program discovery, hand-written or not, unless a `# keep` above
+the rule holds it (a `# keep` on `entry_point` alone keeps the rule but drops
+`node_modules`, `plugin` and `visibility`). It keeps every other attribute as
+written (`server`, `port`, `host`, `open`, `react_refresh`, `vite_config`,
+`vite_config_srcs`) and every value under `# keep`
+([Dev Server](../guides/dev-server.md)). A src whose name Bazel cannot spell
+(a `:` in it) is dropped and named in the log; a name that opens a label (`@`,
+`//`) is pinned to the package with a leading `:`.
 
 Per lockfile importer, package or not: a `node_modules` whose `deps` are the
 importer's declared `dependencies`, `devDependencies` and
@@ -752,13 +794,17 @@ and none is drift:
   you wrote the filename. Reformat the file to match.
 - **A hand-written rule under a name Gazelle would use.** In a directory that
   is no package, every rule Gazelle would write is withdrawn under the names it
-  would use -- `<dirbase>`, `<dirbase>_test`, `tsconfig`, `vitest_config`,
-  `wrangler_config` -- so a rule of yours under one of them is proposed for
-  deletion on every run. `# keep` above the rule holds it.
+  would use -- `<dirbase>`, `<dirbase>_test`, `dev` (`dev_server` in a
+  package named `dev`), `tsconfig`,
+  `vitest_config`, `wrangler_config` -- so a rule of yours under one of them is
+  proposed for deletion on every run. `# keep` above the rule holds it.
 - **A hand-narrowed attribute it merges.** `visibility` is a merged attribute
-  and generated rules carry `//visibility:public`, so a target restricted to
-  `["//myapp:__subpackages__"]` comes back public on every run. Pin it with
-  `# keep`:
+  of every kind [What Gazelle Writes](#what-gazelle-writes) lists it for, and
+  Gazelle writes `//visibility:public` on each of them; `ts_test` and
+  `npm_virtual_store` get none, and a `ts_compile` with empty `srcs`, written
+  only to publish package scopes, takes the scopes' source visibility. So a
+  target restricted to `["//myapp:__subpackages__"]` comes back public on every
+  run. Pin it with `# keep`:
 
   ```python
   ts_compile(

@@ -68,6 +68,7 @@ go_library(
         "@gazelle//language",
         "@gazelle//language/proto",
         "@gazelle//merger",
+        "@gazelle//pathtools",
         "@gazelle//repo",
         "@gazelle//resolve",
         "@gazelle//rule",
@@ -135,7 +136,7 @@ go_test(
     ],
 )
 
-# e2e/basic runs these on the Gazelle floor's update loop.
+# e2e/basic and e2e/gazelle_latest run these over the Gazelle floor's and 2.0's update loops.
 filegroup(
     name = "test_srcs",
     testonly = True,

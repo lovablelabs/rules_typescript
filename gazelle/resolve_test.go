@@ -94,11 +94,18 @@ func buildIndex(t *testing.T, c *config.Config, rules ...indexedRule) *resolve.R
 	return ix
 }
 
+// seedResolveConfig gives c the resolve config Gazelle 0.51.3 seeds in
+// RegisterFlags and Gazelle 2 in Configure.
+func seedResolveConfig(c *config.Config) {
+	(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+	(&resolve.Configurer{}).Configure(c, "", nil)
+}
+
 func emptyConfig() *config.Config {
 	c := config.New()
 	c.RepoRoot = "/tmp/fake-repo"
 	c.Exts[languageName] = defaultTsConfig()
-	(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+	seedResolveConfig(c)
 	return c
 }
 
@@ -695,7 +702,7 @@ func edgeRepo(t *testing.T, listings map[string]string,
 		"layoutVersion: 5\n")
 	c := config.New()
 	c.RepoRoot = root
-	(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+	seedResolveConfig(c)
 	configureTsConfig(c, "", nil, nil)
 	tc := getConfig(c)
 	tc.programs.visit("", []string{"package.json"})
@@ -1130,7 +1137,7 @@ func TestResolveEdges_AuthoredConfigImporterRunfiles(t *testing.T) {
 				source:                       "import 'minimatch';\n",
 			})
 			c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
-			(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+			seedResolveConfig(c)
 			configureTsConfig(c, "", nil, nil)
 			tc := getConfig(c)
 			s := tc.programs
@@ -1212,7 +1219,7 @@ func TestResolveEdges_ConfigMemberNameKeepsItsImporter(t *testing.T) {
 				helper:                       "import 'zod';\n",
 			})
 			c := &config.Config{RepoRoot: root, Exts: make(map[string]interface{})}
-			(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+			seedResolveConfig(c)
 			configureTsConfig(c, "", nil, nil)
 			s := getConfig(c).programs
 			s.visit("settings/unit", []string{"vitest.config.mts", "types.d.ts", "helper.ts"})
@@ -1844,7 +1851,7 @@ func TestResolveEdges_NoLockfileNoNpmLabel(t *testing.T) {
 	writeFile(t, filepath.Join(root, "package.json"), `{"name": "w"}`)
 	c := config.New()
 	c.RepoRoot = root
-	(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+	seedResolveConfig(c)
 	configureTsConfig(c, "", nil, nil)
 	tc := getConfig(c)
 	s := tc.programs
@@ -1929,7 +1936,7 @@ func poolRepo(t *testing.T, lock string) (*config.Config, *tsConfig) {
 	})
 	c := config.New()
 	c.RepoRoot = root
-	(&resolve.Configurer{}).RegisterFlags(nil, "", c)
+	seedResolveConfig(c)
 	configureTsConfig(c, "", nil, nil)
 	tc := getConfig(c)
 	for _, dir := range []string{"", "worker", "worker/src", "worker/test"} {
