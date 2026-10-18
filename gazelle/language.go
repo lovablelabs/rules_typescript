@@ -182,6 +182,9 @@ func (l *tsLang) KnownDirectives() []string {
 }
 
 func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
+	if rel == "" {
+		clear(dirInfoMemo)
+	}
 	getConfig(c).programs.importFacts.configured(rel, f)
 	noteDirectiveFiles(c.RepoRoot, rel, f)
 	getConfig(c).programs.ruleListsMayChange()
@@ -230,8 +233,11 @@ func (l *tsLang) observeSources(files iter.Seq[string]) {
 	observed := map[string]bool{}
 	var dirs []string
 	for file := range files {
+		if !firstParty(file) {
+			continue
+		}
 		dir := parentDir(file)
-		if !firstParty(file) || observed[dir] {
+		if observed[dir] {
 			continue
 		}
 		observed[dir] = true
@@ -538,6 +544,7 @@ func (d *dirsRead) take() []string {
 }
 
 func (l *tsLang) DoneGeneratingRules() {
+	clear(dirInfoMemo)
 	l.programs.ruleListsMayChange()
 	if l.programs != nil {
 		l.programs.stopPrefetch()

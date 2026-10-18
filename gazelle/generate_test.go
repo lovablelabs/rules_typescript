@@ -8046,3 +8046,38 @@ func TestCandidatesByDir_UnderKeepsTheWholeTreeAndOnlyCandidates(t *testing.T) {
 		}
 	})
 }
+
+func TestRecordedDirInfo_ASecondWalkInTheProcessReadsItsOwnTree(t *testing.T) {
+	for _, file := range []string{"first.ts", "second.ts"} {
+		root := writeTree(t, map[string]string{"pkg/" + file: "export const x = 1;\n"})
+		c := &config.Config{RepoRoot: root, WorkDir: root, Strict: true, Exts: map[string]any{}}
+		lang := &tsLang{}
+		cexts := []config.Configurer{&walk.Configurer{}, &resolve.Configurer{}, lang}
+		flags := flag.NewFlagSet("generate", flag.ContinueOnError)
+		for _, ext := range cexts {
+			ext.RegisterFlags(flags, "update", c)
+		}
+		for _, ext := range cexts {
+			if err := ext.CheckFlags(flags, c); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var got []string
+		captureLog(t, func() {
+			lang.Before(context.Background())
+			walk.Walk(c, cexts, []string{root}, walk.VisitAllUpdateSubdirsMode, func(_, rel string, _ *config.Config, _ bool, _ *rule.File, _, _, _ []string) {
+				if rel == "" {
+					info, err := recordedDirInfo("pkg")
+					if err != nil {
+						t.Fatal(err)
+					}
+					got = info.RegularFiles
+				}
+			})
+			lang.DoneGeneratingRules()
+		})
+		if !slices.Equal(got, []string{file}) {
+			t.Errorf("pkg lists %v in the walk of a tree holding only %s", got, file)
+		}
+	}
+}

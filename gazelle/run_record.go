@@ -213,7 +213,7 @@ var directiveFileLine = regexp.MustCompile(`^\s*#\s*gazelle:directive_file\s+(.*
 // recordedDirInfo is walk.GetDirInfo for a directory the run depends on. The
 // snapshot is taken off the walk's goroutine, right after Gazelle read it.
 func recordedDirInfo(rel string) (walk.DirInfo, error) {
-	info, err := walk.GetDirInfo(rel)
+	info, err := memoDirInfo(rel)
 	if err == nil {
 		lazyIndex.read(rel)
 	}
@@ -236,6 +236,24 @@ func recordedDirInfo(rel string) (walk.DirInfo, error) {
 			<-snapshotSlots
 		})
 	}
+	return info, err
+}
+
+type dirInfoResult struct {
+	info walk.DirInfo
+	err  error
+}
+
+// walk.GetDirInfo re-matches every ancestor against the exclude globs on each call; this keeps
+// one result per directory for the walk. Only the walk's goroutine calls it.
+var dirInfoMemo = map[string]dirInfoResult{}
+
+func memoDirInfo(rel string) (walk.DirInfo, error) {
+	if r, ok := dirInfoMemo[rel]; ok {
+		return r.info, r.err
+	}
+	info, err := walk.GetDirInfo(rel)
+	dirInfoMemo[rel] = dirInfoResult{info, err}
 	return info, err
 }
 
