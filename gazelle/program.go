@@ -20,6 +20,7 @@ import (
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
+	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
 
@@ -35,15 +36,16 @@ var tsgoRlocationpath string
 // paths relative to it and the compiler's libs under ../ or bundled:///.
 type program struct {
 	explainfiles.Listing
-	candidates []resolutionCandidate
-	resolution resolutionFacts
-	config     string
-	dir        string
-	refused    string
-	manifest   bool
-	bySource   *edgeIndex
-	byImporter *candidateIndex
-	byDir      *dirIndex
+	candidates  []resolutionCandidate
+	resolution  resolutionFacts
+	config      string
+	dir         string
+	refused     string
+	manifest    bool
+	bySource    *edgeIndex
+	byImporter  *candidateIndex
+	byDir       *dirIndex
+	sourceDirIx *sourceDirIndex
 	// key names the cached listing the program was read from; "" when none was.
 	key string
 	// candidateEdge's index of Edges; built on first use, so Edges must not change after.
@@ -92,6 +94,8 @@ type programStore struct {
 	early            *earlyFinish
 	frozen           *frozenView
 	prerefreshed     map[refreshKey][]*refreshJob
+	// Parsed owner BUILD files, filled and read only during the walk, which writes no BUILD file.
+	ownerBuildFiles map[string]*rule.File
 }
 
 // Every observed package retains configuration, even without a compiler program;
@@ -119,6 +123,7 @@ func newProgramStore() *programStore {
 		foreign:           map[string]string{},
 		foreignSaid:       map[string]bool{},
 		wranglerConfigs:   map[string]string{},
+		ownerBuildFiles:   map[string]*rule.File{},
 	}
 }
 
@@ -573,14 +578,7 @@ func (s *programStore) reconcileCompilerProgram(c *config.Config, p *program, di
 	owners := map[string]bool{}
 	var outputs []string
 	// One crawl from every root's directory loads what a crawl per root would; per root it was quadratic.
-	var dirs []string
-	observed := map[string]bool{}
-	for _, root := range p.Roots {
-		if firstParty(root) && !observed[parentDir(root)] {
-			observed[parentDir(root)] = true
-			dirs = append(dirs, parentDir(root))
-		}
-	}
+	dirs := firstPartyDirs(slices.Values(p.Roots))
 	if dirInfo != nil {
 		s.observeBuilds(dirs, dirInfo)
 	} else {

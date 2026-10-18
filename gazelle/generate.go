@@ -971,7 +971,7 @@ func (p *program) candidatesBySource() map[string][]int32 {
 	if p == nil {
 		return nil
 	}
-	if ix := p.byImporter; ix != nil && len(ix.candidates) == len(p.candidates) && (len(p.candidates) == 0 || &ix.candidates[0] == &p.candidates[0]) {
+	if ix := p.byImporter; ix != nil && sameSlice(ix.candidates, p.candidates) {
 		return ix.byFrom
 	}
 	byFrom := map[string][]int32{}
@@ -999,7 +999,7 @@ type candidateDir struct {
 
 // Files' first-party program candidates by directory, sorted; rebuilt when Files is replaced or resized, and never written.
 func (p *program) candidatesByDir() *dirIndex {
-	if ix := p.byDir; ix != nil && len(ix.files) == len(p.Files) && (len(p.Files) == 0 || &ix.files[0] == &p.Files[0]) {
+	if ix := p.byDir; ix != nil && sameSlice(ix.files, p.Files) {
 		return ix
 	}
 	byDir := map[string][]string{}
@@ -1015,6 +1015,39 @@ func (p *program) candidatesByDir() *dirIndex {
 	}
 	p.byDir = ix
 	return ix
+}
+
+type sourceDirIndex struct {
+	files      []string
+	candidates []resolutionCandidate
+	dirs       []string
+}
+
+// The first-party directories of Files and candidates, in order; rebuilt when either is replaced or resized,
+// so neither may be edited in place once observed.
+func (p *program) sourceDirs() []string {
+	if ix := p.sourceDirIx; ix != nil && sameSlice(ix.files, p.Files) && sameSlice(ix.candidates, p.candidates) {
+		return ix.dirs
+	}
+	ix := &sourceDirIndex{files: p.Files, candidates: p.candidates}
+	ix.dirs = firstPartyDirs(func(yield func(string) bool) {
+		for _, file := range p.Files {
+			if !yield(file) {
+				return
+			}
+		}
+		for _, candidate := range p.candidates {
+			if !yield(candidate.path) {
+				return
+			}
+		}
+	})
+	p.sourceDirIx = ix
+	return ix.dirs
+}
+
+func sameSlice[T any](a, b []T) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
 }
 
 // under yields root and the directories below it; "web-x" sorts between "web" and "web/x".
