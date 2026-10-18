@@ -795,10 +795,12 @@ func (s *programStore) listRoots(repoRoot string, p *program, tsgo string, roots
 	if p.manifest {
 		return listManifestRoots(repoRoot, p.config, tsgo, roots)
 	}
-	if listed, taken, err := s.takeSpeculation(repoRoot, p.config, tsgo, roots); taken {
-		return listed, err
+	listed, taken, err := s.takeSpeculation(repoRoot, p.config, tsgo, roots)
+	if !taken {
+		listed, err = listCompilerProgram(repoRoot, p.config, tsgo, nil, roots...)
 	}
-	return listCompilerProgram(repoRoot, p.config, tsgo, nil, roots...)
+	s.listingPool().keep(listed)
+	return listed, err
 }
 
 // rootsWith is p's roots with every source p does not list, and whether there was one.
