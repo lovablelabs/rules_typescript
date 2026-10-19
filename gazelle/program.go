@@ -90,6 +90,8 @@ type programStore struct {
 	importFacts      *importFactsRecorder
 	buildFacts       *buildFactsRecorder
 	early            *earlyFinish
+	frozen           *frozenView
+	prerefreshed     map[refreshKey][]*refreshJob
 }
 
 // Every observed package retains configuration, even without a compiler program;
@@ -98,7 +100,7 @@ type programInput struct {
 	config       *config.Config
 	program      *program
 	discoveryErr error
-	refresh      func()
+	refresh      *programRefresh
 }
 
 func newProgramStore() *programStore {

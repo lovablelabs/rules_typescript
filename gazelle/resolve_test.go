@@ -420,9 +420,9 @@ func TestRuleHoldingRefreshedSourcesRespectMergedKeeps(t *testing.T) {
 			r := rule.NewRule("ts_compile", "lib")
 			r.SetAttr("tsconfig", "tsconfig.json")
 			imps := &ruleImports{}
-			s.inputs["lib"] = programInput{config: c, program: observation, refresh: func() {
-				refreshProgramRules(language.GenerateArgs{Config: c, Rel: "lib", Dir: filepath.Join(c.RepoRoot, "lib"), File: f}, tc,
-					language.GenerateResult{Gen: []*rule.Rule{r}, Imports: []any{imps}})
+			s.inputs["lib"] = programInput{config: c, program: observation, refresh: &programRefresh{
+				language.GenerateArgs{Config: c, Rel: "lib", Dir: filepath.Join(c.RepoRoot, "lib"), File: f},
+				language.GenerateResult{Gen: []*rule.Rule{r}, Imports: []any{imps}},
 			}}
 			s.selectInputs(ix)
 			logged := captureLog(t, func() { resolveEdges(c, ix, r, imps, label.New("", "lib", "lib")) })

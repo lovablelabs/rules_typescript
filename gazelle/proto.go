@@ -379,7 +379,14 @@ func protoProvider(c *config.Config, ix *resolve.RuleIndex, root, imp string) []
 			native[absoluteProtoLabel(c, overridden, "")] = true
 		}
 	} else {
-		for _, provider := range ix.FindRulesByImportWithConfig(c, spec, "proto") {
+		var found []resolve.FindResult
+		if tc.programs.frozen == nil {
+			found = ix.FindRulesByImportWithConfig(c, spec, "proto")
+		} else {
+			// Other languages' cross-resolvers are not ours to run off the main goroutine; the commit asks them.
+			found = ix.FindRulesByImport(spec, "proto")
+		}
+		for _, provider := range found {
 			native[absoluteProtoLabel(c, provider.Label, "")] = true
 		}
 		for _, node := range s.graph.providers(c, imp) {

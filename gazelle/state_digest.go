@@ -768,7 +768,8 @@ func (d *stateHasher) generatedPackage(g generatedPackage) {
 
 // store digests every field Resolve and AfterResolvingDeps may read. Left
 // out: memo is rebuilt once the first Resolve sets index, prefetch is stopped
-// and empty, and protoIndex and holdingIndex are memos of the emission rules.
+// and empty, protoIndex and holdingIndex are memos of the emission rules,
+// frozen is set only on a worker's view, and prerefreshed only within selectInputs.
 func (d *stateHasher) store(s *programStore) {
 	d.config(s.repoConfig)
 	d.emission(s.emission)

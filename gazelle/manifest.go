@@ -153,8 +153,8 @@ func (s *programStore) incompleteOutput(file string) error {
 		return nil
 	}
 	for dir := parentDir(file); ; dir = parentDir(dir) {
-		if f := s.emission.files[dir]; f != nil {
-			if outputs := s.packageOutputs(dir, f); outputs != nil {
+		if f, outputs := s.observedOutputs(dir); f != nil {
+			if outputs != nil {
 				if outputs.incomplete >= 0 {
 					r := outputs.producers[outputs.incomplete]
 					return incompleteOutputConflict(dir, r.Name(), ruleOutputs(r, s.repoConfig.RepoName, dir).incomplete)
