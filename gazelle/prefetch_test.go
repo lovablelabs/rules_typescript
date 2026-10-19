@@ -154,6 +154,61 @@ func TestPrefetch_StopCancelsTheRunningListingAndDropsQueuedOnes(t *testing.T) {
 	}
 }
 
+// A large app's every added source ran the full pass: the walk's untaken
+// speculation stayed among the run's listings, a files list the record does not derive.
+func TestPrefetch_AnUntakenSpeculationIsNoListingTheRunUsed(t *testing.T) {
+	l := newListingRuns(t, patchFixture())
+	listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+	sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
+	s := newProgramStore()
+	untaken := append(slices.Clone(projectionRoots), "app/src/view/w.tsx")
+	s.speculate(l.root, "app/tsconfig.json", l.tsgo, projectionRoots)
+	taken, ok, err := s.takeSpeculation(l.root, "app/tsconfig.json", l.tsgo, projectionRoots)
+	if !ok || err != nil || taken.key == "" {
+		t.Fatalf("taking the speculation: taken %v, err %v", ok, err)
+	}
+	s.speculate(l.root, "app/tsconfig.json", l.tsgo, untaken)
+	waitFor(t, "the untaken speculation to list", func() bool {
+		n := 0
+		loadedListings.Range(func(_, _ any) bool { n++; return true })
+		return n == 2
+	})
+	s.stopPrefetch()
+	facts, err := decodeImportFacts(newImportFactsRecorder(nil).encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, listing := range facts.Listings {
+		keys = append(keys, listing.Key)
+	}
+	if !slices.Equal(keys, []string{taken.key}) {
+		t.Errorf("the run's import facts name the listings %q, want only the taken one %s", keys, taken.key)
+	}
+}
+
+func TestPrefetch_AnUntakenSpeculationKeepsAUsedListingOfTheSameRoots(t *testing.T) {
+	l := newListingRuns(t, patchFixture())
+	listingNames, listingStats = newListingNames(), &incremental.StatCache{}
+	sourceSpecs, loadedListings = sync.Map{}, sync.Map{}
+	s := newProgramStore()
+	app := &program{config: "app/tsconfig.json"}
+	s.speculate(l.root, app.config, l.tsgo, projectionRoots)
+	taken, err := s.listRoots(l.root, app, l.tsgo, projectionRoots)
+	if err != nil || taken.key == "" {
+		t.Fatalf("listing the roots: %v", err)
+	}
+	s.speculate(l.root, app.config, l.tsgo, projectionRoots)
+	s.prefetch.mu.Lock()
+	again := s.prefetch.speculations[speculationKey(l.root, app.config, l.tsgo, projectionRoots)]
+	s.prefetch.mu.Unlock()
+	again.run()
+	s.stopPrefetch()
+	if _, kept := loadedListings.Load(taken.key); !kept {
+		t.Errorf("stopping the prefetch dropped the listing %s a rule used", taken.key)
+	}
+}
+
 // -ts_listing_patch_verify aborted a large workspace's run with "tsconfig.json: context canceled":
 // the walk's end cancelled the verifying listing of a speculation nothing took.
 // -ts_listing_inproc=verify instead cached the listing it never checked, whatever cancelled it.

@@ -34,6 +34,8 @@ type listingPrefetch struct {
 	workers      int
 	running      sync.WaitGroup
 	stopped      bool
+	// Keys of the listings listRoots returned, which an untaken speculation of the same roots shares.
+	used map[string]bool
 }
 
 type listingJob struct {
@@ -137,7 +139,7 @@ func (s *programStore) prefetchListing(repoRoot, cfg, tsgo string) {
 func (s *programStore) listingPool() *listingPrefetch {
 	if s.prefetch == nil {
 		ctx, cancel := context.WithCancelCause(context.Background())
-		s.prefetch = &listingPrefetch{ctx: ctx, cancel: cancel, jobs: map[string]*listingJob{}, requested: map[string]bool{}, speculations: map[string]*listingJob{}}
+		s.prefetch = &listingPrefetch{ctx: ctx, cancel: cancel, jobs: map[string]*listingJob{}, requested: map[string]bool{}, speculations: map[string]*listingJob{}, used: map[string]bool{}}
 		s.prefetch.cond = sync.NewCond(&s.prefetch.mu)
 	}
 	return s.prefetch
@@ -189,6 +191,16 @@ func (s *programStore) takeSpeculation(repoRoot, cfg, tsgo string, roots []strin
 	}
 	job.run()
 	return job.p, true, job.err
+}
+
+// keep marks listed as a listing a rule used, which stopPrefetch leaves loaded.
+func (f *listingPrefetch) keep(listed *program) {
+	if listed == nil || listed.key == "" {
+		return
+	}
+	f.mu.Lock()
+	f.used[listed.key] = true
+	f.mu.Unlock()
 }
 
 // live is whether job is still wanted: no listing has taken it.
@@ -255,4 +267,12 @@ func (s *programStore) stopPrefetch() {
 	}
 	// A worker still listing reads the run's caches, which the run tears down next.
 	f.running.Wait()
+	// An untaken listing reached no rule, so no record names it as one the run used.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, job := range untaken {
+		if job.p != nil && job.p.key != "" && !f.used[job.p.key] {
+			loadedListings.Delete(job.p.key)
+		}
+	}
 }
