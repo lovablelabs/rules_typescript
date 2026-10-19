@@ -106,6 +106,30 @@ func TestFastPath_ABuildEditGazelleRevertsIsWrittenBackWithoutAWalk(t *testing.T
 	}
 }
 
+// A body edit's replay moves the walked directory's stat lines, which the build
+// snapshot is tied to through the record; a later BUILD edit still writes back.
+func TestFastPath_ABuildEditAfterABodyEditReplayIsWrittenBack(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, buildEditTree())
+	cache := t.TempDir()
+	primeFastPath(t, root, cache)
+	writeFile(t, filepath.Join(root, "web/b.ts"), "export const b = 4;\n")
+	time.Sleep(pastRacyWindow)
+	if out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache); !slices.Equal(paths, []string{"fast path scan"}) {
+		t.Fatalf("the body edit took %q, want its scan replay:\n%s", paths, out)
+	}
+	replaceIn("web/BUILD.bazel", "        \"//util\",\n", "")(t, root)
+	time.Sleep(pastRacyWindow)
+	same := requireAsCacheless(t, root, "a dep deleted after a body edit")
+	if out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache); !slices.Equal(paths, []string{"fast path build edit"}) {
+		t.Errorf("the BUILD edit after a body edit's replay took %q, want the BUILD file written back:\n%s", paths, out)
+	}
+	same()
+	if out, paths := tracedGazelle(t, root, "-ts_listing_cache="+cache); !slices.Equal(paths, []string{"run record"}) {
+		t.Errorf("the run after the write-back took %q, want the record's replay:\n%s", paths, out)
+	}
+}
+
 // An edit the merge may not revert, or one the walk reads before the merge,
 // declines with its reason and runs the full pass.
 func TestFastPath_ABuildEditTheMergeMayKeepRunsTheFullPass(t *testing.T) {

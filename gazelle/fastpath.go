@@ -2302,8 +2302,10 @@ func (d *fastPathDecision) carryForward(file string, rec *runRecord, writeListin
 		next.dirs, lines.dirs = withDirs(rec.dirs, lines.dirs, d.newDirs)
 	}
 	sourceEdit := len(d.edits) > 0 && !d.restores
-	// The facts name the tree before a source edit; the next change that needs them runs in full.
-	if !d.restores && !d.scanned {
+	if d.restores || d.scanned {
+		next.snapshotWalk = rec.snapshotWalk
+	} else {
+		// The facts name the tree before a source edit; the next change that needs them runs in full.
 		os.Remove(buildSnapshotFile(file))
 	}
 	if sourceEdit {

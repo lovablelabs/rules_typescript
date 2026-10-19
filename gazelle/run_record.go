@@ -40,7 +40,7 @@ var runRecordMode = "on"
 
 const (
 	runRecordName  = "run-record"
-	runRecordMagic = "rules_typescript gazelle run record v4"
+	runRecordMagic = "rules_typescript gazelle run record v5"
 	// Set by the run that spawns a recording run: where it leaves its candidate.
 	runRecordCandidateEnv = "RULES_TYPESCRIPT_GAZELLE_RUN_RECORD_CANDIDATE"
 	// A test hook: a file each process appends the path it took to.
@@ -266,6 +266,8 @@ func inCacheDir(path, dir string) bool {
 // run's, which a replay writes back.
 type runRecord struct {
 	key, digest, walkDigest string
+	// snapshotWalk is the walk digest the build snapshot was sealed with, which a replay that keeps it carries.
+	snapshotWalk string
 	// dirs are walked, files the extension opened, reads and roots what the
 	// listings stat'ed and enumerated, judged as the listing cache judges them.
 	dirs, files, reads, roots []string
@@ -289,7 +291,7 @@ func (r *runRecord) encode() ([]byte, error) {
 	if len(r.scans) != 0 && len(r.scans) != len(r.reads) {
 		return nil, fmt.Errorf("%d scan sums for %d reads", len(r.scans), len(r.reads))
 	}
-	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d %d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest,
+	fmt.Fprintf(&b, "%s\n%s\n%s\n%s\n%s\n%d %d %d %d\n%d %d %d %d %d %d\n", runRecordMagic, r.key, r.digest, r.walkDigest, r.snapshotWalk,
 		len(r.dirs), len(r.files), len(r.reads), len(r.roots), r.exit, len(r.stdout), len(r.stderr), len(r.facts), len(r.sums), len(r.scans))
 	for _, list := range r.lists() {
 		for _, p := range *list {
@@ -327,7 +329,7 @@ func loadRunRecord(file string) *runRecord {
 		data = data[i+1:]
 		return l, true
 	}
-	var header [6]string
+	var header [7]string
 	for i := range header {
 		var ok bool
 		if header[i], ok = line(); !ok {
@@ -337,7 +339,7 @@ func loadRunRecord(file string) *runRecord {
 	if header[0] != runRecordMagic {
 		return nil
 	}
-	r := &runRecord{key: header[1], digest: header[2], walkDigest: header[3]}
+	r := &runRecord{key: header[1], digest: header[2], walkDigest: header[3], snapshotWalk: header[4]}
 	numbers := func(text string, n int) []int {
 		fields := strings.Fields(text)
 		if len(fields) != n {
@@ -353,7 +355,7 @@ func loadRunRecord(file string) *runRecord {
 		}
 		return out
 	}
-	counts, tail := numbers(header[4], len(r.lists())), numbers(header[5], 6)
+	counts, tail := numbers(header[5], len(r.lists())), numbers(header[6], 6)
 	if counts == nil || tail == nil {
 		return nil
 	}
@@ -837,7 +839,7 @@ func writeRunCandidate() {
 		}
 	}
 	if why == "" && in.builds != nil {
-		data, err := in.builds.seal(rec.walkDigest)
+		data, err := in.builds.seal(rec.snapshotWalk)
 		if err == nil {
 			err = writeAtomically(buildSnapshotFile(os.Getenv(runRecordCandidateEnv)), data)
 		}
@@ -920,6 +922,7 @@ func (in *inputSet) candidate() (*runRecord, string) {
 		lines.roots = append(lines.roots, roots[root])
 	}
 	rec.digest, rec.walkDigest = rec.digests(lines)
+	rec.snapshotWalk = rec.walkDigest
 	rec.sums, rec.facts = inputSums(lines, rec.dirs, in.repoRoot, decodeNameReads(in.facts)), in.facts
 	return rec, ""
 }
