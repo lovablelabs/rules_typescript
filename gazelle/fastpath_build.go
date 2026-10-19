@@ -365,7 +365,8 @@ func buildEditFiles(rec *runRecord, packages map[string]*buildPackage, repoRoot 
 // decideBuildEdit proves that Gazelle's pre-resolve merge takes each edited
 // BUILD file to the state it took the recorded one to, after which the run is
 // the recorded one; handled is false when anything but BUILD content moved.
-func decideBuildEdit(rec *runRecord, snapFile, repo, repoRoot string, buildNames []string, dirs []string, moved []int, stamps *newest, names *nameReads) (*fastPathDecision, *decline, bool) {
+func decideBuildEdit(rec *runRecord, snapFile, repo, repoRoot string, buildNames []string, lines inputLines, moved []int, stamps *newest, names *nameReads) (*fastPathDecision, *decline, bool) {
+	dirs := lines.dirs
 	snap := loadBuildSnapshot(snapFile)
 	if snap == nil || snap.Walk != rec.snapshotWalk {
 		return nil, nil, false
@@ -378,7 +379,6 @@ func decideBuildEdit(rec *runRecord, snapFile, repo, repoRoot string, buildNames
 	if !ok {
 		return nil, nil, false
 	}
-	lines := inputLines{dirs: dirs, files: fileLines(rec.files, stamps), reads: listingReadLines(rec.reads, stamps), roots: rootLines(rec.roots)}
 	sums := lineSums(lines)
 	walked := setOf(rec.dirs)
 	at := 0

@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -472,11 +473,66 @@ func (n *newest) see(t time.Time) {
 }
 
 func dirLines(dirs, buildNames []string, skip string, stamps *newest) ([]string, error) {
-	lines := make([]string, len(dirs))
-	errs := make([]error, len(dirs))
-	parallel(len(dirs), func(i int) {
+	w, err := (&runRecord{dirs: dirs}).read(buildNames, skip, stamps)
+	if err != nil {
+		return nil, err
+	}
+	return w.inputs.dirs, nil
+}
+
+// walkRead is the walked directories as dirLines reads them, and the record's
+// other inputs as they read in the same pass.
+type walkRead struct {
+	inputs  inputLines
+	at      map[string]int
+	entries [][]walkEntry
+	folded  [][]string
+}
+
+// walkEntry is an entry's fileLine; its stamp is in its directory's. The line
+// is empty where only the entry's own stat says it: a link, a projection, the
+// cache directory, an entry gone mid-read.
+type walkEntry struct{ name, line string }
+
+// read reads all of the record's inputs over one pool. A file or read in a
+// walked directory waits for that directory's read and takes its line from
+// there; the directories come first, so it waits on a worker that never waits.
+func (r *runRecord) read(buildNames []string, skip string, stamps *newest) (*walkRead, error) {
+	dirs, roots, files := len(r.dirs), len(r.roots), len(r.files)
+	w := &walkRead{at: make(map[string]int, dirs), entries: make([][]walkEntry, dirs), folded: make([][]string, dirs)}
+	w.inputs = inputLines{dirs: make([]string, dirs), files: make([]string, files), reads: make([]string, len(r.reads)), roots: make([]string, roots)}
+	dirDone := make([]chan struct{}, dirs)
+	for i, dir := range r.dirs {
+		w.at[dir] = i
+		dirDone[i] = make(chan struct{})
+	}
+	waitForDir := func(file string) {
+		if i, ok := w.at[filepath.Dir(file)]; ok {
+			<-dirDone[i]
+		}
+	}
+	errs := make([]error, dirs)
+	names := newListingNames()
+	parallel(dirs+roots+files+len(r.reads), func(i int) {
 		var t time.Time
-		lines[i], t, errs[i] = dirLine(dirs[i], buildNames, skip)
+		switch {
+		case i < dirs:
+			w.inputs.dirs[i], w.entries[i], t, errs[i] = readDirLine(r.dirs[i], buildNames, skip)
+			if files+len(r.reads) > 0 {
+				w.folded[i] = foldedNames(w.entries[i])
+			}
+			close(dirDone[i])
+		case i < dirs+roots:
+			w.inputs.roots[i-dirs] = names.Digest(r.roots[i-dirs])
+		case i < dirs+roots+files:
+			i -= dirs + roots
+			waitForDir(r.files[i])
+			w.inputs.files[i], t = w.fileLine(r.files[i])
+		default:
+			i -= dirs + roots + files
+			waitForDir(r.reads[i])
+			w.inputs.reads[i], t = w.readLine(r.reads[i], stamps != nil)
+		}
 		stamps.see(t)
 	})
 	for _, err := range errs {
@@ -484,28 +540,78 @@ func dirLines(dirs, buildNames []string, skip string, stamps *newest) ([]string,
 			return nil, err
 		}
 	}
-	return lines, nil
+	return w, nil
 }
 
-func fileLines(files []string, stamps *newest) []string {
-	lines := make([]string, len(files))
-	parallel(len(files), func(i int) {
-		var t time.Time
-		lines[i], t = fileLine(files[i])
-		stamps.see(t)
-	})
-	return lines
-}
-
-func listingReadLines(reads []string, stamps *newest) []string {
-	lines := make([]string, len(reads))
-	parallel(len(reads), func(i int) {
-		lines[i] = incremental.EntryLine(reads[i])
-		if stamps != nil {
-			_, t := fileLine(reads[i])
-			stamps.see(t)
+func foldedNames(entries []walkEntry) []string {
+	folded := make([]string, len(entries))
+	for i, e := range entries {
+		if !isASCII(e.name) {
+			return nil
 		}
-	})
+		folded[i] = strings.ToLower(e.name)
+	}
+	slices.Sort(folded)
+	return folded
+}
+
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// entry is what the walk read of file, when that is all its own stat would
+// say. An absent name counts only where no entry could stand for it on a
+// case-insensitive file system.
+func (w *walkRead) entry(file string) (string, bool) {
+	if filepath.Clean(file) != file {
+		return "", false
+	}
+	i, ok := w.at[filepath.Dir(file)]
+	if !ok {
+		return "", false
+	}
+	name := filepath.Base(file)
+	if j, found := slices.BinarySearchFunc(w.entries[i], name, func(e walkEntry, name string) int { return strings.Compare(e.name, name) }); found {
+		return w.entries[i][j].line, w.entries[i][j].line != ""
+	}
+	if w.folded[i] == nil || !isASCII(name) {
+		return "", false
+	}
+	if _, found := slices.BinarySearch(w.folded[i], strings.ToLower(name)); found {
+		return "", false
+	}
+	return "absent", true
+}
+
+func (w *walkRead) fileLine(file string) (string, time.Time) {
+	if line, ok := w.entry(file); ok {
+		return line, time.Time{}
+	}
+	return fileLine(file)
+}
+
+// readLine keeps a stat of its own for a directory read and a node_modules
+// read, whose line leaves the ctime out; only a stamped read pays for the stamp.
+func (w *walkRead) readLine(read string, stamped bool) (string, time.Time) {
+	if line, ok := w.entry(read); ok && line != "dir" && !strings.Contains(filepath.ToSlash(read), "/node_modules/") {
+		return line, time.Time{}
+	}
+	line := incremental.EntryLine(read)
+	if !stamped {
+		return line, time.Time{}
+	}
+	_, t := fileLine(read)
+	return line, t
+}
+
+func listingReadLines(reads []string) []string {
+	lines := make([]string, len(reads))
+	parallel(len(reads), func(i int) { lines[i] = incremental.EntryLine(reads[i]) })
 	return lines
 }
 
@@ -516,6 +622,7 @@ func rootLines(roots []string) []string {
 	return lines
 }
 
+// parallel claims indices in increasing order; runRecord.read relies on it.
 func parallel(n int, do func(i int)) {
 	var next atomic.Int64
 	var wg sync.WaitGroup
@@ -538,23 +645,32 @@ func buildEntry(name string, mode fs.FileMode, data []byte) string {
 // its files. A projection lives only inside one listing and the listing cache
 // outside the inputs, so neither counts; a subdirectory counts by name.
 func dirLine(dir string, buildNames []string, skip string) (string, time.Time, error) {
+	line, _, stamp, err := readDirLine(dir, buildNames, skip)
+	return line, stamp, err
+}
+
+// readDirLine is dirLine, with what it read of each entry in name order.
+func readDirLine(dir string, buildNames []string, skip string) (string, []walkEntry, time.Time, error) {
 	var stamp time.Time
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return "absent", stamp, nil
+		return "absent", nil, stamp, nil
 	}
 	if err != nil {
-		return "", stamp, err
+		return "", nil, stamp, err
 	}
 	var b strings.Builder
+	read := make([]walkEntry, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
 		file := filepath.Join(dir, name)
+		read = append(read, walkEntry{name: name})
 		if isProjection(name) || file == skip {
 			continue
 		}
 		if entry.IsDir() {
 			fmt.Fprintf(&b, "d %s\n", name)
+			read[len(read)-1].line = "dir"
 			continue
 		}
 		info, err := entry.Info()
@@ -562,7 +678,8 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 			fmt.Fprintf(&b, "gone %s\n", name)
 			continue
 		}
-		if info.Mode()&fs.ModeSymlink != 0 {
+		link := info.Mode()&fs.ModeSymlink != 0
+		if link {
 			target, _ := os.Readlink(file)
 			fmt.Fprintf(&b, "l %s -> %s %s: ", name, target, incremental.StatLine(info))
 			stamp = later(stamp, changed(info))
@@ -571,6 +688,7 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 				continue
 			}
 		}
+		line := incremental.StatLine(info)
 		switch {
 		case info.IsDir():
 			fmt.Fprintf(&b, "d %s\n", name)
@@ -578,15 +696,18 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 		case info.Mode().IsRegular() && slices.Contains(buildNames, name):
 			data, err := os.ReadFile(file)
 			if err != nil {
-				return "", stamp, err
+				return "", nil, stamp, err
 			}
 			b.WriteString(buildEntry(name, info.Mode(), data) + "\n")
 		default:
-			fmt.Fprintf(&b, "f %s %s\n", name, incremental.StatLine(info))
+			fmt.Fprintf(&b, "f %s %s\n", name, line)
+		}
+		if !link {
+			read[len(read)-1].line = line
 		}
 		stamp = later(stamp, changed(info))
 	}
-	return b.String(), stamp, nil
+	return b.String(), read, stamp, nil
 }
 
 // A directory read is a probe of its existence; its stamp moves with every
@@ -709,7 +830,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	file := filepath.Join(cache, runRecordName+"-"+key[:16])
 	if rec := loadRunRecord(file); rec != nil && rec.key == key {
 		stamps := &newest{}
-		matched, dirs := rec.check(c.ValidBuildFileNames, cache, stamps)
+		matched, lines := rec.check(c.ValidBuildFileNames, cache, stamps)
 		if matched {
 			if runRecordMode == "verify" {
 				os.Exit(verifyReplay(fs, file, rec))
@@ -722,8 +843,8 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 			}
 			os.Exit(rec.exit)
 		}
-		if dirs != nil {
-			tryFastPath(fs, c, file, rec, dirs, stamps)
+		if lines != nil {
+			tryFastPath(fs, c, file, rec, *lines, stamps)
 			releaseDeclinedFastPath()
 		}
 	}
@@ -738,25 +859,24 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	return nil
 }
 
-// matches compares the walk first: most edits change it, and it is the
-// smaller part to read.
 func (r *runRecord) matches(buildNames []string, cache string, stamps *newest) bool {
 	ok, _ := r.check(buildNames, cache, stamps)
 	return ok
 }
 
-// check is matches, and on a mismatch the walked directories' lines as they
-// read now, or nil when they could not be read.
-func (r *runRecord) check(buildNames []string, cache string, stamps *newest) (bool, []string) {
-	dirs, err := dirLines(r.dirs, buildNames, cache, stamps)
+// check is matches, and on a mismatch the inputs as they read now, or nil
+// when the walked directories could not be read.
+func (r *runRecord) check(buildNames []string, cache string, stamps *newest) (bool, *inputLines) {
+	walk, err := r.read(buildNames, cache, stamps)
 	if err != nil {
 		return false, nil
 	}
-	if digestOfWalk(r.dirs, dirs) != r.walkDigest {
-		return false, dirs
+	lines := walk.inputs
+	if digestOfWalk(r.dirs, lines.dirs) != r.walkDigest {
+		return false, &lines
 	}
-	digest, _ := r.digests(inputLines{dirs, fileLines(r.files, stamps), listingReadLines(r.reads, stamps), rootLines(r.roots)})
-	return digest == r.digest, dirs
+	digest, _ := r.digests(lines)
+	return digest == r.digest, &lines
 }
 
 // The candidate holds the inputs as the run read them. They still hold only

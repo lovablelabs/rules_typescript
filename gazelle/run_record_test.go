@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/rules_go/go/runfiles"
+	"github.com/mikn/rules_typescript/gazelle/incremental"
 )
 
 func runRecordTree() map[string]string {
@@ -269,11 +271,11 @@ func TestRunRecord_VerifyFailsWhenAFullPassWouldWrite(t *testing.T) {
 	}
 	rec := loadRunRecord(records[0])
 	buildNames := []string{"BUILD.bazel", "BUILD"}
-	dirs, err := dirLines(rec.dirs, buildNames, cache, nil)
+	walk, err := rec.read(buildNames, cache, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec.digest, rec.walkDigest = rec.digests(inputLines{dirs, fileLines(rec.files, nil), listingReadLines(rec.reads, nil), rootLines(rec.roots)})
+	rec.digest, rec.walkDigest = rec.digests(walk.inputs)
 	data, err := rec.encode()
 	if err != nil {
 		t.Fatal(err)
@@ -421,5 +423,173 @@ func TestRunRecord_ALanguageConfiguringAfterCheckFlagsIsNeverRecorded(t *testing
 	})
 	if !strings.Contains(in.incomplete, "another language configures late") {
 		t.Errorf("a run with another language's config is recordable; incomplete = %q", in.incomplete)
+	}
+}
+
+// The walk's listing stands in for the stat of each input it holds. Each edit
+// must move every input's line and the newest stamp as its own stat would,
+// and the record must stop matching.
+func TestRunRecord_InputsInAWalkedDirectoryReadAsTheirOwnStat(t *testing.T) {
+	old := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name string
+		edit func(root string)
+	}{
+		{"none", func(string) {}},
+		{"a read file rewritten", func(root string) { writeFile(t, filepath.Join(root, "app/a.ts"), "export const a = 22;\n") }},
+		{"a file added where a read probed", func(root string) { writeFile(t, filepath.Join(root, "app/x.ts"), "export {};\n") }},
+		{"a read file rewritten to its size and mtime", func(root string) {
+			writeFile(t, filepath.Join(root, "app/a.ts"), "export const a = 2;\n")
+			if err := os.Chtimes(filepath.Join(root, "app/a.ts"), old, old); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a read outside the walk rewritten", func(root string) { writeFile(t, filepath.Join(root, "lib/l.ts"), "export const l = 22;\n") }},
+		{"a name added under a names root", func(root string) { writeFile(t, filepath.Join(root, "lib/m.ts"), "export {};\n") }},
+	} {
+		root := writeTree(t, map[string]string{
+			"app/a.ts":                     "export const a = 1;\n",
+			"app/BUILD.bazel":              "",
+			"app/Upper.ts":                 "export {};\n",
+			"intl/\u00e9.ts":               "export {};\n",
+			"app/sub/s.ts":                 "export {};\n",
+			"app/.gazelle-tsconfig-1.json": "{}",
+			"app/cache/entry":              "",
+			"app/node_modules/p/i.d.ts":    "export {};\n",
+			"lib/l.ts":                     "export const l = 1;\n",
+		})
+		if err := os.Symlink(filepath.Join(root, "lib/l.ts"), filepath.Join(root, "app/link.ts")); err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range []string{"app/a.ts", "lib/l.ts"} {
+			if err := os.Chtimes(filepath.Join(root, file), old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// The newest input is one the walk holds.
+		time.Sleep(50 * time.Millisecond)
+		writeFile(t, filepath.Join(root, "app/BUILD.bazel"), "")
+		abs := func(rels ...string) []string {
+			out := make([]string, len(rels))
+			for i, rel := range rels {
+				out[i] = filepath.Join(root, rel)
+			}
+			return out
+		}
+		buildNames, skip := []string{"BUILD.bazel"}, filepath.Join(root, "app/cache")
+		inputs := abs("app/a.ts", "app/BUILD.bazel", "app/sub", "app/link.ts", "app/x.ts", "app/upper.ts", "app/.gazelle-tsconfig-1.json",
+			"app/cache", "app/node_modules/p/i.d.ts", "gone/g.ts", "intl/e\u0301.ts", "lib/l.ts")
+		rec := &runRecord{dirs: abs("app", "app/node_modules/p", "gone", "intl"), files: inputs, reads: inputs, roots: abs("app/sub", "lib")}
+		byStat := func(stamps *newest) inputLines {
+			unwalked, err := (&runRecord{files: rec.files, reads: rec.reads, roots: rec.roots}).read(buildNames, skip, stamps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := unwalked.inputs
+			if lines.dirs, err = dirLines(rec.dirs, buildNames, skip, stamps); err != nil {
+				t.Fatal(err)
+			}
+			return lines
+		}
+		rec.digest, rec.walkDigest = rec.digests(byStat(nil))
+		// Past one tick of the file system's coarse ctime clock; a record's racy window covers the tick itself.
+		time.Sleep(50 * time.Millisecond)
+		tc.edit(root)
+		own, viaWalk := &newest{}, &newest{}
+		want := byStat(own)
+		walk, err := rec.read(buildNames, skip, viaWalk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for kind, got := range map[string][2][]string{"file": {want.files, walk.inputs.files}, "read": {want.reads, walk.inputs.reads}, "root": {want.roots, walk.inputs.roots}} {
+			for i := range got[0] {
+				if got[0][i] != got[1][i] {
+					t.Errorf("%s: %s %d reads %q through the walk, %q by its own stat", tc.name, kind, i, got[1][i], got[0][i])
+				}
+			}
+		}
+		if !own.at.Equal(viaWalk.at) {
+			t.Errorf("%s: the newest input is stamped %v through the walk, %v by its own stat", tc.name, viaWalk.at, own.at)
+		}
+		for rel, want := range map[string]bool{"app/a.ts": true, "app/x.ts": true, "app/sub": true, "gone/g.ts": true, "app/link.ts": false,
+			"app/upper.ts": false, "intl/e\u0301.ts": false, "app/\u212a.ts": false, "intl/x.ts": false, "app/.gazelle-tsconfig-1.json": false, "app/.GAZELLE-TSCONFIG-1.json": false, "app/cache": false, "app/Cache": false} {
+			if _, ok := walk.entry(filepath.Join(root, rel)); ok != want {
+				t.Errorf("%s: %s takes its line from the walk: %t; want %t", tc.name, rel, ok, want)
+			}
+		}
+		if _, ok := walk.entry(root + "/app/link.ts/../a.ts"); ok {
+			t.Errorf("%s: a path through a link takes its line from the walk", tc.name)
+		}
+		if moved := tc.name != "none"; moved == rec.matches(buildNames, skip, nil) {
+			t.Errorf("%s: the record taken before the edit matches the tree after it: %t", tc.name, !moved)
+		}
+	}
+}
+
+// The pass reads every input of every list, inside and outside the walk, as
+// its own stat reads it: an input it skipped reads the same before and after
+// its edit, and a file or read it left unstamped falls out of the racy-clean rule.
+func TestRunRecord_TheReadPassSeesEveryInputModifiedOrNew(t *testing.T) {
+	const n = 64
+	tree := map[string]string{}
+	rec := &runRecord{}
+	root := t.TempDir()
+	edits := map[string]string{}
+	for i := range n {
+		for _, dir := range []string{fmt.Sprintf("walked/d%02d", i), fmt.Sprintf("outside/d%02d", i)} {
+			tree[dir+"/file.ts"], tree[dir+"/read.ts"] = "export {};\n", "export const r = 1;\n"
+			abs := filepath.Join(root, dir)
+			rec.files = append(rec.files, filepath.Join(abs, "file.ts"), filepath.Join(abs, "new-file.ts"))
+			rec.reads = append(rec.reads, filepath.Join(abs, "read.ts"), filepath.Join(abs, "new-read.ts"))
+			edits[dir+"/file.ts"], edits[dir+"/new-file.ts"] = "export const f = 2;\n", "export const f = 2;\n"
+			edits[dir+"/read.ts"], edits[dir+"/new-read.ts"] = "export const read = 2;\n", "export const read = 2;\n"
+		}
+		rec.dirs = append(rec.dirs, filepath.Join(root, fmt.Sprintf("walked/d%02d", i)))
+		tree[fmt.Sprintf("roots/r%02d/a%02d.ts", i, i)] = "export {};\n"
+		rec.roots = append(rec.roots, filepath.Join(root, fmt.Sprintf("roots/r%02d", i)))
+		edits[fmt.Sprintf("roots/r%02d/b.ts", i)] = ""
+	}
+	writeWorkspace(t, root, tree)
+	before, err := rec.read(nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspace(t, root, edits)
+	after, err := rec.read(nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var own inputLines
+	stamped := map[string]time.Time{}
+	for _, f := range rec.files {
+		line, stamp := fileLine(f)
+		own.files = append(own.files, line)
+		stamped["file"] = later(stamped["file"], stamp)
+	}
+	for _, r := range rec.reads {
+		_, stamp := fileLine(r)
+		own.reads = append(own.reads, incremental.EntryLine(r))
+		stamped["read"] = later(stamped["read"], stamp)
+	}
+	own.roots = rootLines(rec.roots)
+	for kind, lists := range map[string][3][]string{
+		"file": {before.inputs.files, after.inputs.files, own.files},
+		"read": {before.inputs.reads, after.inputs.reads, own.reads},
+		"root": {before.inputs.roots, after.inputs.roots, own.roots},
+	} {
+		for i := range lists[0] {
+			if lists[0][i] == lists[1][i] || lists[1][i] != lists[2][i] {
+				t.Errorf("%s %d reads %q before its edit, %q after it, and %q by its own stat", kind, i, lists[0][i], lists[1][i], lists[2][i])
+			}
+		}
+	}
+	for kind, only := range map[string]*runRecord{"file": {files: rec.files}, "read": {reads: rec.reads}} {
+		got := &newest{}
+		if _, err := only.read(nil, "", got); err != nil {
+			t.Fatal(err)
+		}
+		if !got.at.Equal(stamped[kind]) {
+			t.Errorf("the newest %s is stamped %v by the pass, %v by its own stat", kind, got.at, stamped[kind])
+		}
 	}
 }

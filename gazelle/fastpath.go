@@ -925,7 +925,8 @@ func (d *fastPathDecision) editedDirLine(dir, was string, e *packageEdit) (strin
 // every import the edit adds or drops lies between files that every rule
 // reading the importer already resolves the same way. A gained or lost source
 // changes its rule's srcs and nothing else, which the decision's edits write.
-func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, dirs []string, stamps *newest, cliExcludes, snapFile string) (*fastPathDecision, *decline) {
+func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, lines inputLines, stamps *newest, cliExcludes, snapFile string) (*fastPathDecision, *decline) {
+	dirs := lines.dirs
 	if len(rec.facts) == 0 || len(rec.sums) != len(rec.dirs)+len(rec.files)+len(rec.reads)+len(rec.roots) {
 		return nil, declined(declineNoFacts, "the record keeps no import facts")
 	}
@@ -938,15 +939,11 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 			moved = append(moved, i)
 		}
 	}
-	recordLines := sync.OnceValue(func() inputLines {
-		return inputLines{dirs: dirs, files: fileLines(rec.files, stamps), reads: listingReadLines(rec.reads, stamps), roots: rootLines(rec.roots)}
-	})
 	if len(moved) > 0 {
-		if decision, why, handled := decideBuildEdit(rec, snapFile, repo, repoRoot, buildNames, dirs, moved, stamps, names); handled {
+		if decision, why, handled := decideBuildEdit(rec, snapFile, repo, repoRoot, buildNames, lines, moved, stamps, names); handled {
 			return decision, why
 		}
 	} else {
-		lines := recordLines()
 		if changed, ok := unchangedScans(rec, lines, buildNames); ok {
 			return &fastPathDecision{lines: lines, files: map[string]string{}, changed: changed, stamps: stamps, repoRoot: repoRoot, names: names, scanned: true}, nil
 		}
@@ -971,7 +968,6 @@ func decideFastPath(rec *runRecord, repoRoot, repo string, buildNames []string, 
 			return nil, why
 		}
 	}
-	lines := recordLines()
 	sums = append(sums, lineSums(lines)...)
 	// A walked directory's shape holds its BUILD file's content, so a BUILD file read by stat there may move.
 	walked := setOf(rec.dirs)
@@ -2092,11 +2088,11 @@ func walkOutcome(w walkFacts, key, target string, to int32, toKnown bool, toMate
 // proves the full pass would write and log what rec holds, after writing the
 // BUILD edits a gained or lost source makes; it returns only when the full
 // pass has to run.
-func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord, dirs []string, stamps *newest) {
+func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord, lines inputLines, stamps *newest) {
 	if fastPathMode == "off" {
 		return
 	}
-	decision, why := decideFastPath(rec, c.RepoRoot, c.RepoName, c.ValidBuildFileNames, dirs, stamps, flagValue(fs, "exclude"), buildSnapshotFile(file))
+	decision, why := decideFastPath(rec, c.RepoRoot, c.RepoName, c.ValidBuildFileNames, lines, stamps, flagValue(fs, "exclude"), buildSnapshotFile(file))
 	if mode := flagValue(fs, "mode"); why == nil && len(decision.edits) > 0 && mode != "fix" {
 		why = declined(declineMode, "-mode=%s; only fix writes the BUILD edit", mode)
 	}
