@@ -256,7 +256,7 @@ func codegenTreeOwner(s *programStore, ix *resolve.RuleIndex, imp string) (resol
 	if imp == "" || imp == "." || imp == ".." || !firstParty(imp) {
 		return resolve.FindResult{}, false
 	}
-	if ix == nil || ix != s.index || s.emission == nil {
+	if ix != s.index || s.emission == nil {
 		return findCodegenTreeOwner(s, ix, imp)
 	}
 	memo := s.resolutionMemo()
@@ -295,6 +295,9 @@ type treeOwner struct {
 
 func findCodegenTreeOwner(s *programStore, ix *resolve.RuleIndex, imp string) (resolve.FindResult, bool) {
 	producer, pkg, root := s.declaredOutputProducer(imp, true)
+	if ix == nil && producer == nil {
+		return resolve.FindResult{}, false
+	}
 	for dir := imp; dir != "" && dir != "." && dir != "/" && dir != ".."; dir = path.Dir(dir) {
 		if ix != nil {
 			if r, found := s.indexedTree(ix, dir); found {
@@ -2047,7 +2050,7 @@ func compilerConfigSource(c *config.Config, selected, owner string,
 }
 
 func (s *programStore) outputProducer(file string) (*rule.Rule, string) {
-	if s.index == nil || s.emission == nil {
+	if s.emission == nil {
 		producer, pkg, _ := s.declaredOutputProducer(file, false)
 		return producer, pkg
 	}
@@ -2071,7 +2074,7 @@ func (s *programStore) declaredOutputProducer(file string, tree bool) (*rule.Rul
 	}
 	var producer *rule.Rule
 	var pkg, root string
-	if tree && s.index != nil {
+	if tree {
 		if trees, observed := s.ancestorTrees(parentDir(file)); observed {
 			for _, t := range trees {
 				if within(file, t.root) && (producer == nil || len(t.root) > len(root)) {
