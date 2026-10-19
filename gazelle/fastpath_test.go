@@ -813,12 +813,11 @@ func TestFastPath_VerifyCatchesAForgedGainedDirectory(t *testing.T) {
 	if rec.facts, err = facts.encode(); err != nil {
 		t.Fatal(err)
 	}
-	dirs, err := dirLines(rec.dirs, []string{"BUILD.bazel", "BUILD"}, cache, nil)
+	walk, err := rec.read([]string{"BUILD.bazel", "BUILD"}, cache, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := inputLines{dirs: dirs, files: fileLines(rec.files, nil), reads: listingReadLines(rec.reads, nil), roots: rootLines(rec.roots)}
-	rec.sums = inputSums(lines, rec.dirs, root, &facts.names)
+	rec.sums = inputSums(walk.inputs, rec.dirs, root, &facts.names)
 	writeRunRecord(t, recordFile, rec)
 	editFile("data/fixtures/de.yaml", "greeting: hallo\n")(t, root)
 	out, err := tsGazelle(t, root, "-ts_listing_cache="+cache, "-ts_fastpath=verify")
@@ -1459,12 +1458,12 @@ func decideNow(t *testing.T, root, cache string) (*decline, int64) {
 	t.Cleanup(func() { listingCacheDir, listingNames, listingStats = savedDir, savedNames, savedStats })
 	buildNames := []string{"BUILD.bazel", "BUILD"}
 	stamps := &newest{}
-	matched, dirs := rec.check(buildNames, cache, stamps)
-	if matched || dirs == nil {
+	matched, lines := rec.check(buildNames, cache, stamps)
+	if matched || lines == nil {
 		t.Fatalf("the record matches (%t) or names no walked directory", matched)
 	}
 	before := listingPatched.Load()
-	_, why := decideFastPath(rec, root, "", buildNames, dirs, stamps, "", buildSnapshotFile(recordFile))
+	_, why := decideFastPath(rec, root, "", buildNames, *lines, stamps, "", buildSnapshotFile(recordFile))
 	return why, listingPatched.Load() - before
 }
 

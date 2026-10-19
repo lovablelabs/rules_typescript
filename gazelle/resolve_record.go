@@ -461,7 +461,7 @@ func (r *resolveRecord) readsHold(buildNames []string, cache string) bool {
 		return false
 	}
 	for _, l := range r.Listings {
-		if !slices.Equal(listingReadLines(l.Reads, nil), l.ReadLines) || !slices.Equal(rootLines(l.Dirs), l.DirDigests) {
+		if !slices.Equal(listingReadLines(l.Reads), l.ReadLines) || !slices.Equal(rootLines(l.Dirs), l.DirDigests) {
 			return false
 		}
 	}
