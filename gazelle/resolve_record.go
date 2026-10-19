@@ -126,20 +126,24 @@ func (rec *resolveRecorder) noteOutsideTree(s *programStore, root string) {
 
 // dirNames is the walk's file names in dir, noted as a read during the Resolve phase.
 func (s *programStore) dirNames(dir string) ([]string, bool) {
-	if rec := resolvePhase.Load(); rec != nil {
-		rec.noteOutside(s, dir)
-	}
+	s.noteOutside(dir)
 	names, ok := s.files[dir]
 	return names, ok
 }
 
 // dirWalked is whether the walk generated dir, noted as a read during the Resolve phase.
 func (s *programStore) dirWalked(dir string) (bool, bool) {
-	if rec := resolvePhase.Load(); rec != nil {
-		rec.noteOutside(s, dir)
-	}
+	s.noteOutside(dir)
 	walked, observed := s.walked[dir]
 	return walked, observed
+}
+
+func (s *programStore) noteOutside(dir string) {
+	if s.frozen != nil {
+		s.frozen.later(func(s *programStore) { s.noteOutside(dir) })
+	} else if rec := resolvePhase.Load(); rec != nil {
+		rec.noteOutside(s, dir)
+	}
 }
 
 // walkedDirs is every walked directory at or under root, in order, noted as a

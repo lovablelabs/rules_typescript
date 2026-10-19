@@ -428,7 +428,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 	producer, _, _ := s.declaredOutputProducer(args.Rel, true)
 	if input := s.inputs[args.Rel]; producer == nil && input.program != nil && s.generatedPackages[args.Rel] {
 		res = registerProgramRules(args, res)
-		input.refresh = func() { refreshProgramRules(args, tc, res) }
+		input.refresh = &programRefresh{args, res}
 		s.inputs[args.Rel] = input
 		if file := s.emission.files[args.Rel]; file != nil && file.File == nil {
 			file.Rules = append(slices.Clone(args.OtherGen), res.Gen...)

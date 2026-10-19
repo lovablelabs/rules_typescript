@@ -370,7 +370,12 @@ func (s *programStore) keptProgramSources(c *config.Config, pkg string, dirInfo 
 		if !managedProgramRule(r, pkg) {
 			continue
 		}
-		for _, spec := range automaticProgramImports(c, r, keptSourceRule(r, file), file, dirInfo...) {
+		kept := r
+		if _, list := r.Attr("srcs").(*bzl.ListExpr); s.frozen == nil || list {
+			// Gazelle's merge may log a srcs that is not a list, so a view skips it; the commit's retained check catches the guess.
+			kept = keptSourceRule(r, file)
+		}
+		for _, spec := range automaticProgramImports(c, r, kept, file, dirInfo...) {
 			sources = append(sources, spec.Imp)
 		}
 	}
@@ -489,10 +494,7 @@ func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.
 				}
 			}
 			if imps.program != nil {
-				selected := *imps.program
-				selected.Roots = sources
-				s.selectProgram(args.Config, &selected)
-				imps.program = &selected
+				imps.program = s.refreshSelection(args.Config, imps.program, sources)
 			}
 			imps.sources = sources
 			imps.edges = sourceEdges(imps.program.edgesBySource(), sources)

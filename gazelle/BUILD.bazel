@@ -35,6 +35,7 @@ go_library(
         "prefetch.go",
         "prefetch_linux.go",
         "prefetch_other.go",
+        "preselect.go",
         "program.go",
         "proto.go",
         "proto_graph.go",

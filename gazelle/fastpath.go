@@ -305,25 +305,19 @@ func (r *importFactsRecorder) incomplete(why string) {
 }
 
 // selection notes one selectProgram call over a listing's files.
-func (r *importFactsRecorder) selection(p *program, listed []string, reached map[string]bool, selected []candidateKeyText) {
+func (r *importFactsRecorder) selection(key string, edges bool, unreached []string, selected []candidateKeyText) {
 	if r == nil {
 		return
 	}
-	if p.key == "" {
-		if len(p.Edges) > 0 {
+	if key == "" {
+		if edges {
 			r.incomplete("a program with edges was selected without a cached listing")
 		}
 		return
 	}
-	var unreached []string
-	for _, f := range listed {
-		if firstParty(f) && !reached[f] {
-			unreached = append(unreached, f)
-		}
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := selectionFacts{Listing: p.key, Unreached: r.ids32(unreached)}
+	s := selectionFacts{Listing: key, Unreached: r.ids32(unreached)}
 	for _, k := range selected {
 		s.Selected = append(s.Selected, candidateKey{From: r.id(k.from), Specifier: k.specifier, Block: k.block})
 	}

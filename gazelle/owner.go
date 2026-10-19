@@ -29,18 +29,26 @@ func firstParty(f string) bool {
 
 // record keeps a listing; a program naming a first-party file is a package.
 func (s *programStore) record(p *program) {
+	s.keep(p, s.authoredFiles(p))
+}
+
+func (s *programStore) keep(p *program, files map[string]bool) {
 	s.importFacts.program(p)
 	s.programs[p.dir] = p
 	delete(s.packages, p.dir)
+	if len(files) > 0 {
+		s.packages[p.dir] = files
+	}
+}
+
+func (s *programStore) authoredFiles(p *program) map[string]bool {
 	files := map[string]bool{}
 	for _, f := range p.Files {
 		if firstParty(f) && !s.generatedFile(f, true) {
 			files[f] = true
 		}
 	}
-	if len(files) > 0 {
-		s.packages[p.dir] = files
-	}
+	return files
 }
 
 func (s *programStore) selectProgram(c *config.Config, p *program, retained ...string) {
@@ -209,12 +217,23 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 			byFrom[file] = edges[start:len(edges):len(edges)]
 		}
 	}
-	if s.importFacts != nil {
+	if s.importFacts != nil || s.frozen != nil {
 		var chosen []candidateKeyText
 		for k := range selected {
 			chosen = append(chosen, candidateKeyText{k.from, k.specifier, k.block})
 		}
-		s.importFacts.selection(p, p.Files, reached, chosen)
+		var unreached []string
+		for _, f := range p.Files {
+			if firstParty(f) && !reached[f] {
+				unreached = append(unreached, f)
+			}
+		}
+		key, listedEdges := p.key, len(p.Edges) > 0
+		if s.frozen != nil {
+			s.frozen.later(func(s *programStore) { s.importFacts.selection(key, listedEdges, unreached, chosen) })
+		} else {
+			s.importFacts.selection(key, listedEdges, unreached, chosen)
+		}
 	}
 	p.Files = slices.DeleteFunc(slices.Clone(p.Files), func(file string) bool { return !reached[file] })
 	p.Edges = edges
@@ -261,13 +280,29 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 }
 
 func (s *programStore) selectInput(dir string) {
+	s.selectInputFrom(dir, nil)
+}
+
+// selectInputFrom takes pre's selection when it read the store as it stands.
+func (s *programStore) selectInputFrom(dir string, pre *preselection) bool {
 	input := s.inputs[dir]
 	if input.program == nil {
-		return
+		return false
+	}
+	retained := s.keptProgramSources(input.config, dir)
+	if pre != nil && pre.stamp == s.selectionStamp() && slices.Equal(pre.retained, retained) &&
+		s.readsHold(input.config, pre.reads) {
+		for _, note := range pre.notes {
+			note(s)
+		}
+		selected := pre.selected
+		s.keep(&selected, pre.files)
+		return true
 	}
 	selected := *input.program
-	s.selectProgram(input.config, &selected, s.keptProgramSources(input.config, dir)...)
+	s.selectProgram(input.config, &selected, retained...)
 	s.record(&selected)
+	return false
 }
 
 // Read the completed native index before any rule resolves. Rebuild each
@@ -292,14 +327,17 @@ func (s *programStore) selectInputs(ix *resolve.RuleIndex) {
 			s.inputs[dir] = input
 		}
 	}
+	selections := s.preselect()
 	for _, dir := range slices.Sorted(maps.Keys(s.inputs)) {
-		s.selectInput(dir)
+		s.selectInputFrom(dir, selections[dir])
 	}
+	s.prerefreshed = s.prerefresh()
 	for _, dir := range slices.Sorted(maps.Keys(s.inputs)) {
 		if refresh := s.inputs[dir].refresh; refresh != nil {
-			refresh()
+			refreshProgramRules(refresh.args, getConfig(refresh.args.Config), refresh.res)
 		}
 	}
+	s.prerefreshed = nil
 }
 
 func (s *programStore) generatedProgramFile(c *config.Config, ix *resolve.RuleIndex, file string, scalar bool) bool {
@@ -308,11 +346,14 @@ func (s *programStore) generatedProgramFile(c *config.Config, ix *resolve.RuleIn
 	}
 	key := generatedKey{c, file, scalar}
 	memo := s.resolutionMemo()
-	if generated, ok := memo.generated[key]; ok {
-		return generated
+	generated, ok := memo.generated[key]
+	if !ok {
+		generated = s.generatedOutput(ix, file, scalar) || scalar && len(protoOutputProviders(c, ix, file)) > 0
+		memo.generated[key] = generated
 	}
-	generated := s.generatedOutput(ix, file, scalar) || scalar && len(protoOutputProviders(c, ix, file)) > 0
-	memo.generated[key] = generated
+	if s.frozen != nil && s.frozen.reads != nil && scalar && strings.HasSuffix(file, "_pb.ts") {
+		s.frozen.reads.protos = append(s.frozen.reads.protos, protoRead{file, generated})
+	}
 	return generated
 }
 
@@ -390,7 +431,11 @@ func (s *programStore) sourceFile(f string) bool {
 	if !firstParty(f) {
 		return false
 	}
-	s.importFacts.lookedUp(f)
+	if s.frozen != nil {
+		s.frozen.later(func(s *programStore) { s.importFacts.lookedUp(f) })
+	} else {
+		s.importFacts.lookedUp(f)
+	}
 	names, _ := s.dirNames(parentDir(f))
 	return slices.Contains(names, path.Base(f))
 }

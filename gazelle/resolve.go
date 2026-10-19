@@ -1989,12 +1989,14 @@ func exitOnDeferredFatal() {
 
 // fatalf is log.Fatalf, except that a deferred edge fatal, reached first, is the one reported.
 func fatalf(format string, a ...any) {
+	bailIfFrozen()
 	exitOnDeferredFatal()
 	log.Fatalf(format, a...)
 }
 
 // fatal is log.Fatal, except that a deferred edge fatal, reached first, is the one reported.
 func fatal(a ...any) {
+	bailIfFrozen()
 	exitOnDeferredFatal()
 	log.Fatal(a...)
 }
@@ -2080,8 +2082,8 @@ func (s *programStore) declaredOutputProducer(file string, tree bool) (*rule.Rul
 		}
 	}
 	for dir := parentDir(file); ; dir = parentDir(dir) {
-		if f := s.emission.files[dir]; f != nil {
-			if outputs := s.packageOutputs(dir, f); outputs != nil {
+		if f, outputs := s.observedOutputs(dir); f != nil {
+			if outputs != nil {
 				if tree {
 					for _, t := range outputs.trees {
 						if within(file, t.root) && (producer == nil || len(t.root) > len(root)) {
@@ -2134,8 +2136,8 @@ func (s *programStore) ancestorTrees(dir string) ([]ancestorTree, bool) {
 	}
 	var trees []ancestorTree
 	observed := true
-	if f := s.emission.files[dir]; f != nil {
-		if outputs := s.packageOutputs(dir, f); outputs != nil {
+	if f, outputs := s.observedOutputs(dir); f != nil {
+		if outputs != nil {
 			for _, t := range outputs.trees {
 				trees = append(trees, ancestorTree{root: t.root, pkg: dir, producer: outputs.producers[t.rule]})
 			}

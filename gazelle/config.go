@@ -120,6 +120,10 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 	if s.index != nil {
 		dirInfo = nil
 	}
+	if s.frozen != nil {
+		s.observeFrozen(pkgs)
+		return
+	}
 	var info func(string) (walk.DirInfo, error)
 	if len(dirInfo) > 0 {
 		info = dirInfo[0]
