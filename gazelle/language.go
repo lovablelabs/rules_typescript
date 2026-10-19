@@ -214,22 +214,15 @@ func (l *tsLang) Configure(c *config.Config, rel string, f *rule.File) {
 }
 
 func (l *tsLang) observeProgram(p *program) {
-	l.observeSources(func(yield func(string) bool) {
-		for _, file := range p.Files {
-			if !yield(file) {
-				return
-			}
-		}
-		for _, candidate := range p.candidates {
-			if !yield(candidate.path) {
-				return
-			}
-		}
-	})
+	l.programs.observeBuilds(p.sourceDirs(), recordedDirInfo)
 }
 
 // Resolve runs after the native walk releases GetDirInfo's BUILD and exclusion facts.
 func (l *tsLang) observeSources(files iter.Seq[string]) {
+	l.programs.observeBuilds(firstPartyDirs(files), recordedDirInfo)
+}
+
+func firstPartyDirs(files iter.Seq[string]) []string {
 	observed := map[string]bool{}
 	var dirs []string
 	for file := range files {
@@ -243,7 +236,7 @@ func (l *tsLang) observeSources(files iter.Seq[string]) {
 		observed[dir] = true
 		dirs = append(dirs, dir)
 	}
-	l.programs.observeBuilds(dirs, recordedDirInfo)
+	return dirs
 }
 
 func (l *tsLang) Kinds() map[string]rule.KindInfo {
@@ -547,6 +540,7 @@ func (l *tsLang) DoneGeneratingRules() {
 	clear(dirInfoMemo)
 	l.programs.ruleListsMayChange()
 	if l.programs != nil {
+		clear(l.programs.ownerBuildFiles)
 		l.programs.stopPrefetch()
 		dropParses()
 		l.programs.reportCensus()

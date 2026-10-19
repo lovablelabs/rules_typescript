@@ -541,11 +541,17 @@ func (s *programStore) readSelectedConfig(c *config.Config, rel string) bool {
 		if _, err := statInput(filename); os.IsNotExist(err) {
 			continue
 		}
-		file, err := rule.LoadFile(filename, rel)
-		if err != nil {
-			fatalf("typescript: reading selected config owner %s: %v", filename, err)
+		file := s.ownerBuildFiles[filename]
+		if file == nil {
+			var err error
+			if file, err = rule.LoadFile(filename, rel); err != nil {
+				fatalf("typescript: reading selected config owner %s: %v", filename, err)
+			}
 		}
 		s.selectConfig(c, rel, file)
+		if _, known := s.configs[rel]; !known {
+			s.ownerBuildFiles[filename] = file
+		}
 		return true
 	}
 	return false
