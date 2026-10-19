@@ -652,13 +652,20 @@ func dirLine(dir string, buildNames []string, skip string) (string, time.Time, e
 // readDirLine is dirLine, with what it read of each entry in name order.
 func readDirLine(dir string, buildNames []string, skip string) (string, []walkEntry, time.Time, error) {
 	var stamp time.Time
-	entries, err := os.ReadDir(dir)
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "absent", nil, stamp, nil
 	}
 	if err != nil {
 		return "", nil, stamp, err
 	}
+	defer d.Close()
+	entries, err := d.ReadDir(-1)
+	if err != nil {
+		return "", nil, stamp, err
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	at := openDirStat(d)
 	var b strings.Builder
 	read := make([]walkEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -673,7 +680,7 @@ func readDirLine(dir string, buildNames []string, skip string) (string, []walkEn
 			read[len(read)-1].line = "dir"
 			continue
 		}
-		info, err := entry.Info()
+		info, err := at.lstat(entry)
 		if err != nil {
 			fmt.Fprintf(&b, "gone %s\n", name)
 			continue
