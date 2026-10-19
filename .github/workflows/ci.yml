@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         id: setup
         with:
           bazelisk-version: 1.x
@@ -228,7 +228,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
@@ -258,7 +258,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
@@ -284,7 +284,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
@@ -310,7 +310,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
@@ -359,7 +359,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - uses: bazel-contrib/setup-bazel@0.19.1
         with:
           bazelisk-version: 1.x
           bazelisk-cache: true
