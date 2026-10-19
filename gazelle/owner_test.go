@@ -920,3 +920,138 @@ func TestPrerefresh_AReadPackageThatBecomesUnobservedIsSelectedAgain(t *testing.
 		t.Error("lib0's predicted selection was taken after gen became unobserved")
 	}
 }
+
+// A walk answer must not outlive a write that changes it: the walk has no index yet, so its
+// selections and owner lookups share one memo per callback, stamped by the writes below.
+func TestWalkMemo_AnAnswerIsRecomputedAfterEachWriteThatChangesIt(t *testing.T) {
+	treeOwner := func(s *programStore) string {
+		owner, found := codegenTreeOwner(s, s.index, "gen/tree/x.ts")
+		if !found {
+			return ""
+		}
+		return owner.Label.Name
+	}
+	generated := func(s *programStore) string { return fmt.Sprint(s.generatedFile("gen/value.ts", true)) }
+	for _, tc := range []struct {
+		name, build string
+		answer      func(*programStore) string
+		write       func(t *testing.T, c *config.Config, s *programStore)
+		before      string
+		after       string
+	}{
+		{"a recorded BUILD file", `genrule(name = "value", outs = ["value.ts"])`, generated, func(t *testing.T, c *config.Config, s *programStore) {
+			f, err := rule.LoadData("gen/BUILD.bazel", "gen", []byte(`filegroup(name = "other")`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.recordBuild(c, "gen", f)
+		}, "true", "false"},
+		{"a stored rule", `filegroup(name = "value")`, generated, func(t *testing.T, c *config.Config, s *programStore) {
+			r := rule.NewRule("genrule", "value")
+			r.SetAttr("outs", []string{"value.ts"})
+			s.emission.setRule(emissionLabel(c.RepoName, "gen", ":value"), r)
+		}, "false", "true"},
+		{"a rule merged out of the list", "ts_codegen(name = \"a\", out_dir = \"tree\")\nts_codegen(name = \"b\", out_dir = \"tree\")", treeOwner,
+			func(t *testing.T, c *config.Config, s *programStore) {
+				f := s.emission.files["gen"]
+				f.Rules = f.Rules[1:]
+				s.ruleListsMayChange()
+			}, "a", "b"},
+		{"the rule index", "", treeOwner, func(t *testing.T, c *config.Config, s *programStore) {
+			lang := &tsLang{}
+			ix := resolve.NewRuleIndex(func(*rule.Rule, string) resolve.Resolver { return lang })
+			r, f := newRule(indexedRule{kind: "ts_codegen", name: "indexed", pkg: "gen", outDir: "tree"})
+			// Indexed through another store, whose callbacks move only its own counters.
+			ix.AddRule(emptyConfig(), r, f)
+			ix.Finish()
+			s.index = ix
+		}, "", "indexed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := emptyConfig()
+			s := getConfig(c).programs
+			f, err := rule.LoadData("gen/BUILD.bazel", "gen", []byte(tc.build))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.recordBuild(c, "gen", f)
+			s.walked["gen"] = true
+			if got := tc.answer(s); got != tc.before {
+				t.Fatalf("before the write: %q, want %q", got, tc.before)
+			}
+			tc.write(t, c, s)
+			if got := tc.answer(s); got != tc.after {
+				t.Errorf("after %s: %q, want %q; a memoized answer outlived the write", tc.name, got, tc.after)
+			}
+		})
+	}
+}
+
+// Answers the memo already holds must leave the same selection and import facts as computing them: a hit
+// answers what the lookup would and skips no note the selection makes.
+func TestWalkMemo_AWarmSelectionRecordsWhatAColdOneDoes(t *testing.T) {
+	run := func(warm bool) *programStore {
+		c := emptyConfig()
+		root, err := rule.LoadData("BUILD.bazel", "", []byte("# gazelle:resolve typescript shared/data.json //shared:data\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		(&resolve.Configurer{}).Configure(c, "", root)
+		s := getConfig(c).programs
+		for pkg, build := range map[string]string{
+			"gen":    "genrule(name = \"g\", outs = [\"g.ts\"])\nts_codegen(name = \"tree\", out_dir = \"tree\")",
+			"shared": `filegroup(name = "data", srcs = ["data.json"])`,
+			"lib":    `ts_compile(name = "lib", srcs = ["index.ts"])`,
+		} {
+			f, err := rule.LoadData(pkg+"/BUILD.bazel", pkg, []byte(build))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.recordBuild(c, pkg, f)
+			s.walked[pkg] = true
+		}
+		s.visit("shared", []string{"data.json"})
+		s.visit("lib", []string{"index.ts", "util.ts"})
+		index := "lib/index.ts"
+		files := []string{index, "lib/util.ts", "gen/g.ts", "gen/tree/x.ts", "shared/data.json"}
+		if warm {
+			for _, f := range files {
+				s.outputProducer(f)
+				codegenTreeOwner(s, nil, f)
+			}
+		}
+		s.importFacts = newImportFactsRecorder(nil)
+		s.inputs["lib"] = programInput{config: s.inputs["lib"].config, program: &program{dir: "lib", key: "listing-lib", Listing: explainfiles.Listing{
+			Roots: []string{index},
+			Files: files,
+			Edges: []explainfiles.Edge{importEdge(index, "./util", "lib/util.ts"), importEdge(index, "../gen/g", "gen/g.ts"),
+				importEdge(index, "../gen/tree/x", "gen/tree/x.ts"), importEdge(index, "../shared/data.json", "shared/data.json")},
+		}, candidates: []resolutionCandidate{
+			{from: index, specifier: "../gen/g", path: "gen/g.ts", file: true, resolved: "gen/g.ts"},
+			{from: index, specifier: "../gen/tree/x", path: "gen/tree/x.ts", file: true, resolved: "gen/tree/x.ts", block: 1},
+			{from: index, specifier: "../shared/data.json", path: "shared/data.json", file: true, resolved: "shared/data.json", block: 2},
+		}}}
+		s.selectInput("lib")
+		return s
+	}
+	cold, warm := run(false), run(true)
+	// A cold selection hits its own answers too, so the authored files are spelled out.
+	if want := []string{"lib/index.ts", "lib/util.ts", "shared/data.json"}; !slices.Equal(warm.programs["lib"].Files, want) {
+		t.Errorf("lib's program files = %v, want %v without the generated gen/g.ts and gen/tree/x.ts", warm.programs["lib"].Files, want)
+	}
+	if len(cold.importFacts.looked) == 0 || len(sortedSelections(cold)) == 0 {
+		t.Fatalf("the cold selection recorded no lookup or selection: %v %v", cold.importFacts.looked, sortedSelections(cold))
+	}
+	if !reflect.DeepEqual(sortedSelections(warm), sortedSelections(cold)) || !maps.Equal(warm.importFacts.looked, cold.importFacts.looked) ||
+		!maps.Equal(warm.importFacts.programs, cold.importFacts.programs) {
+		t.Errorf("warm selection recorded %v, looked up %v; the cold one records %v, %v",
+			sortedSelections(warm), warm.importFacts.looked, sortedSelections(cold), cold.importFacts.looked)
+	}
+	if !reflect.DeepEqual(warm.packages, cold.packages) {
+		t.Errorf("packages = %v, want the cold selection's %v", warm.packages, cold.packages)
+	}
+	if got, want := warm.programs["lib"], cold.programs["lib"]; !slices.Equal(got.Files, want.Files) || !slices.Equal(got.Edges, want.Edges) ||
+		!slices.Equal(got.candidates, want.candidates) {
+		t.Errorf("lib's program = %v %v, want the cold selection's %v %v", got.Files, got.Edges, want.Files, want.Edges)
+	}
+}

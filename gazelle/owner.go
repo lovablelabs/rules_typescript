@@ -341,7 +341,7 @@ func (s *programStore) selectInputs(ix *resolve.RuleIndex) {
 }
 
 func (s *programStore) generatedProgramFile(c *config.Config, ix *resolve.RuleIndex, file string, scalar bool) bool {
-	if ix == nil || ix != s.index || s.emission == nil {
+	if ix != s.index || s.emission == nil {
 		return s.generatedOutput(ix, file, scalar) || scalar && len(protoOutputProviders(c, ix, file)) > 0
 	}
 	key := generatedKey{c, file, scalar}
