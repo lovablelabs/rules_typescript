@@ -28,7 +28,7 @@ const (
 // the files' bytes follow it in the snapshot file, so a check decodes only this.
 type buildSnapshot struct {
 	Magic string
-	// Walk ties the snapshot to its run record's walked directories.
+	// Walk ties the snapshot to the run record whose snapshotWalk it equals.
 	Walk     string
 	Packages []buildPackage
 	// Loads are the directories the crawl loaded only through deps, each with
@@ -367,7 +367,7 @@ func buildEditFiles(rec *runRecord, packages map[string]*buildPackage, repoRoot 
 // the recorded one; handled is false when anything but BUILD content moved.
 func decideBuildEdit(rec *runRecord, snapFile, repo, repoRoot string, buildNames []string, dirs []string, moved []int, stamps *newest, names *nameReads) (*fastPathDecision, *decline, bool) {
 	snap := loadBuildSnapshot(snapFile)
-	if snap == nil || snap.Walk != rec.walkDigest {
+	if snap == nil || snap.Walk != rec.snapshotWalk {
 		return nil, nil, false
 	}
 	packages := map[string]*buildPackage{}
