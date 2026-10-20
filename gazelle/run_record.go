@@ -49,6 +49,8 @@ const (
 	// git's racy-clean rule: a stamp this close to the run's start may hide a
 	// same-size rewrite within one timestamp tick.
 	racyWindow = 2 * time.Second
+	// File stamps come from the kernel's coarse clock, up to a tick behind time.Now.
+	coarseClockLag = 100 * time.Millisecond
 )
 
 var processStart = time.Now()
@@ -490,8 +492,8 @@ type walkRead struct {
 }
 
 // walkEntry is an entry's fileLine; its stamp is in its directory's. The line
-// is empty where only the entry's own stat says it: a link, a projection, the
-// cache directory, an entry gone mid-read.
+// is empty where only the entry's own stat says it: a link, a BUILD file, a
+// projection, the cache directory, an entry gone mid-read.
 type walkEntry struct{ name, line string }
 
 // read reads all of the record's inputs over one pool. A file or read in a
@@ -642,8 +644,9 @@ func buildEntry(name string, mode fs.FileMode, data []byte) string {
 }
 
 // dirLine names every entry of dir, and stamps is the latest change among
-// its files. A projection lives only inside one listing and the listing cache
-// outside the inputs, so neither counts; a subdirectory counts by name.
+// its files, a BUILD file's only where racyContent says so. A projection
+// lives only inside one listing and the listing cache outside the inputs, so
+// neither counts; a subdirectory counts by name.
 func dirLine(dir string, buildNames []string, skip string) (string, time.Time, error) {
 	line, _, stamp, err := readDirLine(dir, buildNames, skip)
 	return line, stamp, err
@@ -699,6 +702,10 @@ func readDirLine(dir string, buildNames []string, skip string) (string, []walkEn
 				return "", nil, stamp, err
 			}
 			b.WriteString(buildEntry(name, info.Mode(), data) + "\n")
+			if t := changed(info); racyContent(t) {
+				stamp = later(stamp, t)
+			}
+			continue
 		default:
 			fmt.Fprintf(&b, "f %s %s\n", name, line)
 		}
@@ -732,6 +739,12 @@ func fileLine(file string) (string, time.Time) {
 	default:
 		return line + " " + incremental.StatLine(to), later(changed(info), changed(to))
 	}
+}
+
+// racyContent is whether a content-keyed stamp counts toward the racy window: inside
+// the run a write may be undone before the compare, and a whole-second stamp may hide one.
+func racyContent(t time.Time) bool {
+	return t.Nanosecond() == 0 || !t.Before(processStart.Add(-coarseClockLag))
 }
 
 // changed is the later of a file's mtime and ctime.
