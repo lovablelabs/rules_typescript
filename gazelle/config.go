@@ -120,7 +120,7 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 	if s.index != nil {
 		dirInfo = nil
 	}
-	if s.frozen != nil {
+	if s.frozen != nil || dryRun() {
 		s.observeFrozen(pkgs)
 		return
 	}

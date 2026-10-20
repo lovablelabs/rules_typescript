@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -66,6 +67,10 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 	fs.StringVar(&listingInProcessMode, "ts_listing_inproc", "on",
 		"on: list in this process through the typescript-go linked in when tsgo is a release of the same TypeScript version, "+
 			"else through tsgo; verify: also list each through tsgo and fail on any difference; off: always list through tsgo")
+	fs.StringVar(&readsetMode, "ts_readsets", "off",
+		"verify: speculate every completion and first-pass edge resolution with its reads recorded, run it serially as off does, "+
+			"and fail when one whose reads held differs; implies -ts_run_record=off, -ts_resolve_record=off and -ts_fastpath=off. "+
+			"off: resolve serially")
 	fs.StringVar(&parallelMode, "ts_parallel", "on",
 		"with -ts_listing_cache on a full recursive run, on: decode the cached listings on a worker pool ahead of the walk; "+
 			"off: decode each when the walk reaches it; verify: read each again when the walk reaches it and exit on any difference")
@@ -142,6 +147,20 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		return err
 	}
 	s := getConfig(c).programs
+	switch readsetMode {
+	case "off":
+	case "verify":
+		for _, mode := range []string{runRecordMode, resolveRecordMode, fastPathMode} {
+			if mode == "verify" {
+				return fmt.Errorf("-ts_readsets=verify turns off -ts_run_record, -ts_resolve_record and -ts_fastpath, so it cannot verify them")
+			}
+		}
+		// A replay resolves nothing to verify.
+		runRecordMode, resolveRecordMode, fastPathMode = "off", "off", "off"
+		s.verify = &readsetVerifier{specs: map[any]*taskRun{}, tally: map[string]int{}, took: map[string]time.Duration{}}
+	default:
+		return fmt.Errorf("-ts_readsets=%q: want off or verify", readsetMode)
+	}
 	// Only the process that does the work gets past the gate, so a replay decodes nothing.
 	if err := gateOnRunRecord(fs, c, s.fullWalk); err != nil {
 		return err
@@ -611,21 +630,8 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 	r = canonicalRule(c, r)
 	tc := getConfig(c)
 	tc.programs.selectInputs(ix)
-	effective := r
-	if g := tc.programs.emission; g != nil {
-		if f := g.files[from.Pkg]; f != nil {
-			for _, merged := range f.Rules {
-				if canonicalRule(c, merged).Kind() == r.Kind() && merged.Name() == r.Name() {
-					effective = canonicalRule(c, merged)
-					break
-				}
-			}
-		}
-	}
-	if info := tsKinds()[r.Kind()]; len(info.NonEmptyAttrs) > 0 && effective.IsEmpty(info) {
-		return
-	}
-	if effective.PrivateAttr("_ts_scope_candidate") == true {
+	effective, skip := mergedRule(c, r, from)
+	if skip {
 		return
 	}
 	check := func(file string) {
@@ -666,16 +672,33 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 	}
 	if imps, ok := imports.(*protoRuleImports); ok && imps != nil {
 		resolveProtoLibrary(c, ix, r, effective, imps, from)
+		s.emission.stamp(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name))
 		return
 	}
 	if imps, ok := imports.(*ruleImports); ok && imps != nil {
 		sourceRoots := slices.Clone(effective.AttrStrings("srcs"))
-		deps := resolveEdges(c, ix, r, imps, from)
-		retainTestRoots(c, r, from, sourceRoots)
-		if !effective.ShouldKeep() && tc.programs.inputs[from.Pkg].program != nil && managedProgramRule(r, from.Pkg) {
-			tc.programs.completePrograms[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)] = func(cx *programCompletion) {
-				g := tc.programs.emission
-				live := g.rules[emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)]
+		completes := false
+		edges := func() { completes = resolveRuleEdges(c, ix, r, effective, imps, from, sourceRoots) }
+		if s.early != nil {
+			s.verified("first pass", from.String(), s.verify.take(liveRule), edges)
+		} else {
+			// Only the early finish speculates first-pass edges.
+			edges()
+		}
+		if completes {
+			key := emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)
+			s.completePrograms[key] = func(cx *programCompletion) {
+				g := s.emission
+				r, live := r, s.storedRule(key)
+				run := activeRun
+				dry := run != nil && run.dry
+				if dry {
+					r, live = run.own(r, liveRule), run.own(live, live)
+				} else {
+					// A program completed inside this one validates after this one's first edits.
+					g.stamp(key)
+				}
+				reached := len(cx.reached)
 				called := map[string]bool{}
 				sourceOwner := func(dep string) emissionMode {
 					key := emissionLabel(c.RepoName, from.Pkg, dep)
@@ -688,21 +711,54 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 				retainTestRoots(c, r, from, sourceRoots)
 				filename := filepath.Join(c.RepoRoot, filepath.FromSlash(from.Pkg), c.DefaultBuildFileName())
 				rule.MergeRules(r, live, tsKinds()[r.Kind()].ResolveAttrs, filename)
+				if !dry {
+					g.stamp(key)
+				}
 				for _, dep := range live.AttrStrings("deps") {
 					cx.reach(emissionLabel(c.RepoName, from.Pkg, dep))
 				}
 				if imps.srcDrops != nil {
 					imps.srcDrops.report(live)
 				}
-			}
-		} else {
-			retainSourceImporters(c, r, from, imps.program, deps)
-			if imps.srcDrops != nil {
-				imps.srcDrops.report(r)
+				noteOutput(func() []string { return []string{ruleText(r), ruleText(live), strings.Join(cx.reached[reached:], " ")} })
 			}
 		}
 	}
 	if g := getConfig(c).programs.emission; g != nil {
 		g.setResolvedRule(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), liveRule)
 	}
+}
+
+// mergedRule is the BUILD file's rule r merged into, or r, and whether Resolve leaves r as generated.
+func mergedRule(c *config.Config, r *rule.Rule, from label.Label) (*rule.Rule, bool) {
+	effective := r
+	if s := getConfig(c).programs; s.emission != nil {
+		if f := s.buildFile(from.Pkg); f != nil {
+			for _, merged := range f.Rules {
+				if canonicalRule(c, merged).Kind() == r.Kind() && merged.Name() == r.Name() {
+					effective = canonicalRule(c, merged)
+					break
+				}
+			}
+		}
+	}
+	if info := tsKinds()[r.Kind()]; len(info.NonEmptyAttrs) > 0 && effective.IsEmpty(info) {
+		return effective, true
+	}
+	return effective, effective.PrivateAttr("_ts_scope_candidate") == true
+}
+
+// resolveRuleEdges is the first pass's edge resolution of r, and whether a completion finishes r.
+func resolveRuleEdges(c *config.Config, ix *resolve.RuleIndex, r, effective *rule.Rule, imps *ruleImports, from label.Label, sourceRoots []string) bool {
+	deps := resolveEdges(c, ix, r, imps, from)
+	retainTestRoots(c, r, from, sourceRoots)
+	completes := !effective.ShouldKeep() && getConfig(c).programs.inputs[from.Pkg].program != nil && managedProgramRule(r, from.Pkg)
+	if !completes {
+		retainSourceImporters(c, r, from, imps.program, deps)
+		if imps.srcDrops != nil {
+			imps.srcDrops.report(r)
+		}
+	}
+	noteOutput(func() []string { return []string{ruleText(r)} })
+	return completes
 }

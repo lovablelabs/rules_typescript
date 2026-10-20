@@ -45,7 +45,7 @@ func (v *frozenView) later(note func(*programStore)) {
 	v.notes = append(v.notes, note)
 }
 
-type frozenBail struct{}
+type frozenBail struct{ why string }
 
 // Nonzero while workers read frozen views; no other goroutine runs fatal then,
 // as the main one waits and prefetch has stopped.
@@ -53,8 +53,8 @@ var frozenPhase atomic.Int32
 
 // A fatal a worker reaches is the serial pass's to report, in its order.
 func bailIfFrozen() {
-	if frozenPhase.Load() > 0 {
-		panic(frozenBail{})
+	if frozenPhase.Load() > 0 || dryRun() {
+		panic(frozenBail{"fatal"})
 	}
 }
 
@@ -161,7 +161,7 @@ func (s *programStore) observeFrozen(pkgs []string) {
 		for dir := pkg; !seen[dir]; dir = parentDir(dir) {
 			seen[dir] = true
 			if s.loadDir(dir, nil, true) {
-				panic(frozenBail{})
+				panic(frozenBail{"load"})
 			}
 			if dir == "" {
 				break
@@ -205,11 +205,23 @@ type protoRead struct {
 func (s *programStore) observedOutputs(dir string) (*rule.File, *packageOutputs) {
 	f := s.emission.files[dir]
 	var outputs *packageOutputs
+	run := activeRun
 	if f != nil {
+		if run != nil {
+			run.quiet++
+		}
 		outputs = s.packageOutputs(dir, f)
+		if run != nil {
+			run.quiet--
+		}
 	}
 	if s.frozen != nil && s.frozen.reads != nil && s.frozen.reads.dirs != nil {
 		s.frozen.reads.dirs[dir] = outputs
+	}
+	if run != nil && run.dry {
+		if _, seen := run.reads.dirs[dir]; !seen {
+			run.reads.dirs[dir] = outputs
+		}
 	}
 	return f, outputs
 }
