@@ -120,6 +120,13 @@ type ruleBody struct {
 	opaque string
 }
 
+func compareImportSpec(a, b resolve.ImportSpec) int {
+	return cmp.Or(cmp.Compare(a.Lang, b.Lang), cmp.Compare(a.Imp, b.Imp))
+}
+
+// partial is whether the digest leaves out what the rule points to: shared state, or a value it cannot read.
+func (b ruleBody) partial() bool { return b.opaque != "" || len(b.shared) > 0 }
+
 // stateDigest is the state's digest, or why it cannot stand for a replay. It
 // leaves out the directories in outside, which a replay checks by what the phase read of them.
 func (s *programStore) stateDigest(generated []generatedPackage, indexed []importAnswer, outside map[string]dirScope) (digest, refused string) {
@@ -304,9 +311,7 @@ func digestRuleBody(r *rule.Rule) ruleBody {
 		case map[resolve.ImportSpec]bool:
 			d.str(key)
 			d.str("specs")
-			specs := slices.SortedFunc(maps.Keys(v), func(a, b resolve.ImportSpec) int {
-				return cmp.Or(cmp.Compare(a.Lang, b.Lang), cmp.Compare(a.Imp, b.Imp))
-			})
+			specs := slices.SortedFunc(maps.Keys(v), compareImportSpec)
 			each(d, specs, func(spec resolve.ImportSpec) {
 				d.importSpec(spec)
 				d.bool(v[spec])
@@ -770,7 +775,8 @@ func (d *stateHasher) generatedPackage(g generatedPackage) {
 // out: memo is rebuilt once the first Resolve sets index, prefetch is stopped
 // and empty, protoIndex and holdingIndex are memos of the emission rules,
 // frozen is set only on a worker's view, prerefreshed only within selectInputs,
-// and verify only by -ts_readsets=verify, which turns the record off.
+// verify only by -ts_readsets=verify, which turns the record off, and recorder
+// only observes the tasks.
 func (d *stateHasher) store(s *programStore) {
 	d.config(s.repoConfig)
 	d.emission(s.emission)

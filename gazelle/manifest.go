@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -24,7 +25,10 @@ type manifest struct {
 
 // nearestManifest is the package.json at or above dir, the one tsc and node
 // read for every file under dir.
-func (s *programStore) nearestManifest(c *config.Config, dir string) *manifest {
+func (s *programStore) nearestManifest(c *config.Config, dir string) (nearest *manifest) {
+	if recording() {
+		defer func() { ask("manifest", []string{dir}, manifestKey(nearest)) }()
+	}
 	if s.index == nil || s.emission == nil {
 		return s.findNearestManifest(c, dir)
 	}
@@ -118,12 +122,15 @@ func (s *programStore) resolveMetadataIdentity(c *config.Config, file string) in
 }
 
 // Gazelle writes only BUILD files, after every query, so a run sees one source tree.
-func (s *programStore) regularFile(file string) bool {
+func (s *programStore) regularFile(file string) (regular bool) {
+	if recording() {
+		defer func() { ask("regularFile", []string{file}, strconv.FormatBool(regular)) }()
+	}
 	if regular, ok := s.regularFiles[file]; ok {
 		return regular
 	}
 	info, err := statInput(file)
-	regular := err == nil && info.Mode().IsRegular()
+	regular = err == nil && info.Mode().IsRegular()
 	if s.regularFiles == nil {
 		s.regularFiles = map[string]bool{}
 	}

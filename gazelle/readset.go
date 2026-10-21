@@ -27,11 +27,15 @@ type readSet struct {
 	files map[string]fileRead
 	// keysGeneration at a scan of every stored key, or -1; rulesGeneration at a proto index read, or -1.
 	keys, rulesGen int
+	// A recorded run's digests of the key set and proto index as it first read them.
+	keysSum, protoSum [sha256.Size]byte
 }
 
+// fileRead is a BUILD file as read, with a recorded run's digest of it then: the task may write it afterwards.
 type fileRead struct {
 	file  *rule.File
 	rules []*rule.Rule
+	sum   [sha256.Size]byte
 }
 
 type ruleRead struct {
@@ -44,11 +48,19 @@ func newReadSet() *readSet {
 }
 
 // ruleDigest leaves out the selected-imports memo, which reads fill in place with what they would compute.
-func ruleDigest(r *rule.Rule) [sha256.Size]byte {
+func ruleDigest(r *rule.Rule) [sha256.Size]byte { return ruleBodyDigest(r).sum }
+
+func ruleBodyDigest(r *rule.Rule) ruleBody {
 	if r == nil {
-		return [sha256.Size]byte{}
+		return ruleBody{}
 	}
 	view := rule.NewRule(r.Kind(), r.Name())
+	for _, comment := range r.Comments() {
+		view.AddComment(comment)
+	}
+	for _, arg := range r.Args() {
+		view.AddArg(arg)
+	}
 	for _, key := range r.AttrKeys() {
 		view.SetAttr(key, r.Attr(key))
 		if comments := r.AttrComments(key); comments != nil {
@@ -60,7 +72,7 @@ func ruleDigest(r *rule.Rule) [sha256.Size]byte {
 			view.SetPrivateAttr(key, r.PrivateAttr(key))
 		}
 	}
-	return digestRuleBody(view).sum
+	return digestRuleBody(view)
 }
 
 // stale names the first read another task's write has moved since it was recorded.
@@ -106,26 +118,65 @@ func sameProducers(a, b *packageOutputs) bool {
 // buildFile is pkg's BUILD file, which a speculation records reading with its rule list.
 func (s *programStore) buildFile(pkg string) *rule.File {
 	f := s.emission.files[pkg]
-	if run := activeRun; run != nil && run.dry {
+	if run := activeRun; run != nil && run.reads != nil {
 		if _, seen := run.reads.files[pkg]; !seen {
 			var rules []*rule.Rule
 			if f != nil {
 				rules = slices.Clone(f.Rules)
 			}
-			run.reads.files[pkg] = fileRead{f, rules}
+			read := fileRead{file: f, rules: rules}
+			if run.recorder != nil {
+				read.sum = fileDigest(read)
+			}
+			run.reads.files[pkg] = read
 		}
 	}
 	return f
 }
 
-// taskRun is one task's outputs in order: a speculation's, or a verified serial run's.
+type outputKind string
+
+const (
+	writeOutput   outputKind = "write"
+	ownerOutput   outputKind = "owner"
+	reachedOutput outputKind = "reached"
+	logOutput     outputKind = "log"
+	fatalOutput   outputKind = "fatal"
+	factsOutput   outputKind = "facts"
+	// Whether a first-pass edge resolution leaves its rule for a completion.
+	completesOutput outputKind = "completes"
+	// A pending completion an owner call ran inside the task; its reads and outputs are its own entry.
+	completedOutput outputKind = "completed"
+)
+
+// output is one effect of a task. A write sets attribute name of the rule at key to text; an owner call
+// at key answered mode text; a reached output names a label in key; the rest carry their text.
+type output struct {
+	kind            outputKind
+	key, name, text string
+}
+
+func (o output) String() string {
+	return strings.Join(slices.DeleteFunc([]string{string(o.kind), o.key, o.name, o.text}, func(field string) bool { return field == "" }), " ")
+}
+
+// taskRun is one task's outputs in order: a speculation's, or a verified or recorded serial run's.
 type taskRun struct {
-	dry    bool
+	dry bool
+	// Nil in a serial run nothing records.
 	reads  *readSet
 	clones map[*rule.Rule]*rule.Rule
-	out    []string
-	prev   io.Writer
-	bail   string
+	out    []output
+	// What a recorded run asked the oracles fixed within a run, and why no entry may be stored for it, which it
+	// found after asking neverAt questions.
+	logs     *taskLogs
+	asked    *taskQuestions
+	never    string
+	neverAt  uint32
+	recorder *taskRecorder
+	inputs   [sha256.Size]byte
+	prev     io.Writer
+	bail     string
 	// The pending owner a completion's speculation bailed on.
 	waiting string
 	// Time in runs verified inside this one, which the tally counts there.
@@ -142,8 +193,29 @@ var activeRun *taskRun
 
 func dryRun() bool { return activeRun != nil && activeRun.dry }
 
+// bail ends a speculation at an effect only the serial run may have, and keeps a recorded run's task out of the store.
+func bail(why string) {
+	switch run := activeRun; {
+	case run == nil:
+	case run.dry:
+		panic(frozenBail{why})
+	default:
+		run.keepOut(why)
+	}
+}
+
+// keepOut keeps a recorded run's task out of the store, for the first reason found.
+func (run *taskRun) keepOut(why string) {
+	if run.never == "" {
+		run.never = why
+		if run.asked != nil {
+			run.neverAt = run.asked.n
+		}
+	}
+}
+
 // noteOutput records a task's outputs while a run is captured; out is not built otherwise.
-func noteOutput(out func() []string) {
+func noteOutput(out func() []output) {
 	if run := activeRun; run != nil {
 		run.out = append(run.out, out()...)
 	}
@@ -151,7 +223,7 @@ func noteOutput(out func() []string) {
 
 // Write captures a log line, which a speculation holds back.
 func (run *taskRun) Write(p []byte) (int, error) {
-	run.out = append(run.out, "log "+string(p))
+	run.out = append(run.out, output{kind: logOutput, text: string(p)})
 	if run.dry {
 		return len(p), nil
 	}
@@ -161,7 +233,11 @@ func (run *taskRun) Write(p []byte) (int, error) {
 // read records the rule stored at key and answers a speculation's own rules with their clones.
 func (run *taskRun) read(g *emissionGraph, key string, r *rule.Rule) *rule.Rule {
 	if _, seen := run.reads.rules[key]; !seen && run.quiet == 0 {
-		run.reads.rules[key] = ruleRead{g.stamps[key], ruleDigest(r)}
+		sum, opaque := run.recorder.ruleSum(g, key, r)
+		if opaque {
+			run.keepOut("opaque rule")
+		}
+		run.reads.rules[key] = ruleRead{g.stamps[key], sum}
 	}
 	if clone := run.clones[r]; clone != nil {
 		return clone
@@ -206,13 +282,15 @@ func cloneRule(r *rule.Rule) *rule.Rule {
 	return clone
 }
 
-func ruleText(r *rule.Rule) string {
-	var b strings.Builder
-	b.WriteString(r.Kind())
-	for _, key := range r.AttrKeys() {
-		fmt.Fprintf(&b, " %s=%s", key, bzl.FormatString(r.Attr(key)))
+// ruleWrites is the kind and attributes the task leaves on the rule at key.
+func ruleWrites(key string, r *rule.Rule) []output {
+	keys := r.AttrKeys()
+	out := make([]output, 1, len(keys)+1)
+	out[0] = output{kind: writeOutput, key: key, name: "(kind)", text: r.Kind()}
+	for _, attr := range keys {
+		out = append(out, output{kind: writeOutput, key: key, name: attr, text: bzl.FormatString(r.Attr(attr))})
 	}
-	return b.String()
+	return out
 }
 
 // speculateTask runs task with every shared write held back and a load, a fatal or a
@@ -236,13 +314,17 @@ func (s *programStore) speculateTask(task func()) (run *taskRun) {
 }
 
 func (run *taskRun) capture(task func()) {
-	parent := activeRun
-	run.prev = log.Writer()
+	parent, outer := activeRun, log.Writer()
+	// A nested task's lines are its own: they go on to the writer the parent forwards to.
+	run.prev = outer
+	if enclosing, nested := outer.(*taskRun); nested {
+		run.prev = enclosing.prev
+	}
 	activeRun = run
 	log.SetOutput(run)
 	defer func() {
 		activeRun = parent
-		log.SetOutput(run.prev)
+		log.SetOutput(outer)
 	}()
 	task()
 }
@@ -267,14 +349,14 @@ func (v *readsetVerifier) take(key any) *taskRun {
 // verified runs task serially as without -ts_readsets; a speculation of it whose
 // reads still hold must have produced the same outputs.
 func (s *programStore) verified(kind, what string, spec *taskRun, task func()) {
-	if s.verify == nil {
+	if s.verify == nil && s.recorder == nil {
 		task()
 		return
 	}
 	outcome, agreed := kind+" unspeculated", false
-	if spec != nil && spec.bail != "" {
+	if s.verify != nil && spec != nil && spec.bail != "" {
 		outcome = kind + " bail " + spec.bail
-	} else if spec != nil {
+	} else if s.verify != nil && spec != nil {
 		stale, err := spec.reads.stale(s)
 		if err != nil {
 			readsetFailed("typescript: -ts_readsets=verify: %s: %v", what, err)
@@ -285,27 +367,52 @@ func (s *programStore) verified(kind, what string, spec *taskRun, task func()) {
 		}
 	}
 	run := &taskRun{}
+	var before taskEntry
+	var found, held bool
+	if s.recorder != nil {
+		run.reads, run.recorder = newReadSet(), s.recorder
+		run.logs = s.recorder.logs()
+		defer s.recorder.reuse(run.logs)
+		run.asked = questionLogs.Get().(*taskQuestions)
+		before, found, held = s.recorder.previous(s, kind, what)
+	}
 	start := time.Now()
+	s.coldMemos()
 	run.capture(task)
 	took := time.Since(start)
-	s.verify.took[outcome] += took - run.nested
-	s.verify.tally[outcome]++
+	s.coldMemos()
+	if s.verify != nil {
+		s.verify.took[outcome] += took - run.nested
+		s.verify.tally[outcome]++
+	}
 	if activeRun != nil {
 		activeRun.nested += took
 	}
-	if agreed && !slices.Equal(spec.out, run.out) {
-		i := 0
-		for i < min(len(spec.out), len(run.out)) && spec.out[i] == run.out[i] {
-			i++
-		}
-		at := func(out []string) string {
-			if i < len(out) {
-				return out[i]
-			}
-			return "(nothing)"
-		}
-		readsetFailed("typescript: -ts_readsets=verify: %s: a speculation whose reads held differs from the serial run, so its read set misses a read:\nspeculated: %s\nserial:     %s", what, at(spec.out), at(run.out))
+	if s.recorder != nil {
+		s.recorder.inTasks += took - run.nested
+		s.recorder.judge(s.recorder.add(s, kind, what, run), before, found, held, took-run.nested)
 	}
+	if !agreed {
+		return
+	}
+	if was, is, differs := firstDifference(spec.out, run.out); differs {
+		readsetFailed("typescript: -ts_readsets=verify: %s: a speculation whose reads held differs from the serial run, so its read set misses a read:\nspeculated: %s\nserial:     %s", what, was, is)
+	}
+}
+
+// firstDifference spells the first outputs of a and b that differ.
+func firstDifference(a, b []output) (inA, inB string, differs bool) {
+	i := 0
+	for i < min(len(a), len(b)) && a[i] == b[i] {
+		i++
+	}
+	at := func(out []output) string {
+		if i < len(out) {
+			return out[i].String()
+		}
+		return "(nothing)"
+	}
+	return at(a), at(b), i < max(len(a), len(b))
 }
 
 func (v *readsetVerifier) report() {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -593,7 +594,11 @@ func (s *programStore) dataFiles(pkg string, tc *tsConfig) []string {
 }
 
 // nearestPackage is the package at or above dir; "" when there is none.
-func (s *programStore) nearestPackage(dir string) string {
+func (s *programStore) nearestPackage(dir string) (nearest string) {
+	if recording() {
+		start := dir
+		defer func() { ask("nearestPackage", []string{start}, nearest) }()
+	}
 	for ; ; dir = parentDir(dir) {
 		if s.packages[dir] != nil || dir == "" {
 			return dir
@@ -1494,7 +1499,10 @@ func (s *programStore) sourceExportAncestor(pkg string) *rule.File {
 	}
 }
 
-func (s *programStore) bazelPackage(dir string) bool {
+func (s *programStore) bazelPackage(dir string) (inPackage bool) {
+	if recording() {
+		defer func() { ask("bazelPackage", []string{dir}, strconv.FormatBool(inPackage)) }()
+	}
 	if dir == "" {
 		return true
 	}

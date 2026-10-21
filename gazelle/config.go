@@ -124,6 +124,9 @@ func (s *programStore) observeBuilds(pkgs []string, dirInfo ...func(string) (wal
 		s.observeFrozen(pkgs)
 		return
 	}
+	if recording() && s.loadsAny(pkgs) {
+		bail("load")
+	}
 	var info func(string) (walk.DirInfo, error)
 	if len(dirInfo) > 0 {
 		info = dirInfo[0]

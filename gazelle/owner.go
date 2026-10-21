@@ -5,6 +5,7 @@ import (
 	"maps"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -93,7 +94,7 @@ func (s *programStore) selectProgram(c *config.Config, p *program, retained ...s
 				continue
 			}
 			spec := resolve.ImportSpec{Lang: languageName, Imp: file}
-			if _, overridden := resolve.FindRuleWithOverride(c, spec, languageName); overridden &&
+			if _, overridden := findOverride(c, spec, languageName); overridden &&
 				s.inputIdentity(c, s.index, file) != unavailableInput {
 				probe := file
 				if boundary := treeBoundaries[key(candidate)]; boundary != "" && file == candidate.resolved {
@@ -406,12 +407,15 @@ func (s *programStore) packageDirs() []string {
 	return slices.Sorted(maps.Keys(s.packages))
 }
 
-func (s *programStore) owner(f string) (string, bool) {
+func (s *programStore) owner(f string) (pkg string, found bool) {
+	if recording() {
+		defer func() { ask("owner", []string{f}, pkg, strconv.FormatBool(found)) }()
+	}
 	if producer, _ := s.outputProducer(f); producer != nil {
 		return "", false
 	}
 	dir := parentDir(f)
-	if !s.sourceFile(f) || s.generationDisabled(dir) || s.foreign[dir] != "" {
+	if !s.sourceFile(f) || s.generationDisabled(dir) || s.foreignAt(dir) != "" {
 		return "", false
 	}
 	for ; ; dir = parentDir(dir) {
@@ -427,7 +431,11 @@ func (s *programStore) owner(f string) (string, bool) {
 	}
 }
 
-func (s *programStore) sourceFile(f string) bool {
+func (s *programStore) sourceFile(f string) (listed bool) {
+	if run := activeRun; recording() {
+		// The lookup also lands in the import facts, which a replay reproduces by asking again.
+		defer func() { run.asked.sources = append(run.asked.sources, sourceQuestion{f, listed, run.asked.next()}) }()
+	}
 	if !firstParty(f) {
 		return false
 	}
@@ -594,7 +602,10 @@ func (s *programStore) reportUnowned() {
 	}
 }
 
-func (s *programStore) whyUnowned(f string) string {
+func (s *programStore) whyUnowned(f string) (why string) {
+	if recording() {
+		defer func() { ask("whyUnowned", []string{f}, why) }()
+	}
 	dir := parentDir(f)
 	if _, observed := s.dirNames(dir); !observed {
 		return "under " + dir + ", which this run did not walk (excluded or ignored)"
@@ -602,7 +613,7 @@ func (s *programStore) whyUnowned(f string) string {
 	if !s.sourceFile(f) {
 		return "excluded or ignored by Gazelle"
 	}
-	if m := s.foreign[dir]; m != "" {
+	if m := s.foreignAt(dir); m != "" {
 		return "under " + parentDir(m) + ", a project pnpm installs nothing " +
 			"for: " + foreignReason(m)
 	}

@@ -835,7 +835,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if in := runInputs; in != nil {
 		cache, _ := filepath.Abs(listingCacheDir)
 		in.mu.Lock()
-		in.key, in.repoRoot, in.cache, in.buildNames = recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath"), c.RepoRoot, cache, c.ValidBuildFileNames
+		in.key, in.repoRoot, in.cache, in.buildNames = recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath", "ts_memo"), c.RepoRoot, cache, c.ValidBuildFileNames
 		in.mu.Unlock()
 		if exe, err := os.Executable(); err == nil {
 			noteRead(exe)
@@ -855,7 +855,7 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if err := os.MkdirAll(cache, 0o755); err != nil {
 		return err
 	}
-	key := recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath")
+	key := recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath", "ts_memo")
 	file := filepath.Join(cache, runRecordName+"-"+key[:16])
 	// A replay's heap is the record and one stat pass (170 MB on a 22k-source tree); collecting it cost 9 ms of wall.
 	resumeGC := pauseGC(file)
@@ -967,7 +967,7 @@ func promoteRunRecord(candidate, file, key string, buildNames []string, cache st
 		refuse("a walked directory or BUILD file is not writable")
 		return
 	}
-	rec.exit, rec.stdout, rec.stderr = 0, stdout, stderr
+	rec.exit, rec.stdout, rec.stderr = 0, stdout, withoutMemoLines(stderr)
 	data, err := rec.encode()
 	if err == nil {
 		err = writeAtomically(file, data)
@@ -1151,7 +1151,22 @@ func argsWith(fs *flag.FlagSet, flags ...string) []string {
 	if at > 0 && args[at-1] == "--" {
 		at--
 	}
-	return slices.Insert(args, at, flags...)
+	return slices.Insert(args, at, slices.Concat(flags, []string{"-ts_memo=off"})...)
+}
+
+func isMemoLine(line string) bool {
+	return strings.Contains(line, "typescript: -ts_memo=") || strings.Contains(line, "typescript: memo store:")
+}
+
+// withoutMemoLines drops -ts_memo's lines, which tell of the run that printed them and of no replay of it.
+func withoutMemoLines(stderr []byte) []byte {
+	var out []byte
+	for line := range bytes.Lines(stderr) {
+		if !isMemoLine(string(line)) {
+			out = append(out, line...)
+		}
+	}
+	return out
 }
 
 // logLines is a log's lines without the caches' own, in an order that does
@@ -1160,7 +1175,8 @@ func logLines(log []byte) []string {
 	var out []string
 	for line := range strings.SplitSeq(string(log), "\n") {
 		if line != "" && !strings.Contains(line, "typescript: listing cache") && !strings.Contains(line, "typescript: run record:") &&
-			!strings.Contains(line, "typescript: resolve record:") && !strings.Contains(line, "typescript: fast path:") {
+			!strings.Contains(line, "typescript: resolve record:") && !strings.Contains(line, "typescript: fast path:") &&
+			!isMemoLine(line) {
 			out = append(out, line)
 		}
 	}

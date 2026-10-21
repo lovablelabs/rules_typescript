@@ -371,7 +371,7 @@ func protoProvider(c *config.Config, ix *resolve.RuleIndex, root, imp string) []
 	s := tc.protos
 	spec := resolve.ImportSpec{Lang: "proto", Imp: imp}
 	native := map[label.Label]bool{}
-	if overridden, ok := resolve.FindRuleWithOverride(c, spec, "proto"); ok {
+	if overridden, ok := findOverride(c, spec, "proto"); ok {
 		for _, node := range s.graph.providers(c, imp) {
 			native[s.graph.labels[node.Label]] = true
 		}
@@ -381,10 +381,10 @@ func protoProvider(c *config.Config, ix *resolve.RuleIndex, root, imp string) []
 	} else {
 		var found []resolve.FindResult
 		if tc.programs.frozen == nil {
-			found = ix.FindRulesByImportWithConfig(c, spec, "proto")
+			found = findRules(ix, c, spec, "proto")
 		} else {
 			// Other languages' cross-resolvers are not ours to run off the main goroutine; the commit asks them.
-			found = ix.FindRulesByImport(spec, "proto")
+			found = findRules(ix, nil, spec, "proto")
 		}
 		for _, provider := range found {
 			native[absoluteProtoLabel(c, provider.Label, "")] = true
@@ -419,7 +419,7 @@ func protoWrapperProviders(c *config.Config, ix *resolve.RuleIndex, root string,
 	s := getConfig(c).programs
 	spec := resolve.ImportSpec{Lang: languageName, Imp: protoWrapperKey(root, native)}
 	providers := map[label.Label]resolve.FindResult{}
-	for _, provider := range ix.FindRulesByImport(spec, languageName) {
+	for _, provider := range findRules(ix, nil, spec, languageName) {
 		providers[provider.Label] = provider
 	}
 	if index := s.protoProviderIndex(); index != nil {
@@ -438,18 +438,21 @@ type protoIndex struct {
 	wrappers        map[resolve.ImportSpec][]label.Label
 }
 
-func (s *programStore) protoProviderIndex() *protoIndex {
+func (s *programStore) protoProviderIndex() (index *protoIndex) {
 	g := s.emission
 	if g == nil {
 		return nil
 	}
-	if run := activeRun; run != nil && run.dry && run.reads.rulesGen < 0 {
+	if run := activeRun; run != nil && run.reads != nil && run.reads.rulesGen < 0 {
 		run.reads.rulesGen = g.rulesGeneration
+		if run.recorder != nil {
+			defer func() { run.reads.protoSum = run.recorder.protoIndexSum(index) }()
+		}
 	}
 	if s.protoIndex != nil && s.protoIndex.emission == g && s.protoIndex.rulesGeneration == g.rulesGeneration {
 		return s.protoIndex
 	}
-	index := &protoIndex{emission: g, rulesGeneration: g.rulesGeneration,
+	index = &protoIndex{emission: g, rulesGeneration: g.rulesGeneration,
 		natives: map[resolve.ImportSpec][]label.Label{}, wrappers: map[resolve.ImportSpec][]label.Label{}}
 	for key, r := range g.rules {
 		if r == nil {

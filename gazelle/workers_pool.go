@@ -30,14 +30,18 @@ const (
 var wranglerLiteral = regexp.MustCompile(
 	"[\"'`]([^\"'`]*wrangler[\\w.-]*\\.(?:jsonc|json|toml))[\"'`]")
 
-func (s *programStore) wranglerConfigOf(c *config.Config, cfg string) (string, error) {
+func (s *programStore) wranglerConfigOf(c *config.Config, cfg string) (file string, err error) {
+	if recording() {
+		defer func() { ask("wranglerConfig", []string{cfg}, file) }()
+	}
 	if s.generatedFile(cfg, true) {
 		return "", nil
 	}
 	if file, done := s.wranglerConfigs[cfg]; done {
 		return file, nil
 	}
-	file := ""
+	// The first lookup of a config fills the cache and logs what is wrong with it, which a later one does not repeat.
+	bail("first log")
 	switch names := wranglerLiterals(filepath.Join(c.RepoRoot, cfg)); {
 	case len(names) == 0:
 	case len(names) > 1:
@@ -45,7 +49,6 @@ func (s *programStore) wranglerConfigOf(c *config.Config, cfg string) (string, e
 			"is staged as wrangler_config", cfg, len(names),
 			strings.Join(names, ", "))
 	default:
-		var err error
 		file, err = s.wranglerConfigIn(c, cfg, names[0])
 		if err != nil {
 			return "", err
@@ -185,9 +188,12 @@ func workersPoolImport(c *config.Config, tc *tsConfig, r *rule.Rule, cfg string,
 	return true
 }
 
-func workersPoolResolution(lock *npmLock, owner string, from label.Label) string {
+func workersPoolResolution(lock *npmLock, owner string, from label.Label) (resolution string) {
 	if lock == nil {
 		return ""
+	}
+	if recording() {
+		defer func() { ask("lock.workersPool", []string{owner, from.Repo, from.Pkg}, resolution) }()
 	}
 	importer, err := label.Parse(owner)
 	if err != nil {

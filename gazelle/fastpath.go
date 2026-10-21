@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -322,6 +323,7 @@ func (r *importFactsRecorder) selection(key string, edges bool, unreached []stri
 		s.Selected = append(s.Selected, candidateKey{From: r.id(k.from), Specifier: k.specifier, Block: k.block})
 	}
 	r.facts.Selections = append(r.facts.Selections, s)
+	noteOutput(func() []output { return []output{{kind: factsOutput, name: "selection", text: r.selectionText(s)}} })
 }
 
 type candidateKeyText struct {
@@ -358,6 +360,76 @@ func (rc *resolveCall) end() {
 	rc.r.mu.Lock()
 	defer rc.r.mu.Unlock()
 	rc.r.facts.Resolves = append(rc.r.facts.Resolves, rc.facts)
+	noteOutput(func() []output {
+		return []output{{kind: factsOutput, name: "resolve", text: rc.r.resolveText(rc.facts)}}
+	})
+}
+
+// names spells ids as sorted file names, which the ids do not keep in order across runs; the caller holds mu.
+func (r *importFactsRecorder) names(ids []int32) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = r.facts.Files[id]
+	}
+	slices.Sort(out)
+	return out
+}
+
+// The named* types spell a facts fragment with file names for the ids, which only the run that recorded them knows.
+type namedOutcome struct {
+	To, Dep                 string
+	Source, Owned, Conflict bool
+}
+
+type namedWalk struct {
+	Listing                        string
+	Config                         bool
+	Initial, Reached, ReachedStore []string
+	Outcomes                       []namedOutcome
+}
+
+type namedCandidate struct {
+	From, Specifier string
+	Block           int
+}
+
+func (r *importFactsRecorder) resolveText(f resolveFacts) string {
+	walks := make([]namedWalk, len(f.Walks))
+	for i, w := range f.Walks {
+		outcomes := make([]namedOutcome, len(w.Outcomes))
+		for j, o := range w.Outcomes {
+			outcomes[j] = namedOutcome{r.facts.Files[o.To], o.Dep, o.Source, o.Owned, o.Conflict}
+		}
+		slices.SortFunc(outcomes, func(a, b namedOutcome) int { return cmp.Compare(a.To, b.To) })
+		walks[i] = namedWalk{w.Listing, w.Config, r.names(w.Initial), r.names(w.Reached), r.names(w.ReachedStore), outcomes}
+	}
+	return factsJSON(struct {
+		Unconditional []string
+		Walks         []namedWalk
+	}{f.Unconditional, walks})
+}
+
+func (r *importFactsRecorder) selectionText(s selectionFacts) string {
+	chosen := make([]namedCandidate, len(s.Selected))
+	for i, k := range s.Selected {
+		chosen[i] = namedCandidate{r.facts.Files[k.From], k.Specifier, k.Block}
+	}
+	slices.SortFunc(chosen, func(a, b namedCandidate) int {
+		return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.Specifier, b.Specifier), cmp.Compare(a.Block, b.Block))
+	})
+	return factsJSON(struct {
+		Listing   string
+		Unreached []string
+		Selected  []namedCandidate
+	}{s.Listing, r.names(s.Unreached), chosen})
+}
+
+func factsJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 // walkRecord is one walk being recorded; normalize spells a dep as the walking rule's deps are keyed.

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -104,6 +105,30 @@ func isBareSpecifier(spec string) bool {
 		!strings.Contains(spec, ":")
 }
 
+// linksTo is whether an importer links dir as a workspace member.
+func (l *npmLock) linksTo(dir string) (linked bool) {
+	if recording() {
+		defer func() { ask("lock.linksTo", []string{dir}, strconv.FormatBool(linked)) }()
+	}
+	for _, imp := range l.importers {
+		for _, linkedDir := range imp.links {
+			if linkedDir == dir {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isMember is whether the lockfile names a workspace member by name.
+func (l *npmLock) isMember(name string) bool {
+	member := l.members[name] != ""
+	if recording() {
+		ask("lock.isMember", []string{name}, strconv.FormatBool(member))
+	}
+	return member
+}
+
 // importerAbove is the nearest importer at or above dir; "" is the root.
 func (l *npmLock) importerAbove(dir string) string {
 	for ; dir != ""; dir = parentDir(dir) {
@@ -122,7 +147,10 @@ func (l *npmLock) nodeModulesLabel(pkg string) string {
 }
 
 // declaring is the nearest importer at or above dir that declares name.
-func (l *npmLock) declaring(name, dir string) (string, bool) {
+func (l *npmLock) declaring(name, dir string) (imp string, ok bool) {
+	if recording() {
+		defer func() { ask("lock.declaring", []string{name, dir}, imp, strconv.FormatBool(ok)) }()
+	}
 	return l.importerDeclaring(name, dir, false)
 }
 
@@ -146,7 +174,11 @@ func (l *npmLock) importerDeclaring(name, dir string, member bool) (string, bool
 // importer on the chain above dir that declares it, the root last.
 func (l *npmLock) label(name, dir string) string {
 	imp, _ := l.declaring(name, dir)
-	return "@npm//" + imp + ":" + npmPackageToLabelName(name)
+	lbl := "@npm//" + imp + ":" + npmPackageToLabelName(name)
+	if recording() {
+		ask("lock.label", []string{name, dir}, lbl)
+	}
+	return lbl
 }
 
 // typesPackage is the @types package a `/// <reference types>` names:
@@ -176,12 +208,17 @@ func (l *npmLock) chainTypesLabel(e explainfiles.Edge, pkg string) string {
 
 // memberView is the member a bare specifier from file names, spelled by
 // memberLabel; the nearest manifest's own name is a self-reference, no view.
-func (l *npmLock) memberView(spec, file, pkg string, m *manifest) (string, bool) {
+func (l *npmLock) memberView(spec, file, pkg string, m *manifest) (view string, ok bool) {
+	if recording() {
+		defer func() {
+			ask("lock.memberView", []string{spec, file, pkg, manifestKey(m)}, view, strconv.FormatBool(ok))
+		}()
+	}
 	name := l.memberName(spec, m)
 	if name == "" {
 		return "", false
 	}
-	view := l.memberLabel(name, parentDir(file), pkg)
+	view = l.memberLabel(name, parentDir(file), pkg)
 	return view, view != ""
 }
 
@@ -199,7 +236,10 @@ func (l *npmLock) memberName(spec string, m *manifest) string {
 	return name
 }
 
-func (l *npmLock) memberLabel(name, origin, pkg string) string {
+func (l *npmLock) memberLabel(name, origin, pkg string) (lbl string) {
+	if recording() {
+		defer func() { ask("lock.memberLabel", []string{name, origin, pkg}, lbl) }()
+	}
 	if dir, ok := l.importerDeclaring(name, origin, true); ok {
 		if l.importers[dir].links[name] != "" {
 			return label.New("", dir, "node_modules/"+name).Rel("", pkg).String()
@@ -213,7 +253,10 @@ func (l *npmLock) memberLabel(name, origin, pkg string) string {
 
 // edgeLabel is the label an edge into node_modules takes: the chain's @types
 // for a store file's, else the lockfile's name for the specifier or the file.
-func (l *npmLock) edgeLabel(e explainfiles.Edge, pkg string, m *manifest) string {
+func (l *npmLock) edgeLabel(e explainfiles.Edge, pkg string, m *manifest) (lbl string) {
+	if recording() {
+		defer func() { ask("lock.edgeLabel", edgeArgs(e, pkg, m), lbl) }()
+	}
 	if !firstParty(e.From) {
 		return l.chainTypesLabel(e, pkg)
 	}
@@ -239,7 +282,12 @@ func (l *npmLock) edgeName(e explainfiles.Edge) string {
 	return name
 }
 
-func (l *npmLock) runtimePackage(e explainfiles.Edge, m *manifest, generated bool) (string, bool) {
+func (l *npmLock) runtimePackage(e explainfiles.Edge, m *manifest, generated bool) (pkgName string, linked bool) {
+	if recording() {
+		defer func() {
+			ask("lock.runtimePackage", append(edgeArgs(e, "", m), strconv.FormatBool(generated)), pkgName, strconv.FormatBool(linked))
+		}()
+	}
 	if !e.Kind.ModuleSpecifier() || !isBareSpecifier(e.Specifier) || !isDeclarationFile(e.To) && !generated {
 		return "", false
 	}
@@ -253,7 +301,12 @@ func (l *npmLock) runtimePackage(e explainfiles.Edge, m *manifest, generated boo
 	return "", false
 }
 
-func (l *npmLock) edgeImporter(e explainfiles.Edge, m *manifest, pkg string, generated bool) (string, bool) {
+func (l *npmLock) edgeImporter(e explainfiles.Edge, m *manifest, pkg string, generated bool) (importer string, required bool) {
+	if recording() {
+		defer func() {
+			ask("lock.edgeImporter", append(edgeArgs(e, pkg, m), strconv.FormatBool(generated)), importer, strconv.FormatBool(required))
+		}()
+	}
 	if !firstParty(e.From) {
 		return "", false
 	}

@@ -94,6 +94,7 @@ type programStore struct {
 	early            *earlyFinish
 	frozen           *frozenView
 	verify           *readsetVerifier
+	recorder         *taskRecorder
 	prerefreshed     map[refreshKey][]*refreshJob
 	// Parsed owner BUILD files, filled and read only during the walk, which writes no BUILD file.
 	ownerBuildFiles map[string]*rule.File
@@ -928,7 +929,10 @@ func listVitestConfig(repoRoot, tsgo, cfg string,
 	return runListing(repoRoot, tsgo, cfg, args)
 }
 
-func (s *programStore) configProgram(repoRoot, cfg string) *program {
+func (s *programStore) configProgram(repoRoot, cfg string) (p *program) {
+	if recording() {
+		defer func() { ask("vitest program", []string{cfg}, s.recorder.programSum(p)) }()
+	}
 	if s.generatedFile(cfg, true) {
 		return nil
 	}
@@ -943,7 +947,7 @@ func (s *programStore) configProgram(repoRoot, cfg string) *program {
 	if err != nil {
 		fatalf("typescript: %s: %v", cfg, err)
 	}
-	p, err := listVitestConfig(repoRoot, tsgo, cfg)
+	p, err = listVitestConfig(repoRoot, tsgo, cfg)
 	if err != nil {
 		fatalf("typescript: %v", err)
 	}
@@ -970,9 +974,7 @@ func (s *programStore) requireInstall(repoRoot string) {
 	if s.installChecked {
 		return
 	}
-	if dryRun() {
-		panic(frozenBail{"install check"})
-	}
+	bail("install check")
 	s.installChecked = true
 	if why := installMissing(repoRoot); why != "" {
 		fatalf("typescript: %s", why)

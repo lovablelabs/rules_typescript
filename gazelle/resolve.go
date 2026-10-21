@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -271,7 +272,7 @@ func codegenTreeOwner(s *programStore, ix *resolve.RuleIndex, imp string) (resol
 func (s *programStore) indexedTree(ix *resolve.RuleIndex, dir string) (resolve.FindResult, bool) {
 	lookup := func() (resolve.FindResult, bool) {
 		spec := resolve.ImportSpec{Lang: languageName, Imp: codegenTreeKey(dir)}
-		for _, r := range ix.FindRulesByImport(spec, languageName) {
+		for _, r := range findRules(ix, nil, spec, languageName) {
 			return r, true
 		}
 		return resolve.FindResult{}, false
@@ -387,13 +388,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 	tc.programs.requireInstall(c.RepoRoot)
 	linkedMember := false
 	if tc.lock != nil && r.Kind() == "ts_compile" && r.Name() == packageName(from.Pkg) {
-		for _, importer := range tc.lock.importers {
-			for _, dir := range importer.links {
-				if dir == from.Pkg {
-					linkedMember = true
-				}
-			}
-		}
+		linkedMember = tc.lock.linksTo(from.Pkg)
 	}
 	memberEmission := opaqueEmission
 	if linkedMember && len(sourceOwner) > 0 {
@@ -492,7 +487,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					importer := ""
 					if npm.Repo == "npm" {
 						importer = label.New(from.Repo, npm.Pkg, nodeModulesTargetName).Rel(from.Repo, from.Pkg).String()
-					} else if tc.lock != nil && tc.lock.members[barePackageName(e.Specifier)] != "" &&
+					} else if tc.lock != nil && tc.lock.isMember(barePackageName(e.Specifier)) &&
 						sourceLabelIdentity(npm, language.GenerateArgs{Config: c, Rel: from.Pkg}).Repo == from.Repo &&
 						npm.Name == nodeModulesTargetName+"/"+barePackageName(e.Specifier) {
 						importer = dep
@@ -950,6 +945,9 @@ type inputFilesEntry struct {
 // storedInputFiles is programInputFiles of a stored owner in pkg; callers must not mutate the map.
 func (s *programStore) storedInputFiles(pkg string, owner *rule.Rule) map[resolve.ImportSpec]inputRole {
 	c := s.inputs[pkg].config
+	if recording() {
+		s.recorder.noteConfig(c, pkg)
+	}
 	lists := make([][]string, len(inputAttrs))
 	for i, attr := range inputAttrs {
 		lists[i] = owner.AttrStrings(attr)
@@ -1630,9 +1628,7 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 		}
 		if tc.lock == nil {
 			if !s.noLockSaid {
-				if dryRun() {
-					panic(frozenBail{"first log"})
-				}
+				bail("first log")
 				s.noLockSaid = true
 				log.Printf("typescript: no %s at the repository root, so no hub "+
 					"declares an npm package; npm imports get no dep", pnpmLockfileName)
@@ -1694,6 +1690,9 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 		if !file {
 			st, err := statSourceInput(filepath.Join(c.RepoRoot, filepath.FromSlash(e.To)))
 			file = err == nil && st.Mode().IsRegular()
+			if recording() {
+				ask("regular file", []string{e.To}, strconv.FormatBool(file))
+			}
 		}
 		if file {
 			if !isDeclarationFile(e.To) && !slices.Contains([]string{".ts", ".tsx", ".js", ".mjs", ".cjs", ".json"}, path.Ext(e.To)) {
@@ -1724,7 +1723,10 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 }
 
 // The listing names a declaration, never its same-stem twin; only an explicit export makes the twin a runtime input.
-func (s *programStore) exportedTo(c *config.Config, file string, consumer label.Label) bool {
+func (s *programStore) exportedTo(c *config.Config, file string, consumer label.Label) (exported bool) {
+	if recording() {
+		defer func() { ask("exportedTo", []string{file, consumer.String()}, strconv.FormatBool(exported)) }()
+	}
 	if s.emission == nil || !s.sourceFile(file) {
 		return false
 	}
@@ -1733,16 +1735,16 @@ func (s *programStore) exportedTo(c *config.Config, file string, consumer label.
 	}
 	pkg := configSrcPackage(getConfig(c), file, "")
 	name := strings.TrimPrefix(file, pkg+"/")
-	visibility, exported, err := s.sourceVisibility(c, s.emission.files[pkg], name)
+	visibility, shown, err := s.sourceVisibility(c, s.emission.files[pkg], name)
 	if err != nil {
 		fatalf("typescript: %s cannot retain %s beside its declaration: %v. Did you mean to use literal source exports with visibility for the consuming package?", consumer, file, err)
 	}
-	return exported && !scopeVisibilityDenies(visibility, label.New(consumer.Repo, pkg, name), consumer)
+	return shown && !scopeVisibilityDenies(visibility, label.New(consumer.Repo, pkg, name), consumer)
 }
 
 func generatedDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig, file string, from label.Label) (string, bool) {
 	spec := resolve.ImportSpec{Lang: languageName, Imp: file}
-	if overridden, ok := resolve.FindRuleWithOverride(c, spec, languageName); ok {
+	if overridden, ok := findOverride(c, spec, languageName); ok {
 		identity := tc.programs.inputIdentity(c, ix, file)
 		if identity != unavailableInput {
 			return relativeLabel(overridden, from.Repo, from.Pkg).String(), identity == generatedInput
@@ -1823,7 +1825,7 @@ func selectedRuleImports(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, 
 		}
 		dir := parentDir(spec.Imp)
 		nearest := s.nearestPackage(dir)
-		if !within(spec.Imp, pkg) || nearest != pkg && !dirIsAncestorOf(nearest, pkg) || !s.sourceFile(spec.Imp) || s.foreign[dir] != "" {
+		if !within(spec.Imp, pkg) || nearest != pkg && !dirIsAncestorOf(nearest, pkg) || !s.sourceFile(spec.Imp) || s.foreignAt(dir) != "" {
 			continue
 		}
 		if ignored(s.buildFile(dir)) || s.generationDisabled(dir) {
@@ -1860,6 +1862,7 @@ func ruleHolding(c *config.Config, ix *resolve.RuleIndex, spec resolve.ImportSpe
 		if !selected {
 			imports = selectedRuleImports(s.inputs[found.Label.Pkg].config, ix, owner, found.Label.Pkg)
 		}
+		s.noteSelected(found.Label.Pkg, owner, imports)
 		if imports[spec] {
 			return true
 		}
@@ -1869,7 +1872,7 @@ func ruleHolding(c *config.Config, ix *resolve.RuleIndex, spec resolve.ImportSpe
 		role, present := s.storedInputFiles(found.Label.Pkg, owner)[spec]
 		return present && role != sourceRole && role <= required
 	}
-	owners := slices.DeleteFunc(ix.FindRulesByImport(spec, languageName), func(found resolve.FindResult) bool { return !eligible(found) })
+	owners := slices.DeleteFunc(findRules(ix, nil, spec, languageName), func(found resolve.FindResult) bool { return !eligible(found) })
 	if len(owners) == 0 && s.emission != nil {
 		index := s.storedHoldings(c.RepoName)
 		candidates := [][]resolve.FindResult{index.compilers[scopePackage]}
@@ -1908,11 +1911,14 @@ type holdingIndex struct {
 	selves          map[label.Label][]resolve.FindResult
 }
 
-func (s *programStore) storedHoldings(repo string) *holdingIndex {
+func (s *programStore) storedHoldings(repo string) (h *holdingIndex) {
 	g := s.emission
 	if run := activeRun; run != nil {
-		if run.dry && run.reads.keys < 0 {
+		if run.reads != nil && run.reads.keys < 0 {
 			run.reads.keys = g.keysGeneration
+			if run.recorder != nil {
+				defer func() { run.reads.keysSum = run.recorder.holdingsSum(h) }()
+			}
 		}
 		run.quiet++
 		defer func() { run.quiet-- }()
@@ -1920,7 +1926,7 @@ func (s *programStore) storedHoldings(repo string) *holdingIndex {
 	if h := s.holdingIndex; h != nil && h.emission == g && h.rulesGeneration == g.rulesGeneration && h.repo == repo {
 		return h
 	}
-	h := &holdingIndex{emission: g, rulesGeneration: g.rulesGeneration, repo: repo,
+	h = &holdingIndex{emission: g, rulesGeneration: g.rulesGeneration, repo: repo,
 		compilers: map[string][]resolve.FindResult{}, selves: map[label.Label][]resolve.FindResult{}}
 	for key := range g.rules {
 		lbl, err := parseLabel(key)
@@ -1978,7 +1984,8 @@ var pendingFatal struct {
 // reports the same fatal whatever order it walks programs and edges in.
 func deferFatal(program label.Label, file, edge, message string) {
 	if run := activeRun; run != nil {
-		run.out = append(run.out, "fatal "+message)
+		run.out = append(run.out, output{kind: fatalOutput, text: message})
+		run.keepOut("fatal")
 		if run.dry {
 			return
 		}

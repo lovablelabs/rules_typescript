@@ -156,18 +156,26 @@ func (s *programStore) preselectInput(dir string, stamp selectionStamp) *presele
 
 // observeFrozen bails unless loading pkgs would write nothing.
 func (s *programStore) observeFrozen(pkgs []string) {
+	if s.loadsAny(pkgs) {
+		panic(frozenBail{"load"})
+	}
+}
+
+// loadsAny is whether loading pkgs and their ancestors would write.
+func (s *programStore) loadsAny(pkgs []string) bool {
 	seen := map[string]bool{}
 	for _, pkg := range pkgs {
 		for dir := pkg; !seen[dir]; dir = parentDir(dir) {
 			seen[dir] = true
 			if s.loadDir(dir, nil, true) {
-				panic(frozenBail{"load"})
+				return true
 			}
 			if dir == "" {
 				break
 			}
 		}
 	}
+	return false
 }
 
 // programRefresh is a package's program rules, merged again once the index is complete.
@@ -218,7 +226,7 @@ func (s *programStore) observedOutputs(dir string) (*rule.File, *packageOutputs)
 	if s.frozen != nil && s.frozen.reads != nil && s.frozen.reads.dirs != nil {
 		s.frozen.reads.dirs[dir] = outputs
 	}
-	if run != nil && run.dry {
+	if run != nil && run.reads != nil {
 		if _, seen := run.reads.dirs[dir]; !seen {
 			run.reads.dirs[dir] = outputs
 		}

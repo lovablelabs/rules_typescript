@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,6 +129,13 @@ func (rec *resolveRecorder) noteOutsideTree(s *programStore, root string) {
 func (s *programStore) dirNames(dir string) ([]string, bool) {
 	s.noteOutside(dir)
 	names, ok := s.files[dir]
+	if run := activeRun; recording() {
+		key := dirNamesKey{namesOf(dir, names), ok}
+		if _, asked := run.logs.dirs[key]; !asked {
+			run.logs.dirs[key] = struct{}{}
+			ask("dirNames", []string{dir}, s.recorder.namesSum(dir, names), strconv.FormatBool(ok))
+		}
+	}
 	return names, ok
 }
 
@@ -135,6 +143,9 @@ func (s *programStore) dirNames(dir string) ([]string, bool) {
 func (s *programStore) dirWalked(dir string) (bool, bool) {
 	s.noteOutside(dir)
 	walked, observed := s.walked[dir]
+	if recording() {
+		ask("dirWalked", []string{dir}, strconv.FormatBool(walked), strconv.FormatBool(observed))
+	}
 	return walked, observed
 }
 
@@ -239,7 +250,7 @@ func resolveRecordFile(fs *flag.FlagSet, c *config.Config) (file, key, cache str
 	if cache, err = filepath.Abs(listingCacheDir); err != nil {
 		return "", "", "", fmt.Errorf("-ts_listing_cache: %w", err)
 	}
-	key = recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_fastpath", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
+	key = recordKey(resolveRecordMagic, fs, c, "ts_run_record", "ts_resolve_record", "ts_fastpath", "ts_memo", "ts_listing_cache", "ts_listing_patch_verify", "ts_parallel", "cpuprofile", "memprofile", "trace")
 	return filepath.Join(cache, resolveRecordName+"-"+key[:16]), key, cache, nil
 }
 
@@ -569,7 +580,7 @@ func (s *programStore) captureTracked() []recordedFile {
 func phaseLines(logged []byte) []string {
 	var out []string
 	for line := range strings.SplitSeq(string(logged), "\n") {
-		if strings.Contains(line, "typescript: ") && !strings.Contains(line, "typescript: resolve record:") {
+		if strings.Contains(line, "typescript: ") && !strings.Contains(line, "typescript: resolve record:") && !isMemoLine(line) {
 			out = append(out, line)
 		}
 	}

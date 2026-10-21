@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,17 +111,17 @@ func TestReadSet_StaleNamesTheWriteThatMovedARecordedRead(t *testing.T) {
 // Not parallel: speculation captures the process-wide log and deferred fatals.
 func TestReadSet_SpeculationWritesNothingAndBailsOnWhatOnlyTheSerialRunMayDo(t *testing.T) {
 	s := readsetStore(t)
-	before, stamp := ruleText(s.emission.rules["//lib"]), s.emission.stamps["//lib"]
+	before, stamp := ruleWrites("//lib", s.emission.rules["//lib"]), s.emission.stamps["//lib"]
 	pending, _ := deferredFatalMessage()
 	run := s.speculateTask(func() {
 		lib := s.emission.rules["//lib"]
 		activeRun.own(lib, lib).SetAttr("deps", []string{"//app"})
 		selectedRuleImports(s.inputs["app"].config, nil, s.emission.rules["//app"], "app")
 		deferFatal(label.New("", "lib", "lib"), "lib/l.ts", "app/a.ts", "held back")
-		noteOutput(func() []string { return []string{ruleText(s.semanticRule("//lib"))} })
+		noteOutput(func() []output { return ruleWrites("//lib", s.semanticRule("//lib")) })
 	})
-	if after := ruleText(s.emission.rules["//lib"]); after != before || s.emission.stamps["//lib"] != stamp {
-		t.Fatalf("speculation wrote the store: %s (stamp %d), want %s (stamp %d)", after, s.emission.stamps["//lib"], before, stamp)
+	if after := ruleWrites("//lib", s.emission.rules["//lib"]); !slices.Equal(after, before) || s.emission.stamps["//lib"] != stamp {
+		t.Fatalf("speculation wrote the store: %v (stamp %d), want %v (stamp %d)", after, s.emission.stamps["//lib"], before, stamp)
 	}
 	if memo := s.emission.rules["//app"].PrivateAttr("_ts_selected_imports"); memo != nil {
 		t.Fatalf("speculation stored the selected imports memo %v on //app", memo)
@@ -128,7 +129,7 @@ func TestReadSet_SpeculationWritesNothingAndBailsOnWhatOnlyTheSerialRunMayDo(t *
 	if message, _ := deferredFatalMessage(); message != pending {
 		t.Fatalf("speculation deferred %q for the run", message)
 	}
-	if read := run.out[len(run.out)-1]; !strings.Contains(read, `deps=["//app"]`) {
+	if read := run.out[len(run.out)-1].String(); !strings.Contains(read, `deps ["//app"]`) {
 		t.Fatalf("speculation read %q through the store, want its own clone's deps", read)
 	}
 	for _, c := range []struct {
@@ -156,14 +157,16 @@ func TestReadSet_VerifyFailsOnlyWhenHeldReadsGaveDifferentOutputs(t *testing.T) 
 	var failed string
 	readsetFailed = func(format string, a ...any) { failed = fmt.Sprintf(format, a...) }
 	t.Cleanup(func() { readsetFailed = log.Fatalf })
-	output := func(out string) func() { return func() { noteOutput(func() []string { return []string{out} }) } }
+	logging := func(out string) func() {
+		return func() { noteOutput(func() []output { return []output{{kind: logOutput, text: out}} }) }
+	}
 	for _, c := range []struct {
 		name, serial, tally, failure string
 		write                        func(s *programStore)
 		bail                         bool
 	}{
 		{name: "reads held and the outputs agree", serial: "a", tally: "completion agreed"},
-		{name: "reads held and the outputs differ", serial: "b", tally: "completion agreed", failure: "speculated: a\nserial:     b"},
+		{name: "reads held and the outputs differ", serial: "b", tally: "completion agreed", failure: "speculated: log a\nserial:     log b"},
 		{name: "a read moved and the outputs differ", serial: "b", tally: "completion conflict rule", write: func(s *programStore) {
 			s.emission.setRule("//lib", rule.NewRule("ts_compile", "lib"))
 		}},
@@ -175,7 +178,7 @@ func TestReadSet_VerifyFailsOnlyWhenHeldReadsGaveDifferentOutputs(t *testing.T) 
 			s.verify = &readsetVerifier{specs: map[any]*taskRun{}, tally: map[string]int{}, took: map[string]time.Duration{}}
 			spec := s.speculateTask(func() {
 				s.semanticRule("//lib")
-				output("a")()
+				logging("a")()
 				if c.bail {
 					fatalf("unreachable")
 				}
@@ -183,7 +186,7 @@ func TestReadSet_VerifyFailsOnlyWhenHeldReadsGaveDifferentOutputs(t *testing.T) 
 			if c.write != nil {
 				c.write(s)
 			}
-			s.verified("completion", "//lib", spec, output(c.serial))
+			s.verified("completion", "//lib", spec, logging(c.serial))
 			if s.verify.tally[c.tally] != 1 || !strings.Contains(failed, c.failure) || (c.failure == "") != (failed == "") {
 				t.Fatalf("tally %v, failure %q; want one %q and failure %q", s.verify.tally, failed, c.tally, c.failure)
 			}

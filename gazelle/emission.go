@@ -3,11 +3,11 @@ package typescript
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -331,13 +331,17 @@ func (s *programStore) semanticRule(key string) *rule.Rule {
 	if err != nil {
 		return r
 	}
-	return canonicalRule(s.inputs[own.Pkg].config, r)
+	c := s.inputs[own.Pkg].config
+	if recording() {
+		s.recorder.noteConfig(c, own.Pkg)
+	}
+	return canonicalRule(c, r)
 }
 
 // storedRule is the rule stored at key, which a speculation records reading.
 func (s *programStore) storedRule(key string) *rule.Rule {
 	r := s.emission.rules[key]
-	if run := activeRun; run != nil && run.dry {
+	if run := activeRun; run != nil && run.reads != nil {
 		return run.read(s.emission, key, r)
 	}
 	return r
@@ -468,9 +472,12 @@ func runtimeDependencies(r *rule.Rule) ([]string, string) {
 	return dependencies, ""
 }
 
-func (l *npmLock) memberCompilerTarget(repo, key string) string {
+func (l *npmLock) memberCompilerTarget(repo, key string) (target string) {
 	if l == nil || !strings.HasPrefix(key, "@npm//:") {
 		return ""
+	}
+	if recording() {
+		defer func() { ask("lock.memberCompilerTarget", []string{repo, key}, target) }()
 	}
 	if l.memberLabels == nil {
 		l.memberLabels = map[string]string{}
@@ -527,6 +534,12 @@ func (s *programStore) recordEmissionConsumers(c *config.Config, pkg string) {
 
 func (l *tsLang) AfterResolvingDeps(_ context.Context) {
 	defer func() {
+		var rec *taskRecorder
+		if l.programs != nil {
+			rec = l.programs.recorder
+		}
+		rec.startStore()
+		defer rec.waitStore()
 		logListingCache()
 		if in := runInputs; in != nil && l.programs != nil {
 			facts := l.programs.importFacts.seal()
@@ -721,6 +734,9 @@ func (l *tsLang) finishRules() {
 	if l.programs.verify != nil {
 		l.programs.verify.report()
 	}
+	if l.programs.recorder != nil {
+		l.programs.recorder.report()
+	}
 	exitOnDeferredFatal()
 	l.programs.exportPackageScopes()
 	for key, r := range g.rules {
@@ -768,10 +784,15 @@ type programCompletion struct {
 	reached []string
 }
 
-// reach notes that the completion reached key.
+// reach notes that the completion reached key, an output of the task running it.
 func (cx *programCompletion) reach(key string) {
+	if run := activeRun; recording() && !run.logs.rooted[cx.rooted] {
+		run.logs.rooted[cx.rooted] = true
+		ask("rooted", nil, strconv.FormatBool(cx.rooted))
+	}
 	if cx.rooted {
 		cx.reached = append(cx.reached, key)
+		noteOutput(func() []output { return []output{{kind: reachedOutput, key: key}} })
 	}
 }
 
@@ -786,7 +807,11 @@ func (cx *programCompletion) ownerMode(key string) emissionMode {
 	if cx.rooted {
 		promoted = cx.promotion(key, target)
 	}
-	if complete := cx.s.completePrograms[target]; complete != nil {
+	complete := cx.s.completePrograms[target]
+	if recording() {
+		noteOwnerState(ownerAnswer{target: target, holds: complete != nil})
+	}
+	if complete != nil {
 		if dryRun() {
 			activeRun.waiting = target
 			panic(frozenBail{"pending owner"})
@@ -795,14 +820,16 @@ func (cx *programCompletion) ownerMode(key string) emissionMode {
 		if promoted != nil {
 			promoted.SetAttr("emit", true)
 			cx.s.emission.stamp(target)
+			noteOutput(func() []output { return []output{{kind: writeOutput, key: target, name: "emit", text: "True"}} })
 		}
 		cx.s.complete(target, complete, cx)
+		noteOutput(func() []output { return []output{{kind: completedOutput, key: target}} })
 	}
 	mode := ruleEmission(owner)
 	if promoted != nil {
 		mode = emittedEmission
 	}
-	noteOutput(func() []string { return []string{fmt.Sprintf("owner %s %d", key, mode)} })
+	noteOutput(func() []output { return []output{{kind: ownerOutput, key: key, text: strconv.Itoa(int(mode))}} })
 	return mode
 }
 
@@ -831,7 +858,10 @@ func (s *programStore) speculatePending(repo string, rooted bool, seen map[strin
 }
 
 // promotion is the rule visiting key sets emit = True on, when that rule is the owner target.
-func (cx *programCompletion) promotion(key, target string) *rule.Rule {
+func (cx *programCompletion) promotion(key, target string) (promoted *rule.Rule) {
+	if recording() {
+		defer func() { noteOwnerState(ownerAnswer{promotion: true, key: key, target: target, holds: promoted != nil}) }()
+	}
 	g := cx.s.emission
 	if g == nil || g.lock.memberCompilerTarget(cx.repo, key) != "" || g.lock.memberCompilerTarget(cx.repo, target) != "" {
 		return nil
@@ -964,9 +994,7 @@ func (s *programStore) publishPackageScope(c *config.Config, scope string, consu
 	if !s.generatedPackages[pkg] || r == nil || r.PrivateAttr("_ts_scope_candidate") != true {
 		return
 	}
-	if dryRun() {
-		panic(frozenBail{"package scope"})
-	}
+	bail("package scope")
 	defer s.emission.stamp(key)
 	scopes := r.AttrStrings("package_scopes")
 	source := strings.TrimPrefix(scope, pkg+"/")

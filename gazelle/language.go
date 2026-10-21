@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,10 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 		"verify: speculate every completion and first-pass edge resolution with its reads recorded, run it serially as off does, "+
 			"and fail when one whose reads held differs; implies -ts_run_record=off, -ts_resolve_record=off and -ts_fastpath=off. "+
 			"off: resolve serially")
+	fs.StringVar(&memoMode, "ts_memo", "off",
+		"record: keep what each completion and first-pass edge resolution read, asked and did as data, tally them, and with -ts_listing_cache "+
+			"store them for the next full pass; verify: also compare each task whose stored reads still hold with its stored outputs and fail on a difference; "+
+			"off: keep nothing; a run the run record or fast path replays makes no tasks and prints no tally")
 	fs.StringVar(&parallelMode, "ts_parallel", "on",
 		"with -ts_listing_cache on a full recursive run, on: decode the cached listings on a worker pool ahead of the walk; "+
 			"off: decode each when the walk reaches it; verify: read each again when the walk reaches it and exit on any difference")
@@ -161,6 +166,16 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	default:
 		return fmt.Errorf("-ts_readsets=%q: want off or verify", readsetMode)
 	}
+	switch memoMode {
+	case "off":
+	case "record", "verify":
+		if memoMode == "verify" && listingCacheDir == "" {
+			return fmt.Errorf("-ts_memo=verify compares with the last pass's store, which -ts_listing_cache keeps")
+		}
+		s.recorder = newTaskRecorder(memoMode == "verify")
+	default:
+		return fmt.Errorf("-ts_memo=%q: want off, record or verify", memoMode)
+	}
 	// Only the process that does the work gets past the gate, so a replay decodes nothing.
 	if err := gateOnRunRecord(fs, c, s.fullWalk); err != nil {
 		return err
@@ -169,6 +184,9 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		return err
 	}
 	traceRun("full pass")
+	if err := s.recorder.openStore(fs, c, s.fullWalk); err != nil {
+		return err
+	}
 	if listingCacheDir != "" && parallelMode != "off" && s.fullWalk {
 		predecodes.start(listingCacheDir, parallelMode == "verify")
 	}
@@ -679,7 +697,7 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 		sourceRoots := slices.Clone(effective.AttrStrings("srcs"))
 		completes := false
 		edges := func() { completes = resolveRuleEdges(c, ix, r, effective, imps, from, sourceRoots) }
-		if s.early != nil {
+		if s.early != nil || s.recorder != nil {
 			s.verified("first pass", from.String(), s.verify.take(liveRule), edges)
 		} else {
 			// Only the early finish speculates first-pass edges.
@@ -698,13 +716,13 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 					// A program completed inside this one validates after this one's first edits.
 					g.stamp(key)
 				}
-				reached := len(cx.reached)
 				called := map[string]bool{}
 				sourceOwner := func(dep string) emissionMode {
 					key := emissionLabel(c.RepoName, from.Pkg, dep)
 					called[key] = true
 					return cx.ownerMode(key)
 				}
+				noteInputs(c, r, live, imps, from)
 				deps := resolveEdges(c, ix, r, imps, from, sourceOwner)
 				removeSuppliedProgramInputs(c, r, from, sourceRoots, sourceOwner, called, deps)
 				retainSourceImporters(c, r, from, imps.program, deps)
@@ -720,7 +738,7 @@ func (l *tsLang) resolveRule(c *config.Config, ix *resolve.RuleIndex, r *rule.Ru
 				if imps.srcDrops != nil {
 					imps.srcDrops.report(live)
 				}
-				noteOutput(func() []string { return []string{ruleText(r), ruleText(live), strings.Join(cx.reached[reached:], " ")} })
+				noteOutput(func() []output { return ruleWrites(key, live) })
 			}
 		}
 	}
@@ -750,15 +768,22 @@ func mergedRule(c *config.Config, r *rule.Rule, from label.Label) (*rule.Rule, b
 
 // resolveRuleEdges is the first pass's edge resolution of r, and whether a completion finishes r.
 func resolveRuleEdges(c *config.Config, ix *resolve.RuleIndex, r, effective *rule.Rule, imps *ruleImports, from label.Label, sourceRoots []string) bool {
+	noteInputs(c, r, effective, imps, from)
 	deps := resolveEdges(c, ix, r, imps, from)
 	retainTestRoots(c, r, from, sourceRoots)
-	completes := !effective.ShouldKeep() && getConfig(c).programs.inputs[from.Pkg].program != nil && managedProgramRule(r, from.Pkg)
+	program := getConfig(c).programs.inputs[from.Pkg].program != nil
+	if recording() {
+		ask("program", []string{from.Pkg}, strconv.FormatBool(program))
+	}
+	completes := !effective.ShouldKeep() && program && managedProgramRule(r, from.Pkg)
 	if !completes {
 		retainSourceImporters(c, r, from, imps.program, deps)
 		if imps.srcDrops != nil {
 			imps.srcDrops.report(r)
 		}
 	}
-	noteOutput(func() []string { return []string{ruleText(r)} })
+	noteOutput(func() []output {
+		return append(ruleWrites(emissionLabel(c.RepoName, from.Pkg, ":"+from.Name), r), output{kind: completesOutput, text: strconv.FormatBool(completes)})
+	})
 	return completes
 }

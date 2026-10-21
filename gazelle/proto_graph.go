@@ -85,7 +85,7 @@ func (g *protoGraph) providers(c *config.Config, imp string) []*protoGraphNode {
 	if g == nil {
 		return nil
 	}
-	if override, ok := resolve.FindRuleWithOverride(c, resolve.ImportSpec{Lang: "proto", Imp: imp}, "proto"); ok {
+	if override, ok := findOverride(c, resolve.ImportSpec{Lang: "proto", Imp: imp}, "proto"); ok {
 		normalized := g.normalize(override)
 		if override.Repo != "" && override.Repo != c.RepoName && !normalized.Canonical {
 			fatalf("typescript proto graph: apparent override %s is not a declared graph root; use its canonical native label", override.String())
