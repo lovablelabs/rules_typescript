@@ -769,7 +769,8 @@ func (d *stateHasher) generatedPackage(g generatedPackage) {
 // store digests every field Resolve and AfterResolvingDeps may read. Left
 // out: memo is rebuilt once the first Resolve sets index, prefetch is stopped
 // and empty, protoIndex and holdingIndex are memos of the emission rules,
-// frozen is set only on a worker's view, and prerefreshed only within selectInputs.
+// frozen is set only on a worker's view, prerefreshed only within selectInputs,
+// and verify only by -ts_readsets=verify, which turns the record off.
 func (d *stateHasher) store(s *programStore) {
 	d.config(s.repoConfig)
 	d.emission(s.emission)
@@ -824,8 +825,8 @@ func (d *stateHasher) store(s *programStore) {
 }
 
 // emission leaves out its memos and the counters that stamp them: versions,
-// epoch, listEpoch, outputsGeneration, rulesGeneration, outputIndex,
-// registered and the crawl memo.
+// epoch, listEpoch, outputsGeneration, rulesGeneration, keysGeneration, stamps,
+// clock, outputIndex, registered and the crawl memo.
 func (d *stateHasher) emission(g *emissionGraph) {
 	if g == nil {
 		d.int(0)

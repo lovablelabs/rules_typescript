@@ -97,7 +97,7 @@ func declaredSourceImports(c *config.Config, r *rule.Rule, f *rule.File,
 			producerFile = nil
 			s.observeBuild(src.Pkg, dirInfo...)
 			if s.emission != nil {
-				producerFile = s.emission.files[src.Pkg]
+				producerFile = s.buildFile(src.Pkg)
 			}
 			if producerFile == nil && len(dirInfo) > 0 {
 				if info, err := dirInfo[0](src.Pkg); err == nil {
@@ -468,7 +468,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 		_, identity := sourceInputLabel(c, from, file)
 		return identity
 	}
-	file := tc.programs.emission.files[from.Pkg]
+	file := tc.programs.buildFile(from.Pkg)
 	if file == nil {
 		file = &rule.File{Pkg: from.Pkg}
 	}
@@ -719,7 +719,7 @@ func retainSourceImporters(c *config.Config, r *rule.Rule, from label.Label, p *
 	if tc.lock == nil {
 		return
 	}
-	file := tc.programs.emission.files[from.Pkg]
+	file := tc.programs.buildFile(from.Pkg)
 	if file == nil {
 		file = &rule.File{Pkg: from.Pkg}
 	}
@@ -962,7 +962,7 @@ func (s *programStore) storedInputFiles(pkg string, owner *rule.Rule) map[resolv
 		return e.inputs
 	}
 	entry := inputFilesEntry{emission: g, rulesGeneration: g.rulesGeneration, lists: lists}
-	file := g.files[pkg]
+	file := s.buildFile(pkg)
 	if file == nil {
 		file = &rule.File{Pkg: pkg}
 	}
@@ -1520,8 +1520,7 @@ func (f *fixedSupply) drop(candidate string) bool {
 // called holds every key this sourceOwner has seen; a repeated call promotes and completes nothing.
 func removeSuppliedProgramInputs(c *config.Config, r *rule.Rule, from label.Label, roots []string, sourceOwner func(string) emissionMode, called map[string]bool, deps map[string]dependencyRequirement) {
 	s := getConfig(c).programs
-	g := s.emission
-	file := g.files[from.Pkg]
+	file := s.buildFile(from.Pkg)
 	if file == nil {
 		file = &rule.File{Pkg: from.Pkg}
 	}
@@ -1631,6 +1630,9 @@ func edgeDep(c *config.Config, ix *resolve.RuleIndex, tc *tsConfig,
 		}
 		if tc.lock == nil {
 			if !s.noLockSaid {
+				if dryRun() {
+					panic(frozenBail{"first log"})
+				}
 				s.noLockSaid = true
 				log.Printf("typescript: no %s at the repository root, so no hub "+
 					"declares an npm package; npm imports get no dep", pnpmLockfileName)
@@ -1795,7 +1797,7 @@ func keptRuleImports(c *config.Config, r *rule.Rule, file *rule.File) []resolve.
 func selectedRuleImports(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, pkg string) map[resolve.ImportSpec]bool {
 	r = canonicalRule(c, r)
 	s := getConfig(c).programs
-	file := s.emission.files[pkg]
+	file := s.buildFile(pkg)
 	if file == nil {
 		file = &rule.File{Pkg: pkg}
 	}
@@ -1824,12 +1826,14 @@ func selectedRuleImports(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule, 
 		if !within(spec.Imp, pkg) || nearest != pkg && !dirIsAncestorOf(nearest, pkg) || !s.sourceFile(spec.Imp) || s.foreign[dir] != "" {
 			continue
 		}
-		if ignored(s.emission.files[dir]) || s.generationDisabled(dir) {
+		if ignored(s.buildFile(dir)) || s.generationDisabled(dir) {
 			continue
 		}
 		imports[spec] = true
 	}
-	r.SetPrivateAttr("_ts_selected_imports", imports)
+	if !dryRun() {
+		r.SetPrivateAttr("_ts_selected_imports", imports)
+	}
 	return imports
 }
 
@@ -1906,6 +1910,13 @@ type holdingIndex struct {
 
 func (s *programStore) storedHoldings(repo string) *holdingIndex {
 	g := s.emission
+	if run := activeRun; run != nil {
+		if run.dry && run.reads.keys < 0 {
+			run.reads.keys = g.keysGeneration
+		}
+		run.quiet++
+		defer func() { run.quiet-- }()
+	}
 	if h := s.holdingIndex; h != nil && h.emission == g && h.rulesGeneration == g.rulesGeneration && h.repo == repo {
 		return h
 	}
@@ -1966,6 +1977,12 @@ var pendingFatal struct {
 // deferFatal records a fatal edge and lets the pass continue, so the run
 // reports the same fatal whatever order it walks programs and edges in.
 func deferFatal(program label.Label, file, edge, message string) {
+	if run := activeRun; run != nil {
+		run.out = append(run.out, "fatal "+message)
+		if run.dry {
+			return
+		}
+	}
 	f := deferredFatal{program.String(), file, edge, message}
 	pendingFatal.Lock()
 	defer pendingFatal.Unlock()
