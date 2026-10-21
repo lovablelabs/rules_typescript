@@ -405,6 +405,77 @@ func rename(t *testing.T, from, to string) {
 	}
 }
 
+// A BUILD file's entry holds its content, so only its change during the run counts toward the racy window.
+func TestRunRecord_ABuildFileInsideTheRacyWindowCountsByContent(t *testing.T) {
+	savedStart := processStart
+	t.Cleanup(func() { processStart, loadedListings = savedStart, sync.Map{} })
+	loadedListings = sync.Map{}
+	if _, stamp := fileLine(filepath.Join(writeTree(t, map[string]string{"probe": ""}), "probe")); stamp.Nanosecond() == 0 {
+		t.Skip("the file system stamps whole seconds, which keep every BUILD file racy")
+	}
+	const build = "# a BUILD file\n"
+	write := func(rel, body string) func(string) {
+		return func(root string) { writeFile(t, filepath.Join(root, rel), body) }
+	}
+	for _, tc := range []struct {
+		name                              string
+		tree                              map[string]string
+		readByName                        bool
+		beforeRun, duringRun, afterRecord func(root string)
+		replays                           bool
+	}{
+		{name: "a BUILD file rewritten with its content before the run", beforeRun: write("app/BUILD.bazel", build), replays: true},
+		{name: "a BUILD file read by its name, rewritten with its content before the run", readByName: true, beforeRun: write("app/BUILD.bazel", build)},
+		{name: "a source written inside the window", tree: map[string]string{"app/a.ts": "export {};\n"}},
+		{name: "a BUILD file rewritten with other content after the record", afterRecord: write("app/BUILD.bazel", "# another\n")},
+		{name: "a BUILD file written and restored during the run", duringRun: func(root string) {
+			write("app/BUILD.bazel", "# another\n")(root)
+			write("app/BUILD.bazel", build)(root)
+		}},
+	} {
+		root := writeTree(t, map[string]string{"app/BUILD.bazel": build})
+		writeWorkspace(t, root, tc.tree)
+		app, buildNames := filepath.Join(root, "app"), []string{"BUILD.bazel"}
+		file := filepath.Join(t.TempDir(), runRecordName)
+		// 50 ms keeps each phase past one tick of the coarse ctime clock.
+		time.Sleep(50 * time.Millisecond)
+		if tc.beforeRun != nil {
+			tc.beforeRun(root)
+		}
+		time.Sleep(50 * time.Millisecond)
+		processStart = time.Now().Add(coarseClockLag)
+		time.Sleep(50 * time.Millisecond)
+		line, _, err := dirLine(app, buildNames, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{}
+		if tc.readByName {
+			files[filepath.Join(app, "BUILD.bazel")], _ = fileLine(filepath.Join(app, "BUILD.bazel"))
+		}
+		rec, why := (&inputSet{files: files, dirs: map[string]*dirSnapshot{"app": {abs: app, line: line}}, key: "k", repoRoot: root}).candidate()
+		if why != "" {
+			t.Fatalf("%s: no candidate: %s", tc.name, why)
+		}
+		data, err := rec.encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, file+".candidate", string(data))
+		if tc.duringRun != nil {
+			tc.duringRun(root)
+		}
+		promoteRunRecord(file+".candidate", file, "k", buildNames, "", nil, nil)
+		if tc.afterRecord != nil {
+			tc.afterRecord(root)
+		}
+		kept := loadRunRecord(file)
+		if replays := kept != nil && kept.matches(buildNames, "", nil); replays != tc.replays {
+			t.Errorf("%s: the record replays: %t; want %t", tc.name, replays, tc.replays)
+		}
+	}
+}
+
 // Gazelle 2 lets a language configure only in Configure, after recordableRun
 // read c.Exts; the run must still refuse to record its unrecorded inputs.
 func TestRunRecord_ALanguageConfiguringAfterCheckFlagsIsNeverRecorded(t *testing.T) {
