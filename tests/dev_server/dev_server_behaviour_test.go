@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -346,6 +347,42 @@ func TestDevServerBehaviour(t *testing.T) {
 					t.Fatalf("member-only's own `member-dep` import resolved to nothing:\n%s\n%s", resolved.body, srv.log(t))
 				}
 				served(transitive).contains(t, srv, "MEMBER_TRANSITIVE_STORE")
+			}
+		})
+		t.Run("workspace_member_copy_maps_to_its_source", func(t *testing.T) {
+			const pkg = "tests/npm/dev_inherited_types"
+			ws := t.TempDir()
+			app := filepath.Join(ws, filepath.FromSlash(pkg))
+			mkdir(t, app)
+			mkdir(t, filepath.Join(ws, "bazel-bin"))
+			copied, err := filepath.EvalSymlinks(tree.Path("tests/npm/node_modules/.pnpm/shared@0.0.0/node_modules/shared/package.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := filepath.ToSlash(filepath.Dir(copied))
+			realWorkspace, err := filepath.EvalSymlinks(ws)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{store: filepath.ToSlash(filepath.Join(realWorkspace, "packages", "shared"))}
+			write(t, filepath.Join(app, "index.html"), "MEMBER_SOURCES")
+			write(t, filepath.Join(app, "entry.ts"), `export { tagline } from "shared";`)
+			srv := start(t, tree.File(pkg+"/member_sources_dev_launcher").Abs(), ws, t.TempDir())
+			base := srv.awaitHTTP(t, "/index.html")
+			entry := get(t, base, "/entry.ts")
+			if member := get(t, base, importURL(t, entry.body, "index.js", "")); member.status != 200 {
+				t.Fatalf("the member's copy returned HTTP %d: %s\n%s", member.status, member.body, srv.log(t))
+			}
+			var seen struct {
+				Sources     map[string]string
+				Transformed []string
+			}
+			got := get(t, base, "/member-sources")
+			if err := json.Unmarshal([]byte(got.body), &seen); err != nil || !maps.Equal(seen.Sources, want) {
+				t.Errorf("a plugin read BAZEL_MEMBER_SOURCES %s (%v), want %v\n%s", got.body, err, want, srv.log(t))
+			}
+			if !slices.ContainsFunc(seen.Transformed, func(id string) bool { return strings.HasPrefix(id, store+"/") }) {
+				t.Errorf("no module id the plugin transformed lies under the member's store %s: %v", store, seen.Transformed)
 			}
 		})
 		t.Run("checkout_install_cannot_shadow_member_npm_binding", func(t *testing.T) {

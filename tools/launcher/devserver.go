@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,6 +121,13 @@ func planDevServer(cfg *Config, r *Resolver, plan *Plan, args []string) (*Plan, 
 	appRoot := filepath.Join(workspace, filepath.FromSlash(d.PackageDir))
 	plan.Dir = appRoot
 	plan.setEnv("BUILD_WORKSPACE_DIRECTORY", workspace)
+	if len(d.Members) > 0 {
+		sources, err := memberSources(r, workspace, d.Members)
+		if err != nil {
+			return nil, fmt.Errorf("ts_dev_server: %s cannot locate a workspace member's store: %w", cfg.Label, err)
+		}
+		plan.setEnv("BAZEL_MEMBER_SOURCES", sources)
+	}
 
 	// A server whose argv names the port takes the override there; one that reads
 	// it from the config still gets it appended, which is where it looked before.
@@ -187,6 +195,30 @@ func planDevServer(cfg *Config, r *Resolver, plan *Plan, args []string) (*Plan, 
 	// that and pick the new .js up through its watcher, so only Ctrl-C stops it.
 	plan.Supervise = SuperviseOptions{IgnoreTerm: true, ExitZeroOnInterrupt: true, TerminateOnInterrupt: true}
 	return plan, nil
+}
+
+// memberSources is BAZEL_MEMBER_SOURCES: each member's store directory -> its
+// source directory, both as the real paths a server's module ids carry, as JSON.
+func memberSources(r *Resolver, workspace string, members map[string]string) (string, error) {
+	workspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", err
+	}
+	sources := make(map[string]string, len(members))
+	for store, source := range members {
+		dir, err := r.Path(store)
+		if err != nil {
+			return "", err
+		}
+		// A runfiles tree may link a store tree's files one by one.
+		manifest, err := filepath.EvalSymlinks(filepath.Join(dir, "package.json"))
+		if err != nil {
+			return "", err
+		}
+		sources[filepath.ToSlash(filepath.Dir(manifest))] = filepath.ToSlash(filepath.Join(workspace, filepath.FromSlash(source)))
+	}
+	encoded, err := json.Marshal(sources)
+	return string(encoded), err
 }
 
 // anchorNodeModules links the importer's node_modules in as <workspace>/
