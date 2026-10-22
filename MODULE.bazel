@@ -165,6 +165,17 @@ crate.annotation(
     repositories = ["oj_crates"],
     version = "0.2.44",
 )
+
+# Vite's resolveId order for oj: bare imports go to pre plugins before oj's own
+# resolver, in the browser and in SSR, and this.resolve runs it where Vite runs
+# vite:resolve, pre-bundle included. Carried until an oj release ships it.
+crate.annotation(
+    crate = "oj_server",
+    patch_args = ["-p1"],
+    patches = ["//oj:oj-server-pre-resolve-id.patch"],
+    repositories = ["oj_crates"],
+    version = "0.2.44",
+)
 crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
     crate = "oj",
