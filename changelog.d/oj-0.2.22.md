@@ -23,8 +23,3 @@
   The V8, deno_core and Cranelift pins are unchanged. Three oj patches are
   dropped because oj ships their changes: `fs.watch` dispatch (0.2.17),
   plugin-resolved file HMR (0.2.19) and the code cache bound (0.2.20).
-  `oj/oj-server-scan-outside-plugin-host.patch` stays: on a large
-  Cloudflare/TanStack Start app the time-sliced in-host scan still runs past
-  the optimizer's 120 s deadline, and the deadline stops the plugin host's
-  JavaScript mid-hook, so SSR requests in flight fail. The scan runs in the
-  optimizer job with rolldown's own resolver instead.

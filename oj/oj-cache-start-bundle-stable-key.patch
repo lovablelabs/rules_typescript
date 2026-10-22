@@ -1,16 +1,16 @@
 diff --git a/src/start_bundle/mod.rs b/src/start_bundle/mod.rs
-index edb0969..f903f34 100644
+index ec80949..7d89b54 100644
 --- a/src/start_bundle/mod.rs
 +++ b/src/start_bundle/mod.rs
-@@ -220,6 +220,7 @@ impl StartBundleStore {
+@@ -247,6 +247,7 @@ impl StartBundleStore {
              let _ = fs::remove_dir_all(&current_dir);
              return Err(Miss::ClosureUnreadable);
          };
 +        let files = self.key_closure(files);
-         let memo = read_memo(&current_dir);
-         let (digests, rehashed) = verified_digests(&files, memo.as_ref());
-         let key = self.key_from(&files, &digests)?;
-@@ -309,6 +310,21 @@ impl StartBundleStore {
+         let read: std::collections::HashSet<&Path> = files.iter().map(PathBuf::as_path).collect();
+         if let Some(added) = glob_members(&current_dir.join(GLOB_SCOPES_FILE))
+             .into_iter()
+@@ -346,6 +347,21 @@ impl StartBundleStore {
          Ok(())
      }
  
@@ -25,7 +25,7 @@ index edb0969..f903f34 100644
 +        let real = fs::canonicalize(cache).ok();
 +        files
 +            .into_iter()
-+            .filter(|p| !p.starts_with(cache) && !real.as_ref().is_some_and(|r| p.starts_with(r)))
++            .filter(|p| !p.starts_with(cache) && !real.as_deref().is_some_and(|r| p.starts_with(r)))
 +            .collect()
 +    }
 +

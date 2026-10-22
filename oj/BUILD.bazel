@@ -28,10 +28,7 @@ exports_files([
     "deno-snapshots-source.patch",
     "napi-symbol-bytes.patch",
     "oj-cache-start-bundle-stable-key.patch",
-    "oj-js-parked-watchdog-grace.patch",
     "oj-napi-link.patch",
-    "oj-server-restart-startup-env.patch",
-    "oj-server-scan-outside-plugin-host.patch",
     "v8-output-dir.patch",
     "sqlite-build-script-path.patch",
 ])
