@@ -102,6 +102,9 @@ type DevServerConfig struct {
 	RunsInJsRuntime bool     `json:"runs_in_js_runtime,omitempty"`
 	Plugin          string   `json:"plugin,omitempty"`
 	UserConfig      string   `json:"user_config,omitempty"`
+	// Members maps each workspace member's store tree, a runfiles path, to its
+	// source directory from the workspace root.
+	Members map[string]string `json:"members,omitempty"`
 	// ScratchDir is this target's directory under bazel-bin, where a dev server
 	// that insists on writing somewhere is pointed instead of the source tree.
 	ScratchDir string `json:"scratch_dir,omitempty"`

@@ -2261,3 +2261,30 @@ func fixturePlan(t *testing.T, cfg *Config, r *Resolver, entries map[string]stri
 	}
 	return MakePlan(cfg, r, args, shard)
 }
+
+func TestMemberSourcesKeysAStoreLinkedFileByFileByItsRealDirectory(t *testing.T) {
+	r, links := fakeRunfiles(t, map[string]string{"_main/node_modules/.pnpm/ui@0.0.0/node_modules/ui": dirMarker})
+	store := t.TempDir()
+	if err := os.WriteFile(filepath.Join(store, "package.json"), []byte(`{"name":"ui"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(store, "package.json"), filepath.Join(links["_main/node_modules/.pnpm/ui@0.0.0/node_modules/ui"], "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := memberSources(r, ws, map[string]string{"_main/node_modules/.pnpm/ui@0.0.0/node_modules/ui": "packages/ui"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	realStore, err := filepath.EvalSymlinks(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := json.Marshal(map[string]string{filepath.ToSlash(realStore): filepath.ToSlash(filepath.Join(ws, "packages", "ui"))})
+	if got != string(want) {
+		t.Errorf("BAZEL_MEMBER_SOURCES = %s, want the store's real directory as the key: %s", got, want)
+	}
+}

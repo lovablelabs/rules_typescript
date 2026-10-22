@@ -251,6 +251,14 @@ ts_dev_server(
     node_modules = ":member_node_modules",
 )
 
+# keep
+ts_dev_server(
+    name = "member_sources_dev",
+    entry_point = ":member_entry",
+    node_modules = ":member_node_modules",
+    vite_config = "member_sources.vite.mjs",
+)
+
 previous_dev_npm_owner(
     name = "previous_member_entry",
     dep = ":member_entry",

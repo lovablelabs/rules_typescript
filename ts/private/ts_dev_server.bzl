@@ -76,6 +76,7 @@ def _generate_dev_config(
         declared_files,
         npm_contexts,
         npm_views,
+        members,
         user_config_rl = ""):
     """Generates a vite.config.mjs for dev server mode.
 
@@ -100,6 +101,8 @@ def _generate_dev_config(
             so the config can watch the one it is running under.
         server_input_js: The JavaScript, from _server_config_input_js, that adds
             the selected dev server to configInputs.
+        members: dict of package name -> struct(store, source), from
+            _workspace_members.
         user_config_rl: Runfiles-tree-relative path to the bin copy of the
             user-supplied Vite plugin config, or empty string if there is none.
             When set, the generated config dynamically imports it and prepends
@@ -475,6 +478,15 @@ def _generate_dev_config(
         "\n"
     )
 
+    if members:
+        names = json.encode(sorted(members))
+        config_content += (
+            "  // Workspace members reach node_modules as copies of their published files.\n" +
+            "  ssr: { noExternal: " + names + " },\n" +
+            "  optimizeDeps: { exclude: " + names + " },\n" +
+            "\n"
+        )
+
     config_content += (
         "  // node_modules/.vite is the default, and the launcher just pointed that\n" +
         "  // name at a read-only Bazel output. Pre-bundling is not optional here:\n" +
@@ -557,6 +569,18 @@ def _resolve_server(ctx):
     _check_ignored_fields(ctx, server_info)
     return server_info
 
+def _workspace_members(entry):
+    """The main repository's workspace members `entry` imports: package name -> struct(store, source)."""
+    members = {}
+    for info in entry.npm_packages.to_list():
+        prefix = info.store.tree.root.path + "/"
+        if info.package_dir != None or not info.package_root.startswith(prefix):
+            continue
+        source = info.package_root[len(prefix):]
+        if not source.startswith("external/"):
+            members[info.package_name] = struct(store = info.store, source = source)
+    return members
+
 def _ts_dev_server_impl(ctx):
     entry = ctx.attr.entry_point[TsInfo]
     server_info = _resolve_server(ctx)
@@ -625,6 +649,7 @@ def _ts_dev_server_impl(ctx):
     npm_files = entry.npm_files.to_list()
     npm_contexts = check_dev_server_npm_contexts(ctx, owners, live_runtime, node_modules[NodeModulesInfo] if node_modules else None, npm_files)
 
+    members = _workspace_members(entry)
     config_file = _generate_dev_config(
         ctx,
         bool(node_modules),
@@ -635,6 +660,7 @@ def _ts_dev_server_impl(ctx):
         declared_files,
         npm_contexts.contexts,
         npm_contexts.views,
+        members,
         user_config_rl,
     )
 
@@ -664,6 +690,8 @@ def _ts_dev_server_impl(ctx):
         dev_server["plugin"] = plugin_rl
     if user_config:
         dev_server["user_config"] = user_config_rl
+    if members:
+        dev_server["members"] = {rlocation_path(ctx, member.store.tree): member.source for member in members.values()}
 
     def closure_names():
         names = npm_closure_names([entry.npm_packages], node_modules[NodeModulesInfo] if node_modules else None, ctx.label)

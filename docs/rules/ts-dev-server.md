@@ -99,6 +99,43 @@ An existing `node_modules` is never replaced: a real directory or a link to
 another one is an error naming both. In `.gitignore`, `node_modules` without a
 trailing slash matches the symlink; `node_modules/` matches directories only.
 
+## Workspace Members
+
+A workspace member the application imports by package name reaches the
+importer's `node_modules` as its store tree, a copy of the member's files
+rather than a link to its source directory. The generated config names every
+main-repository member in the `entry_point`'s npm closure in `ssr.noExternal`
+and `optimizeDeps.exclude`, so the server transforms the copy like first-party
+source instead of externalising or pre-bundling it. An excluded package is
+served as it is, so a member must ship ES modules, and Vite does not discover
+the dependencies it imports: a CommonJS one only a member imports goes in
+`optimizeDeps.include` as `<member> > <dependency>` from a plugin's `config`
+hook. Published packages keep the server's defaults, unless one shares a
+member's name: both lists match by name.
+
+The launcher sets `BAZEL_MEMBER_SOURCES` to a JSON object mapping each member's
+store directory, as a real path, to the member's directory under the
+workspace's real path, both with `/` separators. The store holds what the
+member's compile publishes at the same relative paths: its sources for an
+`emit = False` member, so a copied file maps to the source file itself, and its
+emitted `.js` otherwise, which maps to where that `.js` would sit in the
+checkout, beside sources that do not include it. Every server inherits the
+launcher's environment, so a plugin reads it under any of them:
+
+```js
+const memberSources = Object.entries(JSON.parse(process.env.BAZEL_MEMBER_SOURCES ?? '{}'));
+
+function sourcePath(file) {
+  for (const [store, source] of memberSources) {
+    if (file.startsWith(store + '/')) return source + file.slice(store.length);
+  }
+  return file;
+}
+```
+
+When the application imports no member, the config sets neither key and the
+launcher leaves `BAZEL_MEMBER_SOURCES` unset.
+
 ## `vite_config` Imports
 
 Select the Vite server for Vite plugins and framework configuration.
