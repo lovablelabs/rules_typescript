@@ -1201,7 +1201,7 @@ func TestProtoAmbientDependenciesFollowSelectedConfigInsteadOfWrapperDirectory(t
 			wrapper.SetAttr("tsconfig", id.Tsconfig)
 			from := label.New(c.RepoName, "schema", wrapper.Name())
 			if !test.wantAmbient {
-				p := tc.programs.compilerProgram(c, id.Tsconfig, id.owner)
+				p := tc.programs.compilerProgram(c, id.Tsconfig, id.owner, nil)
 				if err := compilerClosureError(p, from.String(), id.Tsconfig); err == nil {
 					t.Fatal("unobserved selected config established an empty compiler closure")
 				}

@@ -477,7 +477,7 @@ func (l *tsLang) GenerateRules(args language.GenerateArgs) language.GenerateResu
 		case *protoRuleImports:
 			owner = imps.identity.owner
 		}
-		if p := l.programs.compilerProgram(args.Config, selected, owner, recordedDirInfo); p != nil {
+		if p := l.programs.compilerProgram(args.Config, selected, owner, nil, recordedDirInfo); p != nil {
 			l.observeProgram(p)
 		}
 	}
