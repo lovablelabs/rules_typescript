@@ -29,6 +29,7 @@ exports_files([
     "napi-symbol-bytes.patch",
     "oj-cache-start-bundle-stable-key.patch",
     "oj-napi-link.patch",
+    "oj-server-pre-resolve-id.patch",
     "v8-output-dir.patch",
     "sqlite-build-script-path.patch",
 ])

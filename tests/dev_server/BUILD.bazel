@@ -581,6 +581,7 @@ ts_dev_server(
             ":dev_source_contexts",
             "//tests/npm/dev_inherited_types:composed_apps",
             "//tests/npm/dev_inherited_types:member_sources_dev",
+            "//tests/npm/dev_inherited_types:member_sources_vite_dev",
             "//tests/npm/dev_inherited_types:previous_member_dev",
         ] if target == "dev_with_plugin" else []),
         env = {

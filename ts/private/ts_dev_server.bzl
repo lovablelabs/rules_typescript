@@ -431,9 +431,76 @@ def _generate_dev_config(
             "\n"
         )
 
-    # User plugins first: a framework transform has to see a module before the
-    # Bazel ones. The npm resolver last, so anything above it can claim an id.
-    config_content += "const plugins = [{}];\n".format("..._userPlugins" if user_config_rl else "")
+    if members:
+        config_content += (
+            "// Resolve a member's copy to its counterpart at the same path in the member's directory, so plugins that skip\n" +
+            "// node_modules transform it, and an import only the copy can reach resolves as the copy's would.\n" +
+            "const memberDirectories = Object.entries(JSON.parse(process.env['BAZEL_MEMBER_SOURCES'] ?? '{}'));\n" +
+            "const memberSourceExtensions = { '.js': ['.ts', '.tsx', '.jsx'], '.mjs': ['.mts'], '.cjs': ['.cts'] };\n" +
+            "const splitQuery = id => {\n" +
+            "  const query = id.indexOf('?');\n" +
+            "  return query < 0 ? [slashPath(id), ''] : [slashPath(id.slice(0, query)), id.slice(query)];\n" +
+            "};\n" +
+            "const memberSourceFile = id => {\n" +
+            "  const [file, query] = splitQuery(id);\n" +
+            "  const member = memberDirectories.find(([store]) => file.startsWith(store + '/'));\n" +
+            "  if (!member) return undefined;\n" +
+            "  const [store, source] = member;\n" +
+            "  const extension = path.posix.extname(file);\n" +
+            "  const stem = source + file.slice(store.length, file.length - extension.length);\n" +
+            "  const found = [...(memberSourceExtensions[extension] ?? []), extension].find(candidate => fs.existsSync(stem + candidate));\n" +
+            "  return found === undefined ? undefined : stem + found + query;\n" +
+            "};\n" +
+            "const memberCopyImporter = importer => {\n" +
+            "  const [file] = splitQuery(importer);\n" +
+            "  const member = memberDirectories.find(([, source]) => file.startsWith(source + '/'));\n" +
+            "  if (!member) return undefined;\n" +
+            "  const [store, source] = member;\n" +
+            "  return store + file.slice(source.length);\n" +
+            "};\n" +
+            "const packageStore = id => {\n" +
+            "  const [file] = splitQuery(id);\n" +
+            "  const at = file.lastIndexOf('/node_modules/') + '/node_modules/'.length;\n" +
+            "  const name = file.slice(at).split('/');\n" +
+            "  if (at < '/node_modules/'.length || name[0].startsWith('.')) return undefined;\n" +
+            "  const root = file.slice(0, at) + name.slice(0, name[0].startsWith('@') ? 2 : 1).join('/');\n" +
+            "  return realpath(root) ?? root;\n" +
+            "};\n" +
+            "const memberNames = new Set(" + json.encode(sorted(members)) + ");\n" +
+            "const inMemberStore = importer => memberDirectories.some(([store]) => splitQuery(importer)[0].startsWith(store + '/'));\n" +
+            "const bazelMemberSources = {\n" +
+            "  name: 'bazel:member-sources',\n" +
+            "  enforce: 'pre',\n" +
+            "  async resolveId(id, importer, options) {\n" +
+            "    // Only a member by name, or an import from a member's files, can reach a member's store.\n" +
+            "    const pkg = id.split('?')[0].split('/').slice(0, id.startsWith('@') ? 2 : 1).join('/');\n" +
+            "    if (!importer || !(memberNames.has(pkg) || memberCopyImporter(importer) || inMemberStore(importer))) return null;\n" +
+            "    const resolve = from => this.resolve(id, from, { ...options, skipSelf: true });\n" +
+            "    const copy = memberCopyImporter(importer);\n" +
+            "    const fromCopy = copy && await resolve(copy);\n" +
+            "    const resolved = fromCopy ?? await resolve(importer);\n" +
+            "    const source = resolved && !resolved.external ? memberSourceFile(resolved.id) : undefined;\n" +
+            "    if (source !== undefined) return { ...resolved, id: source };\n" +
+            "    // A re-entrant resolve may have mapped the id already; any other id is left to the server.\n" +
+            "    if (!fromCopy) return resolved && !resolved.external && memberCopyImporter(resolved.id) ? resolved : null;\n" +
+            "    // An npm import the source reaches itself keeps the server's dep handling (pre-bundling, CJS interop),\n" +
+            "    // unless it lands in another package store than the copy's, which holds the member's own version.\n" +
+            "    const fromSource = await resolve(importer);\n" +
+            "    if (!fromSource) return fromCopy;\n" +
+            "    const sourceStore = fromSource.external ? undefined : packageStore(fromSource.id);\n" +
+            "    const copyStore = fromCopy.external ? undefined : packageStore(fromCopy.id);\n" +
+            "    return sourceStore && copyStore && sourceStore !== copyStore ? fromCopy : fromSource;\n" +
+            "  },\n" +
+            "};\n" +
+            "\n"
+        )
+
+    # Member sources before any resolver can claim a copy, then user plugins before the Bazel
+    # ones so a framework transform sees a module first; the npm resolver last.
+    config_content += "const plugins = [{}];\n".format(", ".join(
+        (["bazelMemberSources"] if members else []) +
+        (["..._userPlugins"] if user_config_rl else []),
+    ))
     if react_refresh:
         config_content += (
             "// React Fast Refresh — preserves component state across HMR updates.\n" +
