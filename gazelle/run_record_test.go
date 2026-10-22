@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -662,5 +664,93 @@ func TestRunRecord_TheReadPassSeesEveryInputModifiedOrNew(t *testing.T) {
 		if !got.at.Equal(stamped[kind]) {
 			t.Errorf("the newest %s is stamped %v by the pass, %v by its own stat", kind, got.at, stamped[kind])
 		}
+	}
+}
+
+func TestRunRecord_LoadReadsBackWhatEncodeWrote(t *testing.T) {
+	full := &runRecord{key: "k", digest: "d", walkDigest: "w", snapshotWalk: "s",
+		dirs: []string{"/r/app", "/r/lib"}, files: []string{"/r/app/a.ts"}, reads: []string{"/r/app/b.ts", "/r/lib/c.ts"}, roots: []string{"/r/node_modules"},
+		exit: 3, stdout: []byte("out\n"), stderr: []byte("err\n"), facts: []byte("facts\x00\n"),
+		sums: []uint64{1, 2, 3, 4, 5, 6}, scans: []uint64{7, 1 << 63}}
+	counts := func(to string) func(string) string {
+		return func(s string) string { return strings.Replace(s, "\n2 1 2 1\n", "\n"+to+"\n", 1) }
+	}
+	for _, tc := range []struct {
+		name    string
+		rec     *runRecord
+		mangle  func(string) string
+		refused bool
+	}{
+		{name: "every section round-trips", rec: full},
+		{name: "a record without inputs or sums round-trips", rec: &runRecord{key: "k", stdout: []byte("out")}},
+		{name: "a header counting more paths than the record holds is refused", rec: full, mangle: counts("1000000000000000 1 2 1"), refused: true},
+		{name: "a header whose path counts overflow when summed is refused", rec: full, mangle: counts("2 1 2 9223372036854775807"), refused: true},
+		{name: "a record cut short is refused", rec: full, mangle: func(s string) string { return s[:len(s)-1] }, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := tc.rec.encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.mangle != nil {
+				data = []byte(tc.mangle(string(data)))
+			}
+			file := filepath.Join(t.TempDir(), "record")
+			if err := os.WriteFile(file, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got := loadRunRecord(file)
+			if tc.refused {
+				if got != nil {
+					t.Fatalf("loaded a damaged record: %+v", *got)
+				}
+				return
+			}
+			if got == nil || fmt.Sprintf("%+v", *got) != fmt.Sprintf("%+v", *tc.rec) {
+				t.Fatalf("loaded %+v, want %+v", got, *tc.rec)
+			}
+		})
+	}
+}
+
+func TestRunRecord_PauseGCCapsAboveWhatTheCheckKeepsLiveAndResumeRestoresGC(t *testing.T) {
+	percent, limit := debug.SetGCPercent(-1), debug.SetMemoryLimit(-1)
+	t.Cleanup(func() { debug.SetGCPercent(percent); debug.SetMemoryLimit(limit) })
+	for _, tc := range []struct {
+		name                 string
+		size                 int64
+		gogc, gomemlimit     int64
+		wantLimitWhilePaused int64
+	}{
+		{name: "a missing record pauses under the base cap", size: -1, gogc: 200, gomemlimit: math.MaxInt64, wantLimitWhilePaused: 1 << 30},
+		{name: "a large record's cap stays above what its check keeps live", size: 200 << 20, gogc: 200, gomemlimit: math.MaxInt64, wantLimitWhilePaused: 1<<30 + 16*200<<20},
+		{name: "a lower GOMEMLIMIT is kept", size: 17 << 20, gogc: 200, gomemlimit: 512 << 20, wantLimitWhilePaused: 512 << 20},
+		{name: "GOGC=off is restored off", size: 17 << 20, gogc: -1, gomemlimit: math.MaxInt64, wantLimitWhilePaused: 1<<30 + 16*17<<20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "record")
+			if tc.size >= 0 {
+				if err := os.WriteFile(file, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Truncate(file, tc.size); err != nil {
+					t.Fatal(err)
+				}
+			}
+			debug.SetGCPercent(int(tc.gogc))
+			debug.SetMemoryLimit(tc.gomemlimit)
+			resume := pauseGC(file)
+			pausedPercent := debug.SetGCPercent(-1)
+			pausedLimit := debug.SetMemoryLimit(-1)
+			resume()
+			resumedPercent := debug.SetGCPercent(int(tc.gogc))
+			resumedLimit := debug.SetMemoryLimit(-1)
+			if pausedPercent != -1 || pausedLimit != tc.wantLimitWhilePaused {
+				t.Errorf("paused at GOGC %d and limit %d, want GOGC -1 and limit %d", pausedPercent, pausedLimit, tc.wantLimitWhilePaused)
+			}
+			if int64(resumedPercent) != tc.gogc || resumedLimit != tc.gomemlimit {
+				t.Errorf("resumed at GOGC %d and limit %d, want %d and %d", resumedPercent, resumedLimit, tc.gogc, tc.gomemlimit)
+			}
+		})
 	}
 }

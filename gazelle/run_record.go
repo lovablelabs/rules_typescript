@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,6 +28,7 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -323,13 +325,15 @@ func loadRunRecord(file string) *runRecord {
 	if err != nil {
 		return nil
 	}
+	// Paths alias data without a copy each; rec.stdout, stderr and facts alias it too, so nothing may write to it.
+	text := unsafe.String(unsafe.SliceData(data), len(data))
 	line := func() (string, bool) {
-		i := bytes.IndexByte(data, '\n')
+		i := strings.IndexByte(text, '\n')
 		if i < 0 {
 			return "", false
 		}
-		l := string(data[:i])
-		data = data[i+1:]
+		l := text[:i]
+		text = text[i+1:]
 		return l, true
 	}
 	var header [7]string
@@ -363,14 +367,19 @@ func loadRunRecord(file string) *runRecord {
 		return nil
 	}
 	for i, list := range r.lists() {
-		for range counts[i] {
+		if counts[i] > len(text) {
+			return nil
+		}
+		*list = make([]string, counts[i])
+		for j := range *list {
 			p, ok := line()
 			if !ok {
 				return nil
 			}
-			*list = append(*list, p)
+			(*list)[j] = p
 		}
 	}
+	data = data[len(data)-len(text):]
 	if n := tail[4]; n != 0 && n != counts[0]+counts[1]+counts[2]+counts[3] {
 		return nil
 	}
@@ -848,25 +857,30 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	}
 	key := recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath")
 	file := filepath.Join(cache, runRecordName+"-"+key[:16])
-	if rec := loadRunRecord(file); rec != nil && rec.key == key {
-		stamps := &newest{}
-		matched, lines := rec.check(c.ValidBuildFileNames, cache, stamps)
-		if matched {
-			if runRecordMode == "verify" {
-				os.Exit(verifyReplay(fs, file, rec))
-			}
-			traceRun("run record")
-			os.Stdout.Write(rec.stdout)
-			os.Stderr.Write(rec.stderr)
-			if listingVerbose {
-				log.Print("typescript: run record: replayed; every input is unchanged since a run that changed nothing")
-			}
-			os.Exit(rec.exit)
+	// A replay's heap is the record and one stat pass (170 MB on a 22k-source tree); collecting it cost 9 ms of wall.
+	resumeGC := pauseGC(file)
+	rec, stamps := loadRunRecord(file), &newest{}
+	var matched bool
+	var lines *inputLines
+	if rec != nil && rec.key == key {
+		matched, lines = rec.check(c.ValidBuildFileNames, cache, stamps)
+	}
+	resumeGC()
+	if matched {
+		if runRecordMode == "verify" {
+			os.Exit(verifyReplay(fs, file, rec))
 		}
-		if lines != nil {
-			tryFastPath(fs, c, file, rec, *lines, stamps)
-			releaseDeclinedFastPath()
+		traceRun("run record")
+		os.Stdout.Write(rec.stdout)
+		os.Stderr.Write(rec.stderr)
+		if listingVerbose {
+			log.Print("typescript: run record: replayed; every input is unchanged since a run that changed nothing")
 		}
+		os.Exit(rec.exit)
+	}
+	if lines != nil {
+		tryFastPath(fs, c, file, rec, *lines, stamps)
+		releaseDeclinedFastPath()
 	}
 	candidate := fmt.Sprintf("%s.candidate.%d", file, os.Getpid())
 	code, stdout, stderr := runSelf(os.Args[1:], runRecordCandidateEnv+"="+candidate)
@@ -877,6 +891,19 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	os.Remove(buildSnapshotFile(candidate))
 	os.Exit(code)
 	return nil
+}
+
+// pauseGC stops collection until resume runs or memory reaches a cap that grows with the record.
+func pauseGC(record string) (resume func()) {
+	var size int64
+	if info, err := os.Stat(record); err == nil {
+		size = min(info.Size(), math.MaxInt64/32)
+	}
+	percent := debug.SetGCPercent(-1)
+	limit := debug.SetMemoryLimit(-1)
+	// The check keeps a few times the record live; a cap near that would collect over and over.
+	debug.SetMemoryLimit(min(limit, 1<<30+16*size))
+	return func() { debug.SetGCPercent(percent); debug.SetMemoryLimit(limit) }
 }
 
 func (r *runRecord) matches(buildNames []string, cache string, stamps *newest) bool {
