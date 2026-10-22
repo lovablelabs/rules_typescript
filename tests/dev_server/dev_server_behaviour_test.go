@@ -1569,7 +1569,7 @@ func restartCount(t *testing.T, s *server) int {
 	t.Helper()
 	log := s.log(t)
 	return strings.Count(log, "[vite-plugin-bazel] restarting:") +
-		strings.Count(log, "oj config/env changed — restarting dev server")
+		strings.Count(log, " — restarting dev server")
 }
 
 type devConfig struct {

@@ -49,6 +49,7 @@ impl App {
         .unwrap();
         fs::write(start.join("client-entry.modules"), "1").unwrap();
         fs::write(start.join("manifest.ts"), DEV_MANIFEST).unwrap();
+        fs::write(start.join("glob-scopes.json"), "[]").unwrap();
         let closure = [
             self.real.join("src/app.tsx"),
             fs::canonicalize(start.join("manifest.ts")).unwrap(),
@@ -78,7 +79,7 @@ fn a_restart_restores_the_client_bundle_despite_the_rewritten_start_manifest() {
     let (key, _) = app.store().persist(&start).expect("persist");
 
     reboot(&start);
-    match app.store().restore(&start) {
+    match app.store().restore(&start, |_| Vec::new()) {
         Ok((stats, _)) => assert_eq!(stats.key, key),
         Err(miss) => panic!("restart missed the bundle it just cached: {miss}"),
     }
@@ -86,7 +87,7 @@ fn a_restart_restores_the_client_bundle_despite_the_rewritten_start_manifest() {
     // The app's own sources still key the bundle.
     fs::write(app.real.join("src/app.tsx"), "export const app = 2;\n").unwrap();
     reboot(&start);
-    let miss = app.store().restore(&start).err();
+    let miss = app.store().restore(&start, |_| Vec::new()).err();
     assert!(
         matches!(miss, Some(Miss::NoEntryForKey(_))),
         "an edited source must miss, got {miss:?}"
