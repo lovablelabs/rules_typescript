@@ -56,7 +56,7 @@ func generateRules(args language.GenerateArgs) language.GenerateResult {
 	if producer != nil {
 		res = codegenOutDirResult(args, root)
 	} else {
-		res = programRules(args, tc)
+		res = programRules(args, tc, s.srcs(args.Rel, tc))
 		res = withImporterRules(args, tc, res)
 	}
 	res = withProtoRules(args, tc, res)
@@ -84,11 +84,11 @@ func generateRules(args language.GenerateArgs) language.GenerateResult {
 	return res
 }
 
-func programRules(args language.GenerateArgs, tc *tsConfig) language.GenerateResult {
+func programRules(args language.GenerateArgs, tc *tsConfig, set srcSet) language.GenerateResult {
 	if tc.programs.packages[args.Rel] == nil {
 		return nonPackageRules(args, tc)
 	}
-	return packageRules(args, tc)
+	return packageRules(args, tc, set)
 }
 
 // Gazelle fixes its Resolve callbacks before completing the native index.
@@ -239,11 +239,9 @@ func whyNotPackage(tc *tsConfig) string {
 
 // packageRules writes a package: ts_compile, ts_test, the declarations in
 // both, the tree's other files in the first that exists, its ts_config.
-func packageRules(args language.GenerateArgs, tc *tsConfig,
-) language.GenerateResult {
+func packageRules(args language.GenerateArgs, tc *tsConfig, set srcSet) language.GenerateResult {
 	s, pkg := tc.programs, args.Rel
 	name := packageName(pkg)
-	set := s.srcs(pkg, tc)
 	data := s.dataFiles(pkg, tc)
 	codegens := codegenLabels(args, s)
 	tsConfigAttr := ""
@@ -384,7 +382,8 @@ func (s *programStore) keptProgramSources(c *config.Config, pkg string, dirInfo 
 
 func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.GenerateResult) {
 	s := tc.programs
-	final := programRules(args, tc)
+	set := s.srcs(args.Rel, tc)
+	final := programRules(args, tc, set)
 	if s.packages[args.Rel] != nil || s.metadataIdentity(args.Config, tsconfigIn(args.Rel)) != unknownInput {
 		final = withPackageScopeCompiler(args, tc, final)
 	}
@@ -482,7 +481,7 @@ func refreshProgramRules(args language.GenerateArgs, tc *tsConfig, res language.
 					s.requireAuthoredScope(args.Config, tsconfigIn(args.Rel), source)
 				}
 			}
-			imps.program = s.compilerProgram(args.Config, effective.AttrString("tsconfig"), args.Rel)
+			imps.program = s.compilerProgram(args.Config, effective.AttrString("tsconfig"), args.Rel, &set)
 			if imps.program == nil {
 				if p := s.programs[args.Rel]; p != nil && p.manifest && effective.Attr("tsconfig") == nil {
 					imps.program = p
