@@ -93,7 +93,6 @@ type programStore struct {
 	buildFacts       *buildFactsRecorder
 	early            *earlyFinish
 	frozen           *frozenView
-	verify           *readsetVerifier
 	prerefreshed     map[refreshKey][]*refreshJob
 	// Parsed owner BUILD files, filled and read only during the walk, which writes no BUILD file.
 	ownerBuildFiles map[string]*rule.File
@@ -969,9 +968,6 @@ func installMissing(repoRoot string) string {
 func (s *programStore) requireInstall(repoRoot string) {
 	if s.installChecked {
 		return
-	}
-	if dryRun() {
-		panic(frozenBail{"install check"})
 	}
 	s.installChecked = true
 	if why := installMissing(repoRoot); why != "" {

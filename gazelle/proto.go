@@ -443,9 +443,6 @@ func (s *programStore) protoProviderIndex() *protoIndex {
 	if g == nil {
 		return nil
 	}
-	if run := activeRun; run != nil && run.dry && run.reads.rulesGen < 0 {
-		run.reads.rulesGen = g.rulesGeneration
-	}
 	if s.protoIndex != nil && s.protoIndex.emission == g && s.protoIndex.rulesGeneration == g.rulesGeneration {
 		return s.protoIndex
 	}
