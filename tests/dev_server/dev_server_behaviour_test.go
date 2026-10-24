@@ -385,6 +385,91 @@ func TestDevServerBehaviour(t *testing.T) {
 				t.Errorf("no module id the plugin transformed lies under the member's store %s: %v", store, seen.Transformed)
 			}
 		})
+		t.Run("workspace_member_is_served_from_its_source", func(t *testing.T) {
+			const pkg = "tests/npm/dev_inherited_types"
+			for _, launcher := range []string{"member_sources_vite_dev_launcher", "member_sources_dev_launcher"} {
+				t.Run(launcher, func(t *testing.T) {
+					ws := t.TempDir()
+					app := filepath.Join(ws, filepath.FromSlash(pkg))
+					mkdir(t, app)
+					mkdir(t, filepath.Join(ws, "bazel-bin"))
+					source := filepath.Join(ws, "packages", "shared", "src")
+					mkdir(t, source)
+					write(t, filepath.Join(source, "index.ts"), "export { z as memberZ } from \"zod\";\nexport const tagline: string = \"MEMBER_SOURCE_EDIT\";\n")
+					write(t, filepath.Join(app, "index.html"), "MEMBER_SOURCE")
+					write(t, filepath.Join(app, "entry.ts"), "export { tagline } from \"shared\";\nexport { z } from \"zod\";\n")
+					write(t, filepath.Join(app, "raw_entry.ts"), "export { default as raw } from \"shared?raw\";\n")
+					write(t, filepath.Join(app, "virtual_entry.ts"), "export { tagline } from \"virtual:member-user\";\n")
+					// Reached from the member's source before the app's link, as the app's own zod of another version would be.
+					if launcher == "member_sources_dev_launcher" {
+						otherZod := filepath.Join(ws, "packages", "node_modules", "zod")
+						mkdir(t, otherZod)
+						write(t, filepath.Join(otherZod, "package.json"), `{"name":"zod","version":"0.0.0-OTHER_STORE","type":"module","exports":"./index.js"}`)
+						write(t, filepath.Join(otherZod, "index.js"), `export const z = "OTHER_STORE";`)
+					}
+					srv := start(t, tree.File(pkg+"/"+launcher).Abs(), ws, t.TempDir())
+					base := srv.awaitHTTP(t, "/index.html")
+					entry := get(t, base, "/entry.ts")
+					member := get(t, base, importURL(t, entry.body, "index.ts", ""))
+					if member.status != 200 || !strings.Contains(member.body, "MEMBER_SOURCE_EDIT") || !strings.Contains(member.body, "FIRST_PARTY_TRANSFORM SIBLING_RESOLVED") {
+						t.Errorf("the member's source was not served through a plugin that skips node_modules: HTTP %d\n%s\n%s", member.status, member.body, srv.log(t))
+					}
+					virtualEntry := get(t, base, "/virtual_entry.ts").body
+					virtualURL := regexp.MustCompile(`from\s*["']([^"']+)["']`).FindStringSubmatch(virtualEntry)
+					if virtualURL == nil {
+						t.Fatalf("virtual_entry.ts imports nothing:\n%s", virtualEntry)
+					}
+					if virtual := get(t, base, virtualURL[1]); !strings.Contains(virtual.body, "/packages/shared/src/index.ts") {
+						t.Errorf("a plugin's virtual module importing the member loads its copy, a second instance:\n%s\n%s", virtualEntry, virtual.body)
+					}
+					raw := get(t, base, importURL(t, get(t, base, "/raw_entry.ts").body, "index.ts", "raw"))
+					if raw.status != 200 || !strings.Contains(raw.body, "MEMBER_SOURCE_EDIT") {
+						t.Errorf("a member import with a query did not serve the member's source: HTTP %d\n%s", raw.status, raw.body)
+					}
+					zod := regexp.MustCompile(`["']([^"']*/zod[^"']*)["']`).FindStringSubmatch(member.body)
+					if zod == nil || strings.Contains(get(t, base, zod[1]).body, "LATE_RESOLVER") {
+						t.Errorf("the member source's zod import reached a resolver the server's own runs before: %v\n%s", zod, member.body)
+					}
+					// Under oj, a server-side render takes the member's source through the same transform.
+					if launcher == "member_sources_dev_launcher" {
+						marker := regexp.MustCompile(`FIRST_PARTY_TRANSFORM SIBLING_RESOLVED (\w+)`)
+						var resolved struct {
+							ID       string `json:"id"`
+							External bool   `json:"external"`
+						}
+						r := get(t, base, "/@ssr-resolve?"+url.Values{"importer": {filepath.Join(app, "entry.ts")}, "spec": {"shared"}}.Encode())
+						if err := json.Unmarshal([]byte(r.body), &resolved); err != nil || resolved.External || !strings.HasSuffix(filepath.ToSlash(resolved.ID), "/packages/shared/src/index.ts") {
+							t.Fatalf("a server-side render resolves the member to its copy, not its source: HTTP %d %s\n%s", r.status, r.body, srv.log(t))
+						}
+						external := get(t, base, "/@ssr-resolve?"+url.Values{"importer": {filepath.Join(app, "entry.ts")}, "spec": {"external-claimed"}}.Encode())
+						if !strings.Contains(external.body, `"spec":"https://cdn.invalid/external.js"`) {
+							t.Errorf("a server-side render dropped an external pre resolveId answer's id: HTTP %d %s", external.status, external.body)
+						}
+						dependency := get(t, base, "/@ssr-resolve?"+url.Values{"importer": {filepath.Join(app, "entry.ts")}, "spec": {"dependency-claimed"}}.Encode())
+						if !strings.Contains(dependency.body, `"external":true`) || !strings.Contains(dependency.body, "/zod/") {
+							t.Errorf("a server-side render did not externalize the dependency file a pre resolveId chose: HTTP %d %s", dependency.status, dependency.body)
+						}
+						rendered := get(t, base, "/@ssr-module?"+url.Values{"id": {resolved.ID}}.Encode())
+						browser, server := marker.FindStringSubmatch(member.body), marker.FindStringSubmatch(rendered.body)
+						if !strings.Contains(rendered.body, "MEMBER_SOURCE_EDIT") || browser == nil || server == nil || browser[1] != server[1] {
+							t.Errorf("a server-side render and the browser compile the member's source differently:\nbrowser %v\nserver HTTP %d %s", browser, rendered.status, rendered.body)
+						}
+						sibling := regexp.MustCompile(`SIBLING_ID (\S+)`).FindStringSubmatch(rendered.body)
+						if sibling == nil || !strings.Contains(sibling[1], "/node_modules/zod/") || strings.Contains(sibling[1], "/packages/node_modules/zod/") {
+							t.Errorf("a member source's zod resolved from another package store than its copy's, not the member's own version: %v", sibling)
+						}
+					}
+					write(t, filepath.Join(source, "index.ts"), `export const tagline: string = "MEMBER_SOURCE_SECOND_EDIT";`)
+					memberURL := importURL(t, entry.body, "index.ts", "")
+					for deadline := time.Now().Add(15 * time.Second); !strings.Contains(get(t, base, memberURL).body, "MEMBER_SOURCE_SECOND_EDIT"); {
+						if time.Now().After(deadline) {
+							t.Fatalf("an edit to the member's source never reached %s\n%s", memberURL, srv.log(t))
+						}
+						time.Sleep(200 * time.Millisecond)
+					}
+				})
+			}
+		})
 		t.Run("checkout_install_cannot_shadow_member_npm_binding", func(t *testing.T) {
 			tmp := t.TempDir()
 			ws := filepath.Join(tmp, "ws")
@@ -1358,6 +1443,70 @@ process.stdout.write(JSON.stringify(names));
 		}
 		m.contains(t, srv, "CODEGEN_V1")
 	})
+
+	// oj_config.mjs's pre resolveId hooks pass zod through, redirect one importer
+	// to zod's CommonJS entry, resolve another's zod from a vendored copy, claim a
+	// CommonJS file and answer an external. Each order starts a fresh server, since
+	// the first import of zod registers it for pre-bundling.
+	if impl == "oj" && wantBazelPlugin {
+		t.Run("pre_resolve_id_answers_hold_in_either_request_order", func(t *testing.T) {
+			entries := []string{"npm_entry.js", "npm_require_entry.js", "npm_elsewhere_entry.js"}
+			reversed := slices.Clone(entries)
+			slices.Reverse(reversed)
+			for _, order := range [][]string{entries, reversed} {
+				t.Run(order[0], func(t *testing.T) {
+					ws := t.TempDir()
+					app := filepath.Join(ws, "tests", "dev_server")
+					mkdir(t, app)
+					mkdir(t, filepath.Join(ws, "bazel-bin"))
+					write(t, filepath.Join(app, "index.html"), "PRE_RESOLVE_ID")
+					vendored := filepath.Join(ws, "vendor", "node_modules", "zod")
+					mkdir(t, vendored)
+					write(t, filepath.Join(vendored, "package.json"), `{"name":"zod","version":"0.0.0","type":"module","main":"index.js"}`)
+					write(t, filepath.Join(vendored, "index.js"), `export const z = "VENDORED_COPY";`)
+					write(t, filepath.Join(ws, "vendor", "importer.js"), "")
+					for _, file := range order {
+						write(t, filepath.Join(app, file), "import { z } from \"zod\";\nexport { z };\n")
+					}
+					write(t, filepath.Join(app, "npm_aliased_entry.js"), "import { z } from \"zod-via-id\";\nexport { z };\n")
+					write(t, filepath.Join(app, "npm_claimed_entry.js"),
+						"import { z } from \"cjs-claimed\";\nimport external from \"external-claimed\";\nexport { z, external };\n")
+					srv := start(t, launcher.Abs(), ws, t.TempDir())
+					base := srv.awaitHTTP(t, "/index.html")
+					bodies, deps := map[string]string{}, map[string]response{}
+					for _, file := range order {
+						bodies[file] = get(t, base, "/"+file).body
+						dep := depURL(bodies[file])
+						if dep == "" {
+							t.Fatalf("%s imports no resolved zod:\n%s", file, bodies[file])
+						}
+						deps[file] = get(t, base, dep)
+					}
+					if !strings.Contains(deps["npm_entry.js"].finalURL, "/@oj-deps/") {
+						t.Errorf("a pre resolveId passing zod through took it off the pre-bundle: %q", deps["npm_entry.js"].finalURL)
+					}
+					if !strings.Contains(deps["npm_elsewhere_entry.js"].finalURL, "/@oj-deps/") {
+						t.Errorf("zod a pre resolveId resolved from another copy did not map onto its pre-bundle: %q", deps["npm_elsewhere_entry.js"].finalURL)
+					}
+					required := bodies["npm_require_entry.js"]
+					if strings.Contains(required, "/@oj-deps/") || !strings.Contains(required, "__ojcjs") || deps["npm_require_entry.js"].status != 200 {
+						t.Errorf("a pre resolveId redirecting one importer to zod's CommonJS entry was not honoured with interop: HTTP %d\n%s", deps["npm_require_entry.js"].status, required)
+					}
+					aliased := get(t, base, depURL(get(t, base, "/npm_aliased_entry.js").body))
+					if aliased.status != 200 || !strings.Contains(aliased.finalURL, "/@oj-deps/") {
+						t.Errorf("an import a normal resolveId answers with this.resolve of the pre-bundled zod did not reach its pre-bundle: HTTP %d %q", aliased.status, aliased.finalURL)
+					}
+					claimed := get(t, base, "/npm_claimed_entry.js")
+					if !strings.Contains(claimed.body, "__ojcjs") {
+						t.Errorf("named imports from a CommonJS file a pre resolveId claimed do not read off module.exports:\n%s", claimed.body)
+					}
+					if !strings.Contains(claimed.body, `"https://cdn.invalid/external.js"`) {
+						t.Errorf("an external pre resolveId answer was not left as its id:\n%s", claimed.body)
+					}
+				})
+			}
+		})
+	}
 
 	// ── 4b: a bare npm specifier ──────────────────────────────────────────────
 	// The npm tree is a Bazel output; what puts it on the walk up from a
