@@ -866,6 +866,22 @@ test('a declared generated tree cannot be replaced by checkout files', async () 
     'a native resolution miss must retain the declared producer path');
 });
 
+test('a declared tree whose members link out of it still resolves to the member', async () => {
+  const tree = path.join(bazelBin, 'app/linked');
+  const target = path.join(root, 'linked-runfiles/runtime.js');
+  write(target, 'export const runtime = "linked member";\n');
+  fs.mkdirSync(tree, { recursive: true });
+  fs.symlinkSync(target, path.join(tree, 'runtime.js'));
+  const plugin = bazelPlugin({
+    workspaceRoot, bazelBin, mode: 'serve',
+    declaredFiles: { 'app/linked': { path: tree, context: 'source', directory: true } },
+  });
+  plugin.configResolved({ root: workspaceRoot, logger: { info() {} } });
+  const context = { resolve: async () => ({ id: fs.realpathSync(target) }) };
+  assert.deepEqual(await plugin.resolveId.handler.call(context, './linked/runtime', importers.serve, {}),
+    { id: path.join(tree, 'runtime.js') });
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {
