@@ -54,7 +54,6 @@ func (l *tsLang) finishBeforeWriting(ix *resolve.RuleIndex) {
 	if rec.begin(s) {
 		rec.applyReplay(s)
 	} else {
-		l.speculateFirstPass(ix)
 		for _, g := range e.generated {
 			for i, r := range g.res.Gen {
 				l.resolveRule(g.args.Config, ix, r, g.res.Imports[i], label.New(g.args.Config.RepoName, g.args.Rel, r.Name()))
@@ -88,45 +87,6 @@ func (l *tsLang) finishBeforeWriting(ix *resolve.RuleIndex) {
 		}
 	}
 	e.generated = nil
-}
-
-// speculateFirstPass speculates, under -ts_readsets=verify, every generated rule's
-// edge resolution once selection, which the first Resolve runs, is done.
-func (l *tsLang) speculateFirstPass(ix *resolve.RuleIndex) {
-	s := l.programs
-	if s.verify == nil {
-		return
-	}
-	s.ruleListsMayChange()
-	s.selectInputs(ix)
-	for _, g := range s.early.generated {
-		for i, live := range g.res.Gen {
-			imps, ok := g.res.Imports[i].(*ruleImports)
-			if !ok || imps == nil {
-				continue
-			}
-			c := g.args.Config
-			from := label.New(c.RepoName, g.args.Rel, live.Name())
-			r := canonicalRule(c, live)
-			if _, skip := mergedRule(c, r, from); skip {
-				continue
-			}
-			// The serial pass's first edge resolution makes the check, which a speculation must not.
-			s.requireInstall(c.RepoRoot)
-			s.verify.specs[live] = s.speculateTask(func() {
-				effective, skip := mergedRule(c, r, from)
-				if skip {
-					return
-				}
-				sourceRoots := slices.Clone(effective.AttrStrings("srcs"))
-				owned := activeRun.own(r, live)
-				if effective == r {
-					effective = owned
-				}
-				resolveRuleEdges(c, ix, owned, effective, imps, from, sourceRoots)
-			})
-		}
-	}
 }
 
 // mergeKinds follows map_kind chains to the end, as Gazelle's merge does.

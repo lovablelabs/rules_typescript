@@ -90,14 +90,11 @@ func (d *srcDrops) report(final *rule.Rule) {
 			retained[sourceLabelIdentity(lbl, d.args)] = true
 		}
 	}
-	dropped := slices.DeleteFunc(slices.Clone(d.dropped), func(value string) bool {
+	d.dropped = slices.DeleteFunc(d.dropped, func(value string) bool {
 		lbl, err := parseLabel(value)
 		return err == nil && retained[sourceLabelIdentity(lbl, d.args)]
 	})
-	if !dryRun() {
-		d.dropped = dropped
-	}
-	reportDroppedValues(d.args, d.have, "srcs", dropped)
+	reportDroppedValues(d.args, d.have, "srcs", d.dropped)
 }
 
 // The shapes a merge reconciles value by value, the two rule.MergeRules

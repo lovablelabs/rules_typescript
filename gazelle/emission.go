@@ -3,7 +3,6 @@ package typescript
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"path"
 	"path/filepath"
@@ -35,11 +34,6 @@ type emissionGraph struct {
 	outputsGeneration int
 	// Bumped at every rule store except a resolved TypeScript rule stored again unchanged.
 	rulesGeneration int
-	// Bumped when a key joins or leaves rules, or its rule changes kind.
-	keysGeneration int
-	// Each key's last write, a store or an edit in place, on one clock.
-	stamps map[string]int
-	clock  int
 	// observeBuilds' crawl memo, kept across the walk. crawledDirs adds the read packages'
 	// ancestors; crawledMisses are the labels reached without a rule, or outside this repo.
 	crawled                    map[string]crawledTarget
@@ -202,11 +196,7 @@ func (g *emissionGraph) storeRule(key string, r *rule.Rule) {
 	if declaresOutputs(g.rules[key]) || declaresOutputs(r) {
 		g.outputsGeneration++
 	}
-	if old := g.rules[key]; old == nil || old.Kind() != r.Kind() {
-		g.keysGeneration++
-	}
 	g.rules[key] = r
-	g.stamp(key)
 	g.bump(key)
 }
 
@@ -214,25 +204,9 @@ func (g *emissionGraph) deleteRule(key string) {
 	if declaresOutputs(g.rules[key]) {
 		g.outputsGeneration++
 	}
-	if g.rules[key] != nil {
-		g.keysGeneration++
-	}
 	g.rulesGeneration++
 	delete(g.rules, key)
-	g.stamp(key)
 	g.bump(key)
-}
-
-// stamp records a write to key's rule; an edit in place must call it.
-func (g *emissionGraph) stamp(key string) {
-	if g == nil {
-		return
-	}
-	g.clock++
-	if g.stamps == nil {
-		g.stamps = map[string]int{}
-	}
-	g.stamps[key] = g.clock
 }
 
 func (g *emissionGraph) setFile(pkg string, f *rule.File) {
@@ -323,7 +297,7 @@ func (s *programStore) semanticRule(key string) *rule.Rule {
 	if s.emission == nil {
 		return nil
 	}
-	r := s.storedRule(key)
+	r := s.emission.rules[key]
 	if r == nil {
 		return nil
 	}
@@ -332,15 +306,6 @@ func (s *programStore) semanticRule(key string) *rule.Rule {
 		return r
 	}
 	return canonicalRule(s.inputs[own.Pkg].config, r)
-}
-
-// storedRule is the rule stored at key, which a speculation records reading.
-func (s *programStore) storedRule(key string) *rule.Rule {
-	r := s.emission.rules[key]
-	if run := activeRun; run != nil && run.dry {
-		return run.read(s.emission, key, r)
-	}
-	return r
 }
 
 func (s *programStore) ruleTarget(repo, key string) (string, *rule.Rule) {
@@ -656,7 +621,6 @@ func (l *tsLang) finishRules() {
 			}
 			if l.programs.generatedPackages[own.Pkg] && !r.ShouldKeep() && !attrKept(r, "emit") {
 				r.SetAttr("emit", true)
-				g.stamp(key)
 				semantic = l.programs.semanticRule(key)
 			}
 			if consumer != "" && ruleEmission(semantic) != emittedEmission {
@@ -698,7 +662,6 @@ func (l *tsLang) finishRules() {
 	for _, rooted := range []bool{true, false} {
 		for {
 			completed := false
-			l.programs.speculatePending(repo, rooted, seen, true)
 			for _, key := range slices.Sorted(maps.Keys(l.programs.completePrograms)) {
 				complete := l.programs.completePrograms[key]
 				if complete == nil || rooted && !seen[key] {
@@ -706,20 +669,16 @@ func (l *tsLang) finishRules() {
 				}
 				delete(l.programs.completePrograms, key)
 				cx := &programCompletion{s: l.programs, repo: repo, rooted: rooted}
-				l.programs.complete(key, complete, cx)
+				complete(cx)
 				for _, dep := range cx.reached {
 					visit(dep, key)
 				}
-				l.programs.speculatePending(repo, rooted, seen, false)
 				completed = true
 			}
 			if !completed {
 				break
 			}
 		}
-	}
-	if l.programs.verify != nil {
-		l.programs.verify.report()
 	}
 	exitOnDeferredFatal()
 	l.programs.exportPackageScopes()
@@ -787,47 +746,16 @@ func (cx *programCompletion) ownerMode(key string) emissionMode {
 		promoted = cx.promotion(key, target)
 	}
 	if complete := cx.s.completePrograms[target]; complete != nil {
-		if dryRun() {
-			activeRun.waiting = target
-			panic(frozenBail{"pending owner"})
-		}
 		delete(cx.s.completePrograms, target)
 		if promoted != nil {
 			promoted.SetAttr("emit", true)
-			cx.s.emission.stamp(target)
 		}
-		cx.s.complete(target, complete, cx)
+		complete(cx)
 	}
-	mode := ruleEmission(owner)
 	if promoted != nil {
-		mode = emittedEmission
+		return emittedEmission
 	}
-	noteOutput(func() []string { return []string{fmt.Sprintf("owner %s %d", key, mode)} })
-	return mode
-}
-
-// complete runs a pending program's completion, verified against its speculation.
-func (s *programStore) complete(key string, complete func(*programCompletion), cx *programCompletion) {
-	s.verified("completion", key, s.verify.take(key), func() { complete(cx) })
-}
-
-// speculatePending speculates the completions the round may run: all of them, or those not yet
-// speculated and those whose speculation waited on an owner since completed.
-func (s *programStore) speculatePending(repo string, rooted bool, seen map[string]bool, all bool) {
-	if s.verify == nil {
-		return
-	}
-	for _, key := range slices.Sorted(maps.Keys(s.completePrograms)) {
-		spec := s.verify.specs[key]
-		again := all || spec == nil || spec.waiting != "" && s.completePrograms[spec.waiting] == nil
-		if complete := s.completePrograms[key]; complete != nil && (!rooted || seen[key]) && again {
-			// The serial pass takes a completion out of the pending set before running it.
-			delete(s.completePrograms, key)
-			cx := &programCompletion{s: s, repo: repo, rooted: rooted}
-			s.verify.specs[key] = s.speculateTask(func() { complete(cx) })
-			s.completePrograms[key] = complete
-		}
-	}
+	return ruleEmission(owner)
 }
 
 // promotion is the rule visiting key sets emit = True on, when that rule is the owner target.
@@ -836,7 +764,7 @@ func (cx *programCompletion) promotion(key, target string) *rule.Rule {
 	if g == nil || g.lock.memberCompilerTarget(cx.repo, key) != "" || g.lock.memberCompilerTarget(cx.repo, target) != "" {
 		return nil
 	}
-	r := cx.s.storedRule(target)
+	r := g.rules[target]
 	own, err := parseLabel(target)
 	semantic := cx.s.semanticRule(target)
 	if r == nil || err != nil || semantic == nil {
@@ -960,14 +888,10 @@ func scopeVisibilityDenies(visibility []string, owner, consumer label.Label) boo
 func (s *programStore) publishPackageScope(c *config.Config, scope string, consumer label.Label) {
 	pkg := configSrcPackage(getConfig(c), scope, "")
 	key := emissionLabel(c.RepoName, pkg, ":"+packageName(pkg))
-	r := s.storedRule(key)
+	r := s.emission.rules[key]
 	if !s.generatedPackages[pkg] || r == nil || r.PrivateAttr("_ts_scope_candidate") != true {
 		return
 	}
-	if dryRun() {
-		panic(frozenBail{"package scope"})
-	}
-	defer s.emission.stamp(key)
 	scopes := r.AttrStrings("package_scopes")
 	source := strings.TrimPrefix(scope, pkg+"/")
 	visibility, _, err := s.sourceVisibility(c, s.emission.files[pkg], source)
