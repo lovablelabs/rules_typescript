@@ -25,6 +25,7 @@ import (
 	"github.com/bazelbuild/rules_go/go/runfiles"
 
 	"github.com/microsoft/typescript-go/shim/listing"
+	"github.com/mikn/rules_typescript/gazelle/incremental"
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 	"github.com/mikn/rules_typescript/ts/tools/tsconfig"
 )
@@ -180,6 +181,7 @@ func (s *programStore) locateBinary() (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	incremental.NoteTool(abs)
 	if _, err := statInput(abs); err != nil {
 		return "", "", fmt.Errorf("tsgo from %s: %w", how, err)
 	}

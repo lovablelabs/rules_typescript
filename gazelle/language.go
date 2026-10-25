@@ -25,6 +25,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
 	"github.com/bazelbuild/rules_go/go/runfiles"
+	"github.com/mikn/rules_typescript/gazelle/incremental"
 )
 
 const languageName = "typescript"
@@ -142,6 +143,11 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		return err
 	}
 	s := getConfig(c).programs
+	if exe, err := os.Executable(); err == nil {
+		incremental.NoteTool(exe)
+	}
+	// Before the gate: a replay compares tsgo's line, and locating it notes it as a tool.
+	_, _ = s.findBinary()
 	// Only the process that does the work gets past the gate, so a replay decodes nothing.
 	if err := gateOnRunRecord(fs, c, s.fullWalk); err != nil {
 		return err

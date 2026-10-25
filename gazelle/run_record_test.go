@@ -310,6 +310,34 @@ func TestRunRecord_AnInputStampedJustBeforeTheRunIsNotKept(t *testing.T) {
 	primeRunRecord(t, root, cache)
 }
 
+func TestRunRecord_AnotherHardLinkToTheToolsStillReplays(t *testing.T) {
+	requireTsgo(t)
+	root := writeTree(t, runRecordTree())
+	cache := t.TempDir()
+	recordGazelle(t, root, cache)
+	primeRunRecord(t, root, cache)
+	binary, err := runfiles.Rlocation(os.Getenv("TS_GAZELLE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsgo, err := newProgramStore().binary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, tool := range []string{binary, tsgo} {
+		resolved, err := filepath.EvalSymlinks(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(resolved, filepath.Join(t.TempDir(), fmt.Sprint(i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out := recordGazelle(t, root, cache); !replayed(out) {
+		t.Errorf("another link to the gazelle binary and tsgo refused the replay:\n%s", out)
+	}
+}
+
 // The record covers what the TypeScript language reads; another language's
 // inputs are not in it, so a binary carrying one always runs in full.
 func TestRunRecord_ABinaryWithAnotherLanguageNeverReplays(t *testing.T) {

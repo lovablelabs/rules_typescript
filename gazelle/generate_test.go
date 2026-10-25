@@ -23,6 +23,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/walk"
 	bzl "github.com/bazelbuild/buildtools/build"
 	"github.com/bazelbuild/rules_go/go/runfiles"
+	"github.com/mikn/rules_typescript/gazelle/incremental"
 )
 
 func TestMain(m *testing.M) {
@@ -35,6 +36,14 @@ func TestMain(m *testing.M) {
 	}
 	if err := privateRunfiles(tmp); err != nil {
 		log.Fatal(err)
+	}
+	// Each binary marks itself; a test that reads its record in process must agree on the lines.
+	for _, env := range []string{"TS_GAZELLE", "PROTO_GAZELLE"} {
+		if binary, err := runfiles.Rlocation(os.Getenv(env)); err == nil {
+			if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+				incremental.NoteTool(resolved)
+			}
+		}
 	}
 	os.Exit(m.Run())
 }
