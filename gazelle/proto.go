@@ -505,7 +505,7 @@ func resolveProtoLibrary(c *config.Config, ix *resolve.RuleIndex, r, effective *
 	tc := getConfig(c)
 	var typeInputs []string
 	selected := effective.AttrString("tsconfig")
-	p := tc.programs.compilerProgram(c, selected, from.Pkg)
+	p := tc.programs.compilerProgram(c, selected, from.Pkg, nil)
 	if !effective.ShouldKeep() && (!attrKept(effective, "deps") || !attrKept(effective, "type_inputs")) {
 		if err := compilerClosureError(p, from.String(), selected); err != nil {
 			fatal(err)

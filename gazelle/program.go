@@ -853,7 +853,8 @@ func (s *programStore) speculateSources(c *config.Config, p *program, pkg string
 	s.speculate(c.RepoRoot, p.config, tsgo, roots)
 }
 
-func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg string,
+// A non-nil set must be s.srcs(pkg, getConfig(c)); nil computes it after the early returns, since srcs records lookups.
+func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg string, set *srcSet,
 	dirInfo ...func(string) (walk.DirInfo, error)) *program {
 	cfg := compilerConfigSource(c, selectedConfig, pkg, dirInfo...)
 	if cfg == "" || s.generatedFile(cfg, true) {
@@ -866,7 +867,9 @@ func (s *programStore) compilerProgram(c *config.Config, selectedConfig, pkg str
 	if _, err := s.resolveCompilerConfig(c, cfg, observe); errors.Is(err, tsconfig.ErrAdmission) {
 		fatal(err)
 	}
-	set := s.srcs(pkg, getConfig(c))
+	if set == nil {
+		set = new(s.srcs(pkg, getConfig(c)))
+	}
 	sources := s.keptProgramSources(c, pkg, dirInfo...)
 	for _, files := range [][]string{set.library, set.test, set.declaration} {
 		sources = append(sources, files...)
