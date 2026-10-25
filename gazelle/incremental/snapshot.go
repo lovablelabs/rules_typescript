@@ -96,7 +96,7 @@ func walkEntries(o Options, rel string, sem chan struct{}, add func(k, v string)
 				add(childRel, "gone")
 				continue
 			}
-			line := readLine(filepath.Join(dir, entry.Name()), info)
+			line := ReadLine(filepath.Join(dir, entry.Name()), info)
 			if o.ByContent != nil && info.Mode().IsRegular() && o.ByContent(childRel) {
 				if data, err := os.ReadFile(filepath.Join(dir, entry.Name())); err == nil {
 					line = fmt.Sprintf("%o %x", info.Mode(), sha256.Sum256(data))
@@ -129,10 +129,11 @@ func entryLine(path string) string {
 	if err != nil {
 		return "absent"
 	}
-	return readLine(path, info)
+	return ReadLine(path, info)
 }
 
-func readLine(path string, info fs.FileInfo) string {
+// ReadLine is the stat line of path, given info, an lstat of it.
+func ReadLine(path string, info fs.FileInfo) string {
 	changed := ChangeTime(info)
 	// pnpm hard-links package files to its store, so another checkout's install moves their ctime.
 	if strings.Contains(filepath.ToSlash(path), "/node_modules/") {

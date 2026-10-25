@@ -612,11 +612,15 @@ func (w *walkRead) readLine(read string, stamped bool) (string, time.Time) {
 	if line, ok := w.entry(read); ok && line != "dir" && !strings.Contains(filepath.ToSlash(read), "/node_modules/") {
 		return line, time.Time{}
 	}
-	line := incremental.EntryLine(read)
+	info, err := os.Lstat(read)
+	if err != nil {
+		return "absent", time.Time{}
+	}
+	line := incremental.ReadLine(read, info)
 	if !stamped {
 		return line, time.Time{}
 	}
-	_, t := fileLine(read)
+	_, t := fileLineOf(read, info)
 	return line, t
 }
 
@@ -737,9 +741,14 @@ func readDirLine(dir string, buildNames []string, skip string) (string, []walkEn
 // projection written into it. A link is read through, so its target counts.
 func fileLine(file string) (string, time.Time) {
 	info, err := os.Lstat(file)
-	switch {
-	case err != nil:
+	if err != nil {
 		return "absent", time.Time{}
+	}
+	return fileLineOf(file, info)
+}
+
+func fileLineOf(file string, info fs.FileInfo) (string, time.Time) {
+	switch {
 	case info.IsDir():
 		return "dir", time.Time{}
 	case info.Mode()&fs.ModeSymlink == 0:
