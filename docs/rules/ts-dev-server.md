@@ -105,13 +105,14 @@ A workspace member the application imports by package name reaches the
 importer's `node_modules` as its store tree, a copy of the member's files
 rather than a link to its source directory. The generated config names every
 main-repository member in the `entry_point`'s npm closure in `ssr.noExternal`
-and `optimizeDeps.exclude`, so the server transforms the copy like first-party
-source instead of externalising or pre-bundling it. An excluded package is
-served as it is, so a member must ship ES modules, and Vite does not discover
-the dependencies it imports: a CommonJS one only a member imports goes in
-`optimizeDeps.include` as `<member> > <dependency>` from a plugin's `config`
-hook. Published packages keep the server's defaults, unless one shares a
-member's name: both lists match by name.
+and `optimizeDeps.exclude`, so the server transforms the member, its source
+or the copy (below), like first-party source instead of externalising or
+pre-bundling it. An excluded package is served as it is, so a member must ship
+ES modules, and neither server discovers the dependencies a served copy
+imports: a CommonJS one only a member imports goes in `optimizeDeps.include`
+as `<member> > <dependency>` from a plugin's `config` hook. Published packages
+keep the server's defaults, unless one shares a member's name: both lists match
+by name.
 
 The launcher sets `BAZEL_MEMBER_SOURCES` to a JSON object mapping each member's
 store directory, as a real path, to the member's directory under the
@@ -135,6 +136,26 @@ function sourcePath(file) {
 
 When the application imports no member, the config sets neither key and the
 launcher leaves `BAZEL_MEMBER_SOURCES` unset.
+
+The generated config also resolves a module id under a member's store
+directory to its counterpart in the member's directory: the same path, with a
+`.js` copy found as `.ts`, `.tsx` or `.jsx` before `.js`, `.mjs` as `.mts` and
+`.cjs` as `.cts`. Every plugin after it sees the source path, and an edit to
+the source reaches the browser without a rebuild. A file with no counterpart
+keeps its copy. A bare import in a member source resolves from the source
+directory, except one only its copy reaches, such as a dependency the
+application does not link, or one the source directory finds in another
+package store than the copy does, such as the application's own version of a
+dependency the member links at another version: both resolve as the copy's
+would. A dependency pre-bundled under that name keeps its pre-bundle. Vite
+offers this plugin every import. oj offers it bare imports only, before its
+own resolver, and resolves a relative import from the importing file's
+directory, so under oj a member source cannot import a file only its copy has,
+such as generated output, and a copy-only file that imports the member's own
+sources relatively loads them from the copy, a second instance beside the one
+the application imports. A server-side render resolves a member the same way,
+so it loads the source too, but an import it externalizes is resolved from the
+source directory before this plugin runs, as Vite's SSR externalization does.
 
 ## `vite_config` Imports
 

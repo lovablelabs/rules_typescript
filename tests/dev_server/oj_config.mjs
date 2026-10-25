@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 const input = 'oj residual snapshot source';
@@ -29,6 +31,40 @@ export default {
           sourcesContent: ['export const value = "ORIGINAL_HOT";'], mappings: 'AAAA',
         },
       };
+    },
+  }, {
+    name: 'pre-resolve-require',
+    enforce: 'pre',
+    resolveId: {
+      filter: { id: /^(zod|cjs-claimed|external-claimed)$/ },
+      handler(id, importer) {
+        if (id === 'external-claimed') return { id: 'https://cdn.invalid/external.js', external: true };
+        if (id === 'cjs-claimed') return createRequire(importer).resolve('zod');
+        if (importer?.endsWith('/npm_elsewhere_entry.js')) {
+          return this.resolve(id, path.join(path.dirname(importer), '../../vendor/importer.js'), { skipSelf: true });
+        }
+        return importer?.endsWith('/npm_require_entry.js') ? createRequire(importer).resolve(id) : null;
+      },
+    },
+  }, {
+    name: 'pre-resolve-passthrough',
+    enforce: 'pre',
+    resolveId: {
+      filter: { id: /^zod$/ },
+      handler(id, importer, options) {
+        return this.resolve(id, importer, { ...options, skipSelf: true });
+      },
+    },
+  }, {
+    name: 'id-alias',
+    async buildStart() {
+      if (!(await this.resolve('zod'))) throw new Error('this.resolve with no importer found no zod');
+    },
+    resolveId: {
+      filter: { id: /^zod-via-id$/ },
+      handler(_id, importer) {
+        return this.resolve('zod', importer, { skipSelf: true });
+      },
     },
   }, {
     name: 'generated-hot-transform',

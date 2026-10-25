@@ -202,6 +202,7 @@ inherited_dev_npm_test(
 node_modules(
     name = "member_node_modules",
     parent = "//tests/npm/app_a:node_modules",
+    deps = ["@npm//:vite"],
 )
 
 # keep
@@ -256,6 +257,15 @@ ts_dev_server(
     name = "member_sources_dev",
     entry_point = ":member_entry",
     node_modules = ":member_node_modules",
+    vite_config = "member_sources.vite.mjs",
+)
+
+# keep
+ts_dev_server(
+    name = "member_sources_vite_dev",
+    entry_point = ":member_entry",
+    node_modules = ":member_node_modules",
+    server = "//vite:dev_server",
     vite_config = "member_sources.vite.mjs",
 )
 
