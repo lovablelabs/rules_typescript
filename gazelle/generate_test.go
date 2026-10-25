@@ -22,6 +22,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
 	bzl "github.com/bazelbuild/buildtools/build"
+	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
 func TestMain(m *testing.M) {
@@ -32,7 +33,69 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", tmp); err != nil {
 		log.Fatal(err)
 	}
+	if err := privateRunfiles(tmp); err != nil {
+		log.Fatal(err)
+	}
 	os.Exit(m.Run())
+}
+
+// RE stages runfiles as hard links into a cache that concurrent actions link too, moving
+// their ctime mid-test; private copies have a stable stat. A re-executed test inherits them.
+func privateRunfiles(tmp string) error {
+	if os.Getenv("TS_GAZELLE") == "" || filepath.IsAbs(os.Getenv("TS_GAZELLE")) || tsgoRlocationpath == "" {
+		return nil
+	}
+	dir, err := os.MkdirTemp(tmp, "runfiles")
+	if err != nil {
+		return err
+	}
+	for _, env := range []string{"TS_GAZELLE", "PROTO_GAZELLE"} {
+		binary, err := runfiles.Rlocation(os.Getenv(env))
+		if err != nil {
+			return err
+		}
+		copied := filepath.Join(dir, filepath.Base(binary))
+		if err := copyFile(binary, copied); err != nil {
+			return err
+		}
+		if err := os.Setenv(env, copied); err != nil {
+			return err
+		}
+	}
+	tsgo, err := runfiles.Rlocation(tsgoRlocationpath)
+	if err != nil {
+		return err
+	}
+	// The listing reads lib.d.ts and package.json beside tsgo.
+	toolchain := filepath.Join(dir, "tsgo")
+	if err := os.Mkdir(toolchain, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Dir(tsgo))
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := copyFile(filepath.Join(filepath.Dir(tsgo), entry.Name()), filepath.Join(toolchain, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if err := os.Setenv("TSGO", filepath.Join(toolchain, filepath.Base(tsgo))); err != nil {
+		return err
+	}
+	return nil
+}
+
+func copyFile(from, to string) error {
+	info, err := os.Stat(from)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(from)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(to, data, info.Mode().Perm())
 }
 
 // Under Bazel the toolchain's tsgo is in the runfiles; a plain go test sets
