@@ -67,6 +67,17 @@ export default {
       },
     },
   }, {
+    name: 'plugin-stylesheet',
+    enforce: 'pre',
+    resolveId: {
+      filter: { id: /^sheet-pkg\/sheet\.css\?url$/ },
+      handler: () => '\0fixture:sheet-url',
+    },
+    load: {
+      filter: { id: /^\0fixture:sheet\.css$/ },
+      handler: () => '.plugin-sheet { color: red; }',
+    },
+  }, {
     name: 'generated-hot-transform',
     transform(code, id) {
       if (!isGeneratedHot(id)) return null;

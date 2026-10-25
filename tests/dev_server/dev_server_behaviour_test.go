@@ -1508,6 +1508,28 @@ process.stdout.write(JSON.stringify(names));
 		})
 	}
 
+	if impl == "oj" && wantBazelPlugin {
+		t.Run("ssr_stylesheet_is_neither_externalized_before_plugins_nor_compiled_as_tsx", func(t *testing.T) {
+			pkg := filepath.Join(ws, "vendor", "node_modules", "sheet-pkg")
+			mkdir(t, pkg)
+			write(t, filepath.Join(pkg, "package.json"), `{"name":"sheet-pkg","version":"0.0.0"}`)
+			write(t, filepath.Join(pkg, "sheet.css"), ".sheet-pkg { color: red; }")
+			importer := filepath.Join(ws, "vendor", "importer.js")
+			resolved := get(t, base, "/@ssr-resolve?"+url.Values{"importer": {importer}, "spec": {"sheet-pkg/sheet.css?url"}}.Encode())
+			if !strings.Contains(resolved.body, `fixture:sheet-url`) {
+				t.Errorf("a dependency's stylesheet ?url import was externalized before a pre resolveId saw it: HTTP %d %s", resolved.status, resolved.body)
+			}
+			inline := get(t, base, "/@ssr-resolve?"+url.Values{"importer": {importer}, "spec": {"sheet-pkg/sheet.css?inline"}}.Encode())
+			if inline.status != 200 || strings.Contains(inline.body, `"external":true`) {
+				t.Errorf("a dependency's stylesheet import with a query was left to Node: HTTP %d %s", inline.status, inline.body)
+			}
+			r := get(t, base, "/@ssr-module?"+url.Values{"id": {"\x00fixture:sheet.css"}}.Encode())
+			if r.status != 200 {
+				t.Errorf("a server-side render of a plugin-loaded stylesheet failed: HTTP %d %s\n%s", r.status, r.body, srv.log(t))
+			}
+		})
+	}
+
 	// ── 4b: a bare npm specifier ──────────────────────────────────────────────
 	// The npm tree is a Bazel output; what puts it on the walk up from a
 	// checked-in source file is the <workspace>/node_modules link the launcher
