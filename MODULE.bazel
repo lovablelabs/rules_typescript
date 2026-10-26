@@ -172,7 +172,11 @@ crate.annotation(
 crate.annotation(
     crate = "oj_server",
     patch_args = ["-p1"],
-    patches = ["//oj:oj-server-pre-resolve-id.patch"],
+    patches = [
+        "//oj:oj-server-pre-resolve-id.patch",
+        # A dependency's `.css?url` reaches pre plugins; a plugin-loaded sheet is CSS.
+        "//oj:oj-server-ssr-css-url.patch",
+    ],
     repositories = ["oj_crates"],
     version = "0.2.44",
 )
@@ -181,7 +185,11 @@ crate.annotation(
     crate = "oj",
     gen_binaries = ["oj"],
     patch_args = ["-p1"],
-    patches = ["//oj:oj-napi-link.patch"],
+    patches = [
+        "//oj:oj-napi-link.patch",
+        # Start SSR offers resolveId the id with its query first, as Vite does.
+        "//oj:oj-start-host-query-resolve-id.patch",
+    ],
     repositories = ["oj_crates"],
     version = "0.2.44",
 )

@@ -1,0 +1,31 @@
+diff --git a/src/ssr.rs b/src/ssr.rs
+--- a/src/ssr.rs
++++ b/src/ssr.rs
+@@ -241,6 +241,8 @@
+ fn externalized(state: &ServerState, spec: &str, resolved: &Path) -> bool {
+     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
+     resolved.to_string_lossy().contains("/node_modules/")
++        // Vite's canExternalizeFile reads the extension with its query: `x.css?url` stays internal.
++        && !resolved.to_string_lossy().contains('?')
+         && !is_style_ext(ext)
+         && ext != "json"
+         && state.ssr_externals.is_external_pkg(oj_config::SsrExternals::package_of(spec))
+@@ -263,7 +265,7 @@
+     // own: Vite only externalizes JavaScript (canExternalizeFile), and
+     // the runtime would parse a stylesheet as a module.
+     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+-    Ok(if s.contains("/node_modules/") && !is_style_ext(ext) && ext != "json" {
++    Ok(if s.contains("/node_modules/") && !s.contains('?') && !is_style_ext(ext) && ext != "json" {
+         // A plugin's chosen file is imported as itself, not re-resolved by name.
+         SsrResolution::External(if claimed { s.into_owned() } else { spec.to_string() })
+     } else {
+@@ -341,7 +343,8 @@
+         },
+     };
+     let ext = path.extension().and_then(|e| e.to_str());
+-    if !from_plugin && ext.is_some_and(is_style_ext) {
++    // Vite's css plugin transforms a plugin-loaded sheet like one read from disk.
++    if ext.is_some_and(is_style_ext) {
+         return style_file(state, &path, source)
+             .await
+             .map(|m| m.code)
