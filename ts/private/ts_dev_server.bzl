@@ -471,6 +471,8 @@ def _generate_dev_config(
             "const bazelMemberSources = {\n" +
             "  name: 'bazel:member-sources',\n" +
             "  enforce: 'pre',\n" +
+            "  // Vite gives the top-level optimizeDeps to the client environment only; a pre-bundle skips plugin transforms.\n" +
+            "  configEnvironment: name => (name === 'client' ? null : { optimizeDeps: { exclude: [...memberNames] } }),\n" +
             "  async resolveId(id, importer, options) {\n" +
             "    // Only a member by name, or an import from a member's files, can reach a member's store.\n" +
             "    const pkg = id.split('?')[0].split('/').slice(0, id.startsWith('@') ? 2 : 1).join('/');\n" +
