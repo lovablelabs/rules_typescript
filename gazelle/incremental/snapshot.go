@@ -135,8 +135,7 @@ func entryLine(path string) string {
 // ReadLine is the stat line of path, given info, an lstat of it.
 func ReadLine(path string, info fs.FileInfo) string {
 	changed := ChangeTime(info)
-	// pnpm hard-links package files to its store, so another checkout's install moves their ctime.
-	if strings.Contains(filepath.ToSlash(path), "/node_modules/") {
+	if IgnoresCtime(path) {
 		changed = time.Time{}
 	}
 	line := fingerprint(info, changed)
@@ -145,6 +144,18 @@ func ReadLine(path string, info fs.FileInfo) string {
 		line += " -> " + target
 	}
 	return line
+}
+
+var tools sync.Map
+
+// NoteTool marks a tool file, whose line leaves the ctime out.
+func NoteTool(path string) { tools.Store(path, true) }
+
+// IgnoresCtime is whether path's line leaves the ctime out: pnpm hard-links package files
+// to its store, and caches hard-link tool files to theirs, so another link moves their ctime.
+func IgnoresCtime(path string) bool {
+	_, tool := tools.Load(path)
+	return tool || strings.Contains(filepath.ToSlash(path), "/node_modules/")
 }
 
 // StatLine is info's mode, size, mtime, ctime and inode. An in-place rewrite

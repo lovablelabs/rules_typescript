@@ -600,16 +600,16 @@ func (w *walkRead) entry(file string) (string, bool) {
 }
 
 func (w *walkRead) fileLine(file string) (string, time.Time) {
-	if line, ok := w.entry(file); ok {
+	if line, ok := w.entry(file); ok && !incremental.IgnoresCtime(file) {
 		return line, time.Time{}
 	}
 	return fileLine(file)
 }
 
-// readLine keeps a stat of its own for a directory read and a node_modules
-// read, whose line leaves the ctime out; only a stamped read pays for the stamp.
+// readLine keeps a stat of its own for a directory read and a read whose line
+// leaves the ctime out; only a stamped read pays for the stamp.
 func (w *walkRead) readLine(read string, stamped bool) (string, time.Time) {
-	if line, ok := w.entry(read); ok && line != "dir" && !strings.Contains(filepath.ToSlash(read), "/node_modules/") {
+	if line, ok := w.entry(read); ok && line != "dir" && !incremental.IgnoresCtime(read) {
 		return line, time.Time{}
 	}
 	info, err := os.Lstat(read)
@@ -752,18 +752,25 @@ func fileLineOf(file string, info fs.FileInfo) (string, time.Time) {
 	case info.IsDir():
 		return "dir", time.Time{}
 	case info.Mode()&fs.ModeSymlink == 0:
-		return incremental.StatLine(info), changed(info)
+		return incremental.ReadLine(file, info), changedAt(file, info)
 	}
-	target, _ := os.Readlink(file)
-	line := incremental.StatLine(info) + " -> " + target
+	line := incremental.ReadLine(file, info)
 	switch to, err := os.Stat(file); {
 	case err != nil:
-		return line + " dangling", changed(info)
+		return line + " dangling", changedAt(file, info)
 	case to.IsDir():
-		return line + " dir", changed(info)
+		return line + " dir", changedAt(file, info)
 	default:
-		return line + " " + incremental.StatLine(to), later(changed(info), changed(to))
+		return line + " " + incremental.ReadLine(file, to), later(changedAt(file, info), changedAt(file, to))
 	}
+}
+
+// changedAt is changed, less the ctime when file's line leaves it out.
+func changedAt(file string, info fs.FileInfo) time.Time {
+	if incremental.IgnoresCtime(file) {
+		return info.ModTime()
+	}
+	return changed(info)
 }
 
 // racyContent is whether a content-keyed stamp counts toward the racy window: inside
