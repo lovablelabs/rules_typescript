@@ -291,9 +291,13 @@ export function bazelPlugin(options: BazelPluginOptions = {}): Plugin {
             return result?.filePath ?? null;
           }
           if (directory !== undefined && resolver.declaredDirectory(resolved.id) !== directory) {
-            throw new Error(
-              `Bazel module ${file} resolved outside declared directory: ${resolved.id}`,
-            );
+            const member = linkedMember(file, resolved.id);
+            if (member === undefined || resolver.declaredDirectory(member) !== directory) {
+              throw new Error(
+                `Bazel module ${file} resolved outside declared directory: ${resolved.id}`,
+              );
+            }
+            return { ...resolved, id: member + suffix };
           }
           if (
             result !== null &&
@@ -491,6 +495,19 @@ async function handleRebuild(
 function splitSuffix(request: string): [string, string] {
   const cut = request.slice(1).search(/[?#]/);
   return cut < 0 ? [request, ''] : [request.slice(0, cut + 1), request.slice(cut + 1)];
+}
+
+/** A tree member that links out of its tree, as in a bazel-bin mirrored file by file, resolves to its link target. */
+function linkedMember(request: string, resolvedId: string): string | undefined {
+  const target = path.normalize(resolvedId);
+  const name = path.basename(target);
+  return [request, path.join(path.dirname(request), name), path.join(request, name)].find((candidate) => {
+    try {
+      return fs.realpathSync(candidate) === target;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function canonicalPath(file: string): string {
