@@ -385,6 +385,27 @@ func TestDevServerBehaviour(t *testing.T) {
 				t.Errorf("no module id the plugin transformed lies under the member's store %s: %v", store, seen.Transformed)
 			}
 		})
+		t.Run("server_environment_optimizer_cannot_pre_bundle_a_workspace_member", func(t *testing.T) {
+			const pkg = "tests/npm/dev_inherited_types"
+			t.Setenv("MEMBER_SOURCES_SERVER_OPTIMIZERS", "1")
+			ws := t.TempDir()
+			app := filepath.Join(ws, filepath.FromSlash(pkg))
+			mkdir(t, app)
+			mkdir(t, filepath.Join(ws, "bazel-bin"))
+			source := filepath.Join(ws, "packages", "shared", "src")
+			mkdir(t, source)
+			write(t, filepath.Join(source, "index.ts"), `export const tagline: string = "MEMBER_SOURCE";`)
+			write(t, filepath.Join(app, "index.html"), "SERVER_OPTIMIZERS")
+			write(t, filepath.Join(app, "entry.ts"), `export { tagline } from "shared";`)
+			srv := start(t, tree.File(pkg+"/member_sources_vite_dev_launcher").Abs(), ws, t.TempDir())
+			base := srv.awaitHTTP(t, "/index.html")
+			for _, environment := range []string{"ssr", "worker"} {
+				r := get(t, base, "/environment-transform?"+url.Values{"environment": {environment}, "url": {"/entry.ts"}}.Encode())
+				if r.status != 200 || !strings.Contains(r.body, "/packages/shared/src/index.ts") {
+					t.Errorf("the %s environment imports the member from somewhere other than its source: HTTP %d\n%s\n%s", environment, r.status, r.body, srv.log(t))
+				}
+			}
+		})
 		t.Run("workspace_member_is_served_from_its_source", func(t *testing.T) {
 			const pkg = "tests/npm/dev_inherited_types"
 			for _, launcher := range []string{"member_sources_vite_dev_launcher", "member_sources_dev_launcher"} {

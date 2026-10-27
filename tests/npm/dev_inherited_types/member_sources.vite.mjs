@@ -7,6 +7,13 @@ const transformed = [];
 export default {
   plugins: [{
     name: 'member-sources',
+    // Server environments that discover deps to pre-bundle, as worker and SSR framework plugins configure them.
+    config: () => process.env.MEMBER_SOURCES_SERVER_OPTIMIZERS && {
+      environments: {
+        ssr: { optimizeDeps: { noDiscovery: false } },
+        worker: { consumer: 'server', resolve: { noExternal: true }, optimizeDeps: { noDiscovery: false } },
+      },
+    },
     async transform(code, id) {
       transformed.push(id);
       // Like most transforms, it leaves node_modules alone; one that resolves for
@@ -22,6 +29,15 @@ export default {
         sources: JSON.parse(process.env.BAZEL_MEMBER_SOURCES ?? 'null'),
         transformed,
       })));
+      server.middlewares.use('/environment-transform', async (req, res) => {
+        const query = new URL(req.url, 'http://localhost').searchParams;
+        try {
+          res.end((await server.environments[query.get('environment')].transformRequest(query.get('url')))?.code ?? '');
+        } catch (error) {
+          res.statusCode = 500;
+          res.end(String(error?.stack ?? error));
+        }
+      });
     },
   }, {
     name: 'pre-claims',
