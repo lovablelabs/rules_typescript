@@ -7,12 +7,12 @@ edition = "2024"
 path = "unused.rs"
 
 [dependencies]
-oj = { version = "=0.2.44" }
+oj = { git = "https://github.com/lovablelabs/oj", tag = "v0.2.49" }
 deno_core = { version = "=0.412.0", default-features = false }
-oj_server = { version = "=0.2.44" }
-oj_js = { version = "=0.2.44" }
-oj_cache = { version = "=0.2.44" }
+oj_server = { git = "https://github.com/lovablelabs/oj", tag = "v0.2.49" }
+oj_js = { git = "https://github.com/lovablelabs/oj", tag = "v0.2.49" }
+oj_cache = { git = "https://github.com/lovablelabs/oj", tag = "v0.2.49" }
 tokio = { version = "=1.53.1", features = ["full"] }
 cranelift-assembler-x64 = { version = "=0.117.2", default-features = false }
 cranelift-codegen-meta = { version = "=0.117.2", default-features = false }
-oj_deno_napi = { version = "=0.2.44", default-features = false }
+oj_deno_napi = { git = "https://github.com/lovablelabs/oj", tag = "v0.2.49", default-features = false }

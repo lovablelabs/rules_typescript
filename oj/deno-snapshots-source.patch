@@ -1,6 +1,7 @@
-diff --git a/build.rs b/build.rs
---- a/build.rs
-+++ b/build.rs
+diff --git a/crates/oj_deno_snapshots/build.rs b/crates/oj_deno_snapshots/build.rs
+index 610a1e1..9f17112 100644
+--- a/crates/oj_deno_snapshots/build.rs
++++ b/crates/oj_deno_snapshots/build.rs
 @@ -46,10 +46,9 @@ fn main() {
  /// into a readable build error instead.
  #[cfg(not(feature = "disable"))]

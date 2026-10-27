@@ -1,6 +1,9 @@
---- a/build.rs
-+++ b/build.rs
-@@ -3,9 +3,17 @@
+diff --git a/crates/oj/build.rs b/crates/oj/build.rs
+index e04fde6..2fabd42 100644
+--- a/crates/oj/build.rs
++++ b/crates/oj/build.rs
+@@ -2,10 +2,18 @@
+ // Copyright (c) 2026 Raphael Amorim
  
  fn main() {
 -    // Export the Node-API symbols from the oj binary so `.node` native addons

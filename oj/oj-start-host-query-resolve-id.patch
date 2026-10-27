@@ -1,8 +1,8 @@
-diff --git a/src/start_host.rs b/src/start_host.rs
-index 55caa15..78008b7 100644
---- a/src/start_host.rs
-+++ b/src/start_host.rs
-@@ -940,6 +940,18 @@ impl StartHost {
+diff --git a/crates/oj/src/start_host.rs b/crates/oj/src/start_host.rs
+index f922eac..f52a328 100644
+--- a/crates/oj/src/start_host.rs
++++ b/crates/oj/src/start_host.rs
+@@ -633,6 +633,18 @@ impl StartHost {
  
          let (clean, intent, svg_react) = split_intent(spec);
  

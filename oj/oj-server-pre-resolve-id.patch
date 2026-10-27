@@ -1,82 +1,84 @@
-diff --git a/src/assets/plugin-host.mjs b/src/assets/plugin-host.mjs
-index d59d31a..b56b962 100644
---- a/src/assets/plugin-host.mjs
-+++ b/src/assets/plugin-host.mjs
-@@ -1426,10 +1426,9 @@ const ctx = {
-   },
-   async resolve(source, importer, options) {
-     if (source === "/@react-refresh") return { id: "/@oj/refresh-runtime.js" };
--    // Vite (pluginContainer ctx.resolve): the container's resolveId chain runs
--    // first, and only then Vite's own resolver. A sibling plugin's virtual id
--    // resolves here instead of falling through to oj's disk resolver and coming
--    // back null. `attributes` / `custom` / `isEntry` travel to the chain like
-+    // Vite (pluginContainer ctx.resolve): the pre plugins, then Vite's own
-+    // resolver, then the rest of the chain, so a sibling plugin's virtual id
-+    // still resolves here. `attributes` / `custom` / `isEntry` travel to the chain like
-     // Vite's do, and the resolved object (external, meta, moduleSideEffects)
-     // comes back whole.
-     // `skipSelf` mirrors Vite's cumulative `skipCalls`: each nested resolve
-@@ -1453,20 +1452,30 @@ const ctx = {
-           : [{ id: source, importer, plugin: self }];
+diff --git a/crates/oj_server/src/assets/plugin-host.mjs b/crates/oj_server/src/assets/plugin-host.mjs
+index ccc1139..34c2f4d 100644
+--- a/crates/oj_server/src/assets/plugin-host.mjs
++++ b/crates/oj_server/src/assets/plugin-host.mjs
+@@ -1905,10 +1905,9 @@ function pluginContext(c) {
+       if (source === "@vitejs/plugin-react/preamble" || source === "@vitejs/plugin-react-swc/preamble") {
+         return { id: "/@oj/refresh-preamble.js" };
        }
-     }
--    const viaPlugin = await resolveIdFull(source, importer, {
--      skipCalls,
--      attributes: options && options.attributes,
--      custom: options && options.custom,
--      isEntry: !!(options && options.isEntry),
--    });
--    if (viaPlugin != null) return viaPlugin;
--    const map = transformResolveStore.getStore();
--    if (map && map.has(source)) {
--      const id = map.get(source);
+-      // Vite (pluginContainer ctx.resolve): the container's resolveId chain runs
+-      // first, and only then Vite's own resolver. A sibling plugin's virtual id
+-      // resolves here instead of falling through to oj's disk resolver and coming
+-      // back null. `attributes` / `custom` / `isEntry` travel to the chain like
++      // Vite (pluginContainer ctx.resolve): the pre plugins, then Vite's own
++      // resolver, then the rest of the chain, so a sibling plugin's virtual id
++      // still resolves here. `attributes` / `custom` / `isEntry` travel to the chain like
+       // Vite's do, and the resolved object (external, meta, moduleSideEffects)
+       // comes back whole.
+       // `skipSelf` mirrors Vite's cumulative `skipCalls`: each nested resolve
+@@ -1932,26 +1931,45 @@ function pluginContext(c) {
+             : [{ id: source, importer, plugin: self }];
+         }
+       }
+-      const viaPlugin = await resolveIdFull(c, source, importer, {
+-        skipCalls,
+-        attributes: options && options.attributes,
+-        custom: options && options.custom,
+-        isEntry: !!(options && options.isEntry),
+-        scan: !!(this && this._scan),
+-      });
+-      if (viaPlugin != null) return viaPlugin;
+-      const map = transformResolveStore.getStore();
+-      if (map && map.has(source)) {
+-        const id = map.get(source);
+-        return id == null ? null : { id };
+-      }
++      const scan = !!(this && this._scan);
++      const chain = (phase) =>
++        resolveIdFull(c, source, importer, {
++          skipCalls,
++          attributes: options && options.attributes,
++          custom: options && options.custom,
++          isEntry: !!(options && options.isEntry),
++          scan,
++          phase,
++        });
+       if (c.bundle) {
++        const viaPlugin = await chain(null);
++        if (viaPlugin != null) return viaPlugin;
++        const pre = transformResolveStore.getStore();
++        if (pre && pre.map && pre.map.has(source)) {
++          const id = pre.map.get(source);
++          return id == null ? null : { id };
++        }
+         const r = await asyncRpc("bundlerResolve", [source, importer ?? "", !!(options && options.isEntry)], c.id);
+         // Outside a running bundle (no bundler to ask) oj's resolver answers.
+         if (!r || !r.fallback) return r ?? null;
++        const id = await ctxRpc("resolve", [source, importer ?? ""]);
++        return id == null ? null : { id };
+       }
+-      const id = await ctxRpc("resolve", [source, importer ?? ""]);
 -      return id == null ? null : { id };
--    }
--    const id = await ctxRpc("resolve", [source, importer ?? ""]);
--    return id == null ? null : { id };
-+    const scan = !!((this && this._resolveScan) || (options && options.scan));
-+    const chain = (part) =>
-+      resolveIdFull(source, importer, {
-+        skipCalls,
-+        attributes: options && options.attributes,
-+        custom: options && options.custom,
-+        isEntry: !!(options && options.isEntry),
-+        scan,
-+        [part]: true,
-+      });
-+    // vite:resolve sits after the pre plugins and before the normal ones.
-+    const viaPre = await chain("preOnly");
-+    if (viaPre != null) return viaPre;
-+    // The transforming module's own imports, pre-resolved; a miss still
-+    // reaches the plugins after oj's resolver.
-+    const pre = transformResolveStore.getStore();
-+    const local = pre && pre.importer === importer ? pre.map?.get(source) : undefined;
-+    if (local != null) return { id: local };
-+    // Outside the scan, a client bare import already pre-bundled resolves to
-+    // its bundle (tryOptimizedResolve).
-+    const optimize = !scan && environment.config?.consumer !== "server";
-+    const id = await ctxRpc("resolve", [source, importer ?? "", optimize ? "optimize" : ""]);
-+    if (id != null) return { id };
-+    return chain("skipPre");
-   },
-   emitFile(file) {
-     if (file == null) {
-@@ -1555,10 +1564,10 @@ function ctxFor(p) {
- 
- // Vite's ResolveIdContext carries the chain's skipCalls, so a nested
- // ctx.resolve accumulates onto the whole chain instead of starting over.
--function resolveHookCtx(p, skipCalls) {
-+function resolveHookCtx(p, skipCalls, scan) {
-   const base = ctxFor(p);
--  if (!skipCalls) return base;
--  return Object.create(base, { _resolveSkipCalls: { value: skipCalls } });
-+  if (!skipCalls && !scan) return base;
-+  return Object.create(base, { _resolveSkipCalls: { value: skipCalls }, _resolveScan: { value: scan } });
- }
- 
- let pluginConfigDelta = {};
-@@ -3649,7 +3658,7 @@ async function transform(code, id, resolvedJson) {
-     });
++      // vite:resolve sits after the pre plugins and before the normal ones.
++      const viaPre = await chain("pre");
++      if (viaPre != null) return viaPre;
++      // The transforming module's own imports, pre-resolved; a miss still
++      // reaches the plugins after oj's resolver.
++      const pre = transformResolveStore.getStore();
++      const local = pre && pre.importer === importer ? pre.map?.get(source) : undefined;
++      if (local != null) return { id: local };
++      // Outside the scan, a client bare import already pre-bundled resolves to
++      // its bundle (tryOptimizedResolve).
++      const ssr = c.environment.config?.consumer === "server";
++      const mode = ssr ? "ssr" : scan ? "client" : "optimize";
++      const id = await ctxRpc("resolve", [source, importer ?? "", mode]);
++      if (id != null) return { id };
++      return chain("post");
+     },
+     emitFile(file) {
+       if (file == null) {
+@@ -4858,7 +4876,7 @@ async function transform(c, code, id, resolvedJson, phase) {
+     return result();
    };
    return transformWatchStore.run(bucket, () =>
 -    transformEmitStore.run(chunkBucket, () => transformResolveStore.run(resolveMap, runLoop)),
@@ -84,121 +86,67 @@ index d59d31a..b56b962 100644
    );
  }
  
-@@ -3775,6 +3784,8 @@ function hookTransformMatches(hook, id, code, idOnly = false) {
- // `opts.skipCalls`: the chain's cumulative skip list (see ctx.resolve);
- // `opts.skip`: a single plugin to skip outright (legacy single-caller form,
- // kept for external callers of environment.resolveId).
-+// `opts.preOnly` / `opts.skipPre`: only, or all but, the plugins Vite runs
-+// before its own resolver.
- async function resolveIdFull(source, importer, opts) {
-   const options = {
-     attributes: (opts && opts.attributes) || {},
-@@ -3785,8 +3796,12 @@ async function resolveIdFull(source, importer, opts) {
-   };
-   const skip = opts && opts.skip;
-   const skipCalls = (opts && opts.skipCalls) || null;
--  for (const { p, fn: handler } of withHtmlProxy(pluginsWithHook("resolveId"), "resolveId", source)) {
-+  const preOnly = !!(opts && opts.preOnly);
-+  const skipPre = !!(opts && opts.skipPre);
-+  for (const { p, fn: handler, rank } of withHtmlProxy(pluginsWithHook("resolveId"), "resolveId", source)) {
-     if (skip && p === skip) continue;
-+    if (preOnly && !runsBeforeOxcStrip(p, rank)) continue;
-+    if (skipPre && runsBeforeOxcStrip(p, rank)) continue;
-     // Vite merges skipCalls into the skip set: a plugin is skipped when its
-     // recorded call re-issues the same id + importer, or when it already
-     // re-entered once (`called`) -- the recursion hard-stop.
-@@ -3798,7 +3813,7 @@ async function resolveIdFull(source, importer, opts) {
-     if (!hookIdMatches(p.resolveId, source)) continue;
-     let r;
-     try {
--      r = await handler.call(resolveHookCtx(p, skipCalls), source, importer || undefined, options);
-+      r = await handler.call(resolveHookCtx(p, skipCalls, options.scan), source, importer || undefined, options);
-     } catch (e) {
-       throw decoratePluginError(e, p, importer || source);
-     }
-@@ -4155,6 +4170,11 @@ async function run(hook, args) {
-   }
-   if (hook === "transform") return gateOnBuildStart().then(() => transform(args[0], args[1], args[2]));
-   if (hook === "resolveId") return gateOnBuildStart().then(() => resolveId(args[0], args[1]));
-+  if (hook === "resolveIdPre") {
-+    return gateOnBuildStart()
-+      .then(() => resolveIdFull(args[0], args[1], { preOnly: true }))
-+      .then((r) => (r == null ? null : JSON.stringify({ id: r.id, external: !!r.external })));
-+  }
-   if (hook === "optimizeScan") return gateOnBuildStart().then(() => optimizeScan(args[0]));
-   if (hook === "load") return gateOnBuildStart().then(() => load(args[0]));
-   if (hook === "handleHotUpdate") return handleHotUpdate(args[0], args[1], args[2], args[3]);
-@@ -4401,6 +4421,26 @@ async function run(hook, args) {
-     const has = plugins.some((p) => typeof hookHandler(p.resolveId) === "function");
+@@ -6111,6 +6129,19 @@ async function run(hook, args, c) {
+     const has = c.plugins.some((p) => typeof hookHandler(p.resolveId) === "function");
      return String(has);
    }
 +  if (hook === "getPreResolveIdFilters") {
 +    // The `pre` resolveId hooks' `filter.id` include patterns, so oj offers them
 +    // only the bare imports one can claim; null when one takes every id.
 +    const pats = [];
-+    for (const { p, rank } of pluginsWithHook("resolveId")) {
-+      if (!runsBeforeOxcStrip(p, rank)) continue;
++    for (const { p, rank } of pluginsWithHook(c, "resolveId")) {
++      if (!runsBeforeCoreResolver(p, rank)) continue;
 +      const f = typeof p.resolveId === "object" ? p.resolveId.filter : null;
-+      let inc = f && f.id;
-+      if (inc && typeof inc === "object" && !(inc instanceof RegExp) && !Array.isArray(inc)) {
-+        inc = inc.include;
-+      }
-+      if (inc == null) return "null";
-+      for (const x of Array.isArray(inc) ? inc : [inc]) {
-+        if (!(x instanceof RegExp) && typeof x !== "string") return "null";
-+        const re = idPatternToRegExp(x);
-+        pats.push((re.flags.includes("i") ? "(?i)" : "") + re.source);
-+      }
++      const gate = f && f.id != null ? gatePatterns(f.id, "id") : null;
++      if (gate == null || gate.length === 0) return "null";
++      pats.push(...gate);
 +    }
 +    return JSON.stringify(pats);
 +  }
    if (hook === "getHasLoad") {
-     const has = plugins.some((p) => typeof hookHandler(p.load) === "function");
+     const has = c.plugins.some((p) => typeof hookHandler(p.load) === "function");
      return String(has);
-diff --git a/src/lib.rs b/src/lib.rs
-index b22b402..5ca3c60 100644
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -397,6 +397,15 @@ struct ServerState {
+diff --git a/crates/oj_server/src/lib.rs b/crates/oj_server/src/lib.rs
+index 6f931ba..4c3766f 100644
+--- a/crates/oj_server/src/lib.rs
++++ b/crates/oj_server/src/lib.rs
+@@ -373,6 +373,15 @@ struct ServerState {
      /// Some active plugin has `resolveId`: an import oj cannot resolve may
      /// still be one a plugin serves (`/@id/`), else it fails like Vite's.
      plugins_have_resolve_id: bool,
 +    /// A bare import goes to the `pre` plugins' resolveId before oj's resolver
 +    /// when one of these matches it; `None` offers every one.
-+    pre_resolve_id_res: Option<Vec<regex::Regex>>,
++    pre_resolve_id_res: Option<Vec<plugins::HookFilter>>,
 +    /// `ssr.noExternal` / `ssr.external`: what a server-side render leaves to Node.
 +    ssr_externals: oj_config::SsrExternals,
-+    /// [`Self::pre_resolve_id_res`] for the ssr plugin host, set when it starts.
-+    ssr_pre_resolve_id_res: std::sync::OnceLock<Option<Vec<regex::Regex>>>,
++    /// [`Self::pre_resolve_id_res`] for the ssr environment.
++    ssr_pre_resolve_id_res: Option<Vec<plugins::HookFilter>>,
 +    /// (bare specifier, file) pairs oj's resolver gave a plugin's `this.resolve`.
 +    resolver_answers: Mutex<std::collections::HashSet<(String, String)>>,
      // A dep is transformed only when its source matches one of these (the plugins'
      // own transform `filter.code` patterns); app source always goes through.
-     dep_transform_res: Vec<regex::Regex>,
-@@ -981,6 +990,7 @@ struct PluginCaps {
+     dep_transform_res: Vec<plugins::HookFilter>,
+@@ -1010,18 +1019,32 @@ struct PluginCaps {
      have_transform: bool,
      have_load: bool,
      have_resolve_id: bool,
-+    pre_resolve_id_res: Option<Vec<regex::Regex>>,
-     dep_transform_res: Vec<regex::Regex>,
-     dep_load_res: Vec<regex::Regex>,
-     resolve_id_res: Vec<regex::Regex>,
-@@ -995,12 +1005,27 @@ fn compile_filters(patterns: &[String]) -> Vec<regex::Regex> {
-         .collect()
++    pre_resolve_id_res: Option<Vec<plugins::HookFilter>>,
+     dep_transform_res: Vec<plugins::HookFilter>,
+     dep_load_res: Vec<plugins::HookFilter>,
+     resolve_id_res: Vec<plugins::HookFilter>,
+     have_transform_index_html: bool,
  }
  
 +/// The bare imports a host's `pre` resolveId hooks may claim: `None` offers
-+/// every one. A pattern Rust's regex cannot compile offers every one, never none.
++/// every one. A pattern oj cannot carry offers every one, never none.
 +async fn pre_resolve_filters(
 +    host: &PluginHost,
 +    have_resolve_id: bool,
-+) -> Option<Vec<regex::Regex>> {
++) -> Option<Vec<plugins::HookFilter>> {
 +    if !have_resolve_id {
 +        return Some(Vec::new());
 +    }
-+    host.pre_resolve_id_filters()
-+        .await
-+        .and_then(|pats| pats.iter().map(|s| regex::Regex::new(s).ok()).collect())
++    host.pre_resolve_id_filters().await
 +}
 +
  impl PluginCaps {
@@ -208,10 +156,10 @@ index b22b402..5ca3c60 100644
          let have_load = host.has_load().await;
          let have_resolve_id = host.has_resolve_id().await;
 +        let pre_resolve_id_res = pre_resolve_filters(host, have_resolve_id).await;
-         let dep_transform_res = compile_filters(&host.dep_transform_filters().await);
-         let dep_load_res = compile_filters(&host.dep_load_filters().await);
-         let resolve_id_res = compile_filters(&host.resolve_id_filters().await);
-@@ -1013,6 +1038,7 @@ impl PluginCaps {
+         let dep_transform_res = host.dep_transform_filters().await;
+         let dep_load_res = host.dep_load_filters().await;
+         let resolve_id_res = host.resolve_id_filters().await;
+@@ -1034,6 +1057,7 @@ impl PluginCaps {
              have_transform,
              have_load,
              have_resolve_id,
@@ -219,7 +167,18 @@ index b22b402..5ca3c60 100644
              dep_transform_res,
              dep_load_res,
              resolve_id_res,
-@@ -1662,8 +1688,10 @@ impl DevServer {
+@@ -1701,6 +1725,10 @@ impl DevServer {
+         let plugins_ssr = plugin_host
+             .as_ref()
+             .and_then(|host| host.environment("ssr"));
++        let ssr_pre_resolve_id_res = match &plugins_ssr {
++            Some(ssr) => pre_resolve_filters(ssr, ssr.has_resolve_id().await).await,
++            None => Some(Vec::new()),
++        };
+         if let Some(ssr) = &plugins_ssr {
+             ssr.build_hook_plan().await;
+             let ssr_defines = ssr.config_defines().await;
+@@ -1773,8 +1801,10 @@ impl DevServer {
              require_resolver: Arc::new(client_resolver.require_variant()),
              resolver: client_resolver,
              ssr_resolver: Arc::new(ssr_resolver(&root, &config)),
@@ -230,26 +189,30 @@ index b22b402..5ca3c60 100644
                  // A cached compile embeds the JSX runtime import; a changed
                  // importSource/runtime must not serve the old module.
                  .with_salt_extra(&format!("jsx={jsx:?}")),
-@@ -1726,6 +1754,9 @@ impl DevServer {
+@@ -1842,6 +1872,9 @@ impl DevServer {
              plugins_have_transform: caps.have_transform,
              plugins_have_load: caps.have_load,
              plugins_have_resolve_id: caps.have_resolve_id,
 +            pre_resolve_id_res: caps.pre_resolve_id_res,
-+            ssr_pre_resolve_id_res: std::sync::OnceLock::new(),
++            ssr_pre_resolve_id_res,
 +            resolver_answers: Mutex::default(),
              dep_transform_res: caps.dep_transform_res,
              dep_load_res: caps.dep_load_res,
              resolve_id_res: caps.resolve_id_res,
-@@ -1770,6 +1801,21 @@ impl DevServer {
+@@ -1889,6 +1922,25 @@ impl DevServer {
          // "optimized dependencies changed. reloading". A commit that left
          // served chunks byte-identical never reaches here.
          state.optimized.set_crawl_end(state.crawl_done.clone());
 +        if let Some(host) = &state.plugins {
 +            let weak = Arc::downgrade(&state);
-+            host.set_dep_resolve(Box::new(move |dir, source, optimize| {
++            host.set_dep_resolve(Box::new(move |dir, source, env| {
 +                let state = weak.upgrade()?;
++                if env == "ssr" {
++                    let resolved = state.ssr_resolver.resolve(dir, source).ok()?;
++                    return Some(resolved.display().to_string());
++                }
 +                let resolved = state.resolver.resolve(dir, source).ok()?;
-+                if optimize && is_bare_specifier(source) {
++                if env == "optimize" && is_bare_specifier(source) {
 +                    if let Some(id) = optimized_dep_id(&state, source) {
 +                        return Some(id);
 +                    }
@@ -262,11 +225,11 @@ index b22b402..5ca3c60 100644
          {
              let weak = Arc::downgrade(&state);
              state.optimized.set_on_commit(Box::new(move |newly| {
-diff --git a/src/module_pipeline.rs b/src/module_pipeline.rs
-index 7b15bf4..3c2e0d3 100644
---- a/src/module_pipeline.rs
-+++ b/src/module_pipeline.rs
-@@ -152,9 +152,13 @@ pub(crate) async fn ensure_module_as(
+diff --git a/crates/oj_server/src/module_pipeline.rs b/crates/oj_server/src/module_pipeline.rs
+index 0131517..5a1cede 100644
+--- a/crates/oj_server/src/module_pipeline.rs
++++ b/crates/oj_server/src/module_pipeline.rs
+@@ -214,9 +214,13 @@ pub(crate) async fn ensure_module_as(
          Some(e) if is_style_ext(e) => CompileKind::Css,
          _ => CompileKind::Script,
      };
@@ -283,7 +246,7 @@ index 7b15bf4..3c2e0d3 100644
      };
      let job = CompileJob {
          state: Arc::clone(state),
-@@ -171,6 +175,7 @@ pub(crate) async fn ensure_module_as(
+@@ -233,6 +237,7 @@ pub(crate) async fn ensure_module_as(
          css,
          plugin_maps: transformed.maps,
          dep_map,
@@ -291,16 +254,17 @@ index 7b15bf4..3c2e0d3 100644
      };
      let compiled = tokio::task::spawn_blocking(move || job.run()).await;
  
-@@ -465,7 +470,7 @@ pub(crate) async fn plugin_transform(
+@@ -554,7 +559,8 @@ pub(crate) async fn plugin_transform_phase(
+     let transformed = match phase {
+         Some(phase) => host.transform_phase(&source, transform_id, phase).await,
+         None => {
+-            let resolved = resolved_imports_json(&state.resolver, &state.fs_allow, &source, file);
++            let resolved =
++                resolved_imports_json(&state.resolver, &state.fs_allow, &source, file, Some(state));
+             host.transform(&source, transform_id, &resolved).await
          }
-         return Ok(untouched(source));
-     }
--    let resolved = resolved_imports_json(&state.resolver, &state.fs_allow, &source, file);
-+    let resolved = resolved_imports_json(&state.resolver, &state.fs_allow, &source, file, Some(state));
-     match host.transform(&source, transform_id, &resolved).await {
-         Ok((code, watch_files, maps, _)) => Ok(Transformed {
-             code,
-@@ -600,6 +605,92 @@ enum CompileKind {
+     };
+@@ -724,6 +730,92 @@ enum CompileKind {
      Script,
  }
  
@@ -393,7 +357,7 @@ index 7b15bf4..3c2e0d3 100644
  /// The owned inputs of the blocking compile stage.
  struct CompileJob {
      state: Arc<ServerState>,
-@@ -618,6 +709,8 @@ struct CompileJob {
+@@ -742,6 +834,8 @@ struct CompileJob {
      css: CssState,
      plugin_maps: Vec<String>,
      dep_map: Arc<optimize::DepMap>,
@@ -402,7 +366,7 @@ index 7b15bf4..3c2e0d3 100644
  }
  
  impl CompileJob {
-@@ -699,6 +792,7 @@ impl CompileJob {
+@@ -792,6 +886,7 @@ impl CompileJob {
          let rw = ImportRewrite {
              job: &self,
              unresolved: RefCell::new(None),
@@ -410,7 +374,7 @@ index 7b15bf4..3c2e0d3 100644
          };
          let output = if self.is_dep {
              self.compile_dep(&rw)
-@@ -814,6 +908,9 @@ struct ImportRewrite<'a> {
+@@ -912,6 +1007,9 @@ struct ImportRewrite<'a> {
      /// First unresolvable relative import: Vite's import analysis fails the
      /// transform for it; shipping it unchanged would only 404 with no overlay.
      unresolved: RefCell<Option<String>>,
@@ -420,9 +384,9 @@ index 7b15bf4..3c2e0d3 100644
  }
  
  impl ImportRewrite<'_> {
-@@ -835,9 +932,31 @@ impl ImportRewrite<'_> {
-         if spec == "virtual:oj-routes" {
-             return Some("/@oj/routes.js".to_string());
+@@ -942,12 +1040,34 @@ impl ImportRewrite<'_> {
+             }
+             _ => {}
          }
 +        if self.interop_urls.borrow().contains(spec) {
 +            let path = Path::new(spec.split('?').next().unwrap_or(spec));
@@ -431,6 +395,9 @@ index 7b15bf4..3c2e0d3 100644
 +        }
          if state.virtual_ids.contains(spec) {
              return Some(format!("/@virtual/{spec}"));
+         }
+         if crate::stylex::virtual_module(state, spec).is_some() {
+             return Some(format!("/@id/{spec}"));
          }
 +        if let Some(answer) = job.pre_resolved.get(spec) {
 +            if answer.external {
@@ -452,7 +419,7 @@ index 7b15bf4..3c2e0d3 100644
          // Vite runs plugins' resolveId before its own resolver: a non-bare import
          // a filter claims goes to /@id/, which falls back to disk on decline.
          if plugin_fallback
-@@ -912,10 +1031,49 @@ impl ImportRewrite<'_> {
+@@ -1022,10 +1142,49 @@ impl ImportRewrite<'_> {
          None
      }
  
@@ -502,7 +469,7 @@ index 7b15bf4..3c2e0d3 100644
          // Builtins are browser-externalized to a stub with no named exports;
          // interop so named imports read undefined instead of failing to link.
          if is_node_builtin(spec) {
-@@ -1005,6 +1163,43 @@ impl ImportRewrite<'_> {
+@@ -1115,6 +1274,43 @@ impl ImportRewrite<'_> {
      }
  }
  
@@ -546,7 +513,7 @@ index 7b15bf4..3c2e0d3 100644
  pub(crate) async fn replay_module_parsed(
      state: &Arc<ServerState>,
      file: &Path,
-@@ -1308,6 +1503,7 @@ pub(crate) fn resolved_imports_json(
+@@ -1466,6 +1662,7 @@ pub(crate) fn resolved_imports_json(
      fs_allow: &Mutex<std::collections::HashSet<PathBuf>>,
      source: &str,
      file: &Path,
@@ -554,7 +521,7 @@ index 7b15bf4..3c2e0d3 100644
  ) -> String {
      let dir = file.parent().unwrap_or(file);
      let mut map = serde_json::Map::new();
-@@ -1324,7 +1520,11 @@ pub(crate) fn resolved_imports_json(
+@@ -1482,7 +1679,11 @@ pub(crate) fn resolved_imports_json(
                  if p.components().any(|c| c.as_os_str() == "node_modules") || !p.starts_with(dir) {
                      allow_root(fs_allow, package_root(&p));
                  }
@@ -567,11 +534,11 @@ index 7b15bf4..3c2e0d3 100644
              }
              Err(_) => serde_json::Value::Null,
          };
-diff --git a/src/optimize.rs b/src/optimize.rs
-index 782fad6..d347701 100644
---- a/src/optimize.rs
-+++ b/src/optimize.rs
-@@ -427,6 +427,12 @@ impl OptimizedDeps {
+diff --git a/crates/oj_server/src/optimize.rs b/crates/oj_server/src/optimize.rs
+index 1158884..badfff2 100644
+--- a/crates/oj_server/src/optimize.rs
++++ b/crates/oj_server/src/optimize.rs
+@@ -413,6 +413,12 @@ impl OptimizedDeps {
              .unwrap_or_default()
      }
  
@@ -584,10 +551,10 @@ index 782fad6..d347701 100644
      /// The live map's entry for `dep`, including a provisional one registered
      /// mid-compile, which a per-compile snapshot cannot see.
      pub fn meta_now(&self, dep: &str) -> Option<DepMeta> {
-diff --git a/src/plugin_routes.rs b/src/plugin_routes.rs
-index 2afab0a..5f91c7b 100644
---- a/src/plugin_routes.rs
-+++ b/src/plugin_routes.rs
+diff --git a/crates/oj_server/src/plugin_routes.rs b/crates/oj_server/src/plugin_routes.rs
+index 2aede3b..bbcdbbe 100644
+--- a/crates/oj_server/src/plugin_routes.rs
++++ b/crates/oj_server/src/plugin_routes.rs
 @@ -3,6 +3,10 @@ use super::*;
  // Rollup contract: a resolveId path IS the module, an empty `load` means read
  // from disk. Redirect to the normal dep URL so fs.allow/bundling/rewriting apply.
@@ -599,15 +566,19 @@ index 2afab0a..5f91c7b 100644
      let resolved = Path::new(id);
      if !resolved.is_absolute() || !resolved.is_file() {
          return None;
-@@ -55,8 +59,27 @@ async fn compile_plugin_source(
-     let fs_allow = Arc::clone(&state.fs_allow);
-     let dir_cache = Arc::clone(&state.dir_cache);
-     let compile_opts = dev_compile_opts(state);
+@@ -62,12 +66,31 @@ async fn compile_plugin_source(
+     compile_opts.stylex = None;
+     let stylex_id = importer.trim_start_matches('\0').to_string();
+     let st = Arc::clone(state);
 +    // Its bare imports reach the `pre` resolveId hooks as app source's do.
 +    let dep_map = state.optimized.ready().await;
 +    let claimed = pre_resolve_bare(state, Path::new(&importer), &source, &dep_map).await;
 +    let claim_state = Arc::clone(state);
-     tokio::task::spawn_blocking(move || {
+     let compiled = tokio::task::spawn_blocking(move || {
+         let (source, stylex_rules) = match crate::stylex::pre_transform(&st, &stylex_id, &source)? {
+             Some(pre) => (pre.code, Some((stylex_id, pre.rules))),
+             None => (source, None),
+         };
          let mut rewrite = |spec: &str| {
 +            // A claim wins over the pre-bundle, as in app modules; a bundle or an
 +            // answer oj's resolver gave maps onto its pre-bundle URL.
@@ -627,17 +598,18 @@ index 2afab0a..5f91c7b 100644
              if let Some(url) = pre(spec) {
                  return Some(url);
              }
-diff --git a/src/plugins/host.rs b/src/plugins/host.rs
-index ed640ff..decb620 100644
---- a/src/plugins/host.rs
-+++ b/src/plugins/host.rs
-@@ -80,11 +80,17 @@ pub fn dev_listener_bound(port: u16, interface: &str) {
+diff --git a/crates/oj_server/src/plugins/host.rs b/crates/oj_server/src/plugins/host.rs
+index 778f3f8..6ad0c29 100644
+--- a/crates/oj_server/src/plugins/host.rs
++++ b/crates/oj_server/src/plugins/host.rs
+@@ -121,11 +121,18 @@ pub fn dev_listener_bound(port: u16, interface: &str) {
      });
  }
  
 +/// The dev server's resolver for a `this.resolve` no plugin answered:
-+/// (importer directory, source, whether to map onto the pre-bundle) to the id.
-+pub type DepResolve = Box<dyn Fn(&Path, &str, bool) -> Option<String> + Send + Sync>;
++/// (importer directory, source, the asking environment: `ssr`, `client`, or
++/// `optimize` for a client import that maps onto its pre-bundle) to the id.
++pub type DepResolve = Box<dyn Fn(&Path, &str, &str) -> Option<String> + Send + Sync>;
 +type DepResolveSlot = Arc<std::sync::OnceLock<DepResolve>>;
 +
  /// An engine started ahead of its host (see [`PluginHost::prewarm`]).
@@ -646,43 +618,44 @@ index ed640ff..decb620 100644
      post_rx: tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
      import_meta_env: Arc<std::sync::OnceLock<Arc<oj_compiler::ImportMetaEnv>>>,
 +    dep_resolve: DepResolveSlot,
+     bundles: BundleGraphs,
      registry: Option<oj_js::EngineRegistry>,
- }
- 
-@@ -93,13 +99,22 @@ fn new_host_engine(
+     boot_preseed: BootPreseed,
+@@ -142,6 +149,7 @@ fn new_host_engine(
      memory_limit_bytes: usize,
      registry: Option<oj_js::EngineRegistry>,
      import_meta_env: Arc<std::sync::OnceLock<Arc<oj_compiler::ImportMetaEnv>>>,
 +    dep_resolve: DepResolveSlot,
+     bundles: BundleGraphs,
      post_tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
- ) -> Result<oj_js::JsEngine, String> {
-     let root = root.to_path_buf();
-     let resolver = std::sync::Arc::new(OjResolver::new(&root));
-     let rpc_handler: oj_js::RpcHandler = {
-         let root = root.clone();
--        Box::new(move |method, args| ctx_rpc(method, args, &resolver, &root, import_meta_env.get()))
-+        Box::new(move |method, args| {
-+            let ctx = CtxRpc {
-+                resolver: &resolver,
-+                root: &root,
-+                env: import_meta_env.get(),
-+                dep_resolve: dep_resolve.get(),
-+            };
-+            ctx_rpc(method, args, &ctx)
-+        })
+     runtime: Option<tokio::runtime::Handle>,
+@@ -159,7 +167,15 @@ fn new_host_engine(
+         Box::new(move |method, args| {
+             bundle_rpc(method, args, &bundles)
+                 .or_else(|| preseeds.rpc(method, args, &root))
+-                .unwrap_or_else(|| ctx_rpc(method, args, &resolver, &root, import_meta_env.get()))
++                .unwrap_or_else(|| {
++                    let ctx = CtxRpc {
++                        resolver: &resolver,
++                        root: &root,
++                        env: import_meta_env.get(),
++                        dep_resolve: dep_resolve.get(),
++                    };
++                    ctx_rpc(method, args, &ctx)
++                })
+         })
      };
      let mut engine_config = oj_js::EngineConfig::new(&root);
-     engine_config.code_cache_dir = Some(crate::engine_code_cache_dir(&root));
-@@ -138,6 +153,8 @@ pub(crate) struct BootContext {
+@@ -200,6 +216,8 @@ pub(crate) struct BootContext {
      registry: Option<oj_js::EngineRegistry>,
      /// The dev server's defines, for `moduleInfo` compiles; set once after spawn.
      import_meta_env: Arc<std::sync::OnceLock<Arc<oj_compiler::ImportMetaEnv>>>,
 +    /// The dev server's resolver for `this.resolve`; set once after spawn.
 +    dep_resolve: DepResolveSlot,
- }
- 
- /// See [`PluginHost::revive`].
-@@ -303,15 +320,22 @@ pub struct HostRpc {
+     /// The bundle each container's hooks run inside (see [`BundleGraph`]).
+     bundles: BundleGraphs,
+     /// The runtime the host was spawned on: a respawn's engine and tasks
+@@ -372,15 +390,22 @@ pub struct HostRpc {
      pub args: Vec<serde_json::Value>,
  }
  
@@ -708,7 +681,7 @@ index ed640ff..decb620 100644
      let arg = |i: usize| args.get(i).and_then(|v| v.as_str()).unwrap_or("");
      let dir_of = |path: &Path| {
          path.parent()
-@@ -326,10 +350,11 @@ pub(crate) fn ctx_rpc(
+@@ -395,10 +420,11 @@ pub(crate) fn ctx_rpc(
              } else {
                  dir_of(Path::new(importer))
              };
@@ -716,18 +689,18 @@ index ed640ff..decb620 100644
 -                Ok(p) => serde_json::Value::String(p.display().to_string()),
 -                Err(_) => serde_json::Value::Null,
 -            })
-+            let id = match dep_resolve {
-+                Some(resolve) => resolve(&dir, source, arg(2) == "optimize"),
++            let id = match dep_resolve.filter(|_| !arg(2).is_empty()) {
++                Some(resolve) => resolve(&dir, source, arg(2)),
 +                None => resolver.resolve(&dir, source).ok().map(|p| p.display().to_string()),
 +            };
 +            Ok(id.map_or(serde_json::Value::Null, serde_json::Value::String))
          }
          "moduleInfo" => {
              let id = arg(0);
-@@ -514,11 +539,13 @@ impl PluginHost {
-         let (post_tx, post_rx) = tokio::sync::mpsc::unbounded_channel();
-         let import_meta_env: Arc<std::sync::OnceLock<Arc<oj_compiler::ImportMetaEnv>>> =
+@@ -733,11 +759,13 @@ impl PluginHost {
              Arc::default();
+         let bundles = BundleGraphs::default();
+         let boot_preseed = BootPreseed::default();
 +        let dep_resolve = DepResolveSlot::default();
          let engine = new_host_engine(
              root,
@@ -735,18 +708,18 @@ index ed640ff..decb620 100644
              registry.clone(),
              Arc::clone(&import_meta_env),
 +            Arc::clone(&dep_resolve),
+             Arc::clone(&bundles),
              post_tx,
-         )
-         .ok()?;
-@@ -534,6 +561,7 @@ impl PluginHost {
+             tokio::runtime::Handle::try_current().ok(),
+@@ -756,6 +784,7 @@ impl PluginHost {
              engine,
              post_rx,
              import_meta_env,
 +            dep_resolve,
+             bundles,
              registry,
-         })
-     }
-@@ -595,6 +623,10 @@ impl PluginHost {
+             boot_preseed,
+@@ -836,6 +865,10 @@ impl PluginHost {
                      .as_ref()
                      .map(|p| Arc::clone(&p.import_meta_env))
                      .unwrap_or_default(),
@@ -754,18 +727,10 @@ index ed640ff..decb620 100644
 +                    .as_ref()
 +                    .map(|p| Arc::clone(&p.dep_resolve))
 +                    .unwrap_or_default(),
-             },
-             revive: Mutex::new(ReviveState {
-                 generation: 0,
-@@ -704,6 +736,7 @@ impl PluginHost {
-             self.boot.memory_limit_bytes,
-             self.boot.registry.clone(),
-             Arc::clone(&self.boot.import_meta_env),
-+            Arc::clone(&self.boot.dep_resolve),
-             post_tx,
-         )
-     }
-@@ -1339,6 +1372,25 @@ impl PluginHost {
+                 bundles: prewarm
+                     .as_ref()
+                     .map(|p| Arc::clone(&p.bundles))
+@@ -957,6 +990,21 @@ impl PluginHost {
          self.call("resolveId", &[source, importer]).await
      }
  
@@ -776,54 +741,58 @@ index ed640ff..decb620 100644
 +        source: &str,
 +        importer: &str,
 +    ) -> Result<Option<crate::PreAnswer>, String> {
-+        let Some(json) = self.call("resolveIdPre", &[source, importer]).await? else {
-+            return Ok(None);
-+        };
-+        let v: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-+        let id = v["id"].as_str().ok_or("resolveIdPre: answer has no id")?;
-+        Ok(Some(crate::PreAnswer {
-+            id: id.to_string(),
-+            external: v["external"].as_bool().unwrap_or(false),
++        let answer = self.resolve_id_phase(source, importer, "pre", false).await?;
++        Ok(answer.map(|r| crate::PreAnswer {
++            external: r.external.is_some(),
++            id: r.id,
 +            resolver: false,
 +        }))
 +    }
 +
-     /// The dep optimizer's scan, resolved through the plugins (optimize-deps.mjs
-     /// `scan`): JSON `{ dep: file }`. Unbounded like every call: a cold scan
-     /// of a large app runs as long as it needs, probed for liveness.
-@@ -1625,6 +1677,14 @@ impl PluginHost {
+     /// One phase of the resolveId chain for a Start bundle host: `"pre"` (the
+     /// hooks Vite runs before its core resolver), `"post"` (the rest), or
+     /// `"all"`. The winning result whole, `external` included.
+@@ -1408,6 +1456,14 @@ impl PluginHost {
          self.call_flag("getHasResolveId", true).await
      }
  
 +    /// The `pre` resolveId hooks' `filter.id` patterns, empty when there is no
 +    /// such hook; `None` when one takes every id, or on RPC failure.
-+    pub async fn pre_resolve_id_filters(&self) -> Option<Vec<String>> {
-+        serde_json::from_str(&self.call_ok("getPreResolveIdFilters").await?)
-+            .ok()
-+            .flatten()
++    pub async fn pre_resolve_id_filters(&self) -> Option<Vec<HookFilter>> {
++        let pats: Option<Vec<serde_json::Value>> =
++            serde_json::from_str(&self.call_ok("getPreResolveIdFilters").await?).ok()?;
++        Some(pats?.iter().map(HookFilter::from_json).collect())
 +    }
 +
      /// Whether any active plugin has a `load` hook (Vite runs load before the fs
      /// read). Defaults to false on RPC failure (the fs read alone is always correct).
      pub async fn has_load(&self) -> bool {
-@@ -1693,6 +1753,12 @@ impl PluginHost {
-         let _ = self.boot.import_meta_env.set(env);
+@@ -1761,6 +1817,12 @@ impl PluginHost {
+         self.core.set_import_meta_env(env)
      }
  
 +    /// The dev server's resolver for `this.resolve`, so it answers as the dev
 +    /// server's own compiles do (`oj build` leaves it unset).
 +    pub fn set_dep_resolve(&self, resolve: DepResolve) {
-+        let _ = self.boot.dep_resolve.set(resolve);
++        let _ = self.core.boot.dep_resolve.set(resolve);
 +    }
 +
-     pub fn set_rpc_request_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<HostRpc>) {
-         let _ = self.rpc_requests.set(tx);
+     pub fn set_ws_sender(&self, tx: tokio::sync::broadcast::Sender<String>) {
+         self.core.set_ws_sender(tx)
      }
-diff --git a/src/ssr.rs b/src/ssr.rs
-index d04035a..36ecdd7 100644
---- a/src/ssr.rs
-+++ b/src/ssr.rs
-@@ -94,11 +94,16 @@ impl SsrBridge {
+@@ -1900,6 +1962,7 @@ impl HostCore {
+             self.boot.memory_limit_bytes,
+             self.boot.registry.clone(),
+             Arc::clone(&self.boot.import_meta_env),
++            Arc::clone(&self.boot.dep_resolve),
+             Arc::clone(&self.boot.bundles),
+             post_tx,
+             self.boot.runtime.clone(),
+diff --git a/crates/oj_server/src/ssr.rs b/crates/oj_server/src/ssr.rs
+index 8947b63..33901b4 100644
+--- a/crates/oj_server/src/ssr.rs
++++ b/crates/oj_server/src/ssr.rs
+@@ -112,11 +112,16 @@ impl SsrBridge {
          spec: &str,
      ) -> Result<StartResolution, String> {
          Ok(match ssr_resolve_raw(&self.state, importer, spec).await? {
@@ -842,7 +811,7 @@ index d04035a..36ecdd7 100644
              RawResolution::Bare => StartResolution::Bare(spec.to_string()),
          })
      }
-@@ -143,18 +148,27 @@ pub enum StartResolution {
+@@ -161,13 +166,17 @@ pub enum StartResolution {
  /// What the SSR resolve ladder found, before each caller classifies it.
  enum RawResolution {
      Path(PathBuf),
@@ -862,8 +831,10 @@ index d04035a..36ecdd7 100644
  async fn ssr_resolve_raw(
      state: &Arc<ServerState>,
      importer: &str,
-     spec: &str,
- ) -> Result<RawResolution, String> {
+@@ -177,6 +186,11 @@ async fn ssr_resolve_raw(
+     if crate::stylex::virtual_module(state, spec).is_some() {
+         return Ok(RawResolution::PluginId(spec.to_string()));
+     }
 +    if is_bare_specifier(spec) {
 +        if let Some(claimed) = ssr_pre_resolve(state, importer, spec).await {
 +            return Ok(claimed);
@@ -872,7 +843,7 @@ index d04035a..36ecdd7 100644
      let importer_dir = Path::new(importer).parent().unwrap_or(&state.root);
      let err = match state.ssr_resolver.resolve(importer_dir, spec) {
          Ok(p) => return Ok(RawResolution::Path(p)),
-@@ -171,26 +185,89 @@ async fn ssr_resolve_raw(
+@@ -193,26 +207,89 @@ async fn ssr_resolve_raw(
      Err(format!("cannot resolve {spec}: {}", err.reason))
  }
  
@@ -884,6 +855,10 @@ index d04035a..36ecdd7 100644
 +    importer: &str,
 +    spec: &str,
 +) -> Option<RawResolution> {
++    let filters = state.ssr_pre_resolve_id_res.as_ref();
++    if filters.is_some_and(|res| !res.iter().any(|re| re.is_match(spec))) {
++        return None;
++    }
 +    // Vite externalizes before any plugin resolves (shouldExternalize), and
 +    // never analyzes an externalized dependency's own imports.
 +    let importer_pkg = oj_config::SsrExternals::package_of_path(importer);
@@ -896,10 +871,6 @@ index d04035a..36ecdd7 100644
 +        return None;
 +    }
 +    let host = ssr_plugin_host(state).await?;
-+    let filters = state.ssr_pre_resolve_id_res.get()?.as_ref();
-+    if filters.is_some_and(|res| !res.iter().any(|re| re.is_match(spec))) {
-+        return None;
-+    }
 +    let answer = match host.resolve_id_pre(spec, importer).await {
 +        Ok(answer) => answer?,
 +        Err(e) => {
@@ -977,7 +948,7 @@ index d04035a..36ecdd7 100644
      })
  }
  
-@@ -290,8 +367,13 @@ pub(crate) async fn ssr_transform_source(
+@@ -356,8 +433,13 @@ pub(crate) async fn ssr_transform_source(
          // Same filter gate as the client path: an unclaimed module skips the
          // isolate RPC and the import pre-resolution that only feeds it.
          Some(host) if host.hook_wants_transform(id, &source) => {
@@ -991,22 +962,5 @@ index d04035a..36ecdd7 100644
 +                None,
 +            );
              match host.transform(&source, id, &resolved).await {
-                 Ok((code, _, _, _)) => code,
+                 Ok(t) => t.code,
                  Err(e) => {
-@@ -383,6 +465,16 @@ pub(crate) async fn ssr_plugin_host(
-             {
-                 Ok(host) => {
-                     host.set_import_meta_env(Arc::clone(&state.import_meta_env));
-+                    // A plugin's `this.resolve` answers with the ssr resolver.
-+                    let weak = Arc::downgrade(state);
-+                    host.set_dep_resolve(Box::new(move |dir, source, _optimize| {
-+                        let state = weak.upgrade()?;
-+                        let resolved = state.ssr_resolver.resolve(dir, source).ok()?;
-+                        Some(resolved.display().to_string())
-+                    }));
-+                    let have_resolve_id = host.has_resolve_id().await;
-+                    let filters = pre_resolve_filters(&host, have_resolve_id).await;
-+                    let _ = state.ssr_pre_resolve_id_res.set(filters);
-                     eprintln!("oj ssr: plugins (ssr environment) from {}", file.display());
-                     // Catch-up half of the watcher's pre-init fast-skip
-                     // (see SsrWatchQueue).
