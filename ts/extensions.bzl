@@ -218,6 +218,12 @@ def _ts_impl(module_ctx):
     )
     _tsgo_source(module_ctx)
 
+    # Only ts.tsgo(version = ...) downloads a compiler no integrity pins, and
+    # then MODULE.bazel.lock is the one record of the bytes the build used.
+    return module_ctx.extension_metadata(
+        reproducible = all([spec.platforms[p].integrity for p in TSGO_PLATFORMS]),
+    )
+
 _tsgo_tag = tag_class(
     attrs = {
         "pnpm_lock": attr.label(
