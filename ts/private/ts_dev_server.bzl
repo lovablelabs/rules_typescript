@@ -536,6 +536,8 @@ def _generate_dev_config(
         "    fs: {\n" +
         "      allow: fsAllow,\n" +
         "    },\n" +
+        "    // wrangler/miniflare rewrite .wrangler/state on every worker request.\n" +
+        "    watch: { ignored: ['**/.wrangler/**'] },\n" +
         "  },\n" +
         "\n" +
         "  // A bare specifier is left to the resolver's own walk up from\n" +
