@@ -1,6 +1,8 @@
---- a/lib.rs
-+++ b/lib.rs
-@@ -1245,10 +1245,23 @@
+diff --git a/crates/oj_deno_napi/lib.rs b/crates/oj_deno_napi/lib.rs
+index 31600ac..5136905 100644
+--- a/crates/oj_deno_napi/lib.rs
++++ b/crates/oj_deno_napi/lib.rs
+@@ -1245,10 +1245,23 @@ fn op_napi_open<'scope>(
    Ok(exports)
  }
  

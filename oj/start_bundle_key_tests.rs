@@ -35,7 +35,7 @@ impl App {
         oj_cache::cache_root(&self.link).join("start")
     }
 
-    /// What bundle-client.mjs leaves in the start dir: the bundler reports
+    /// What the client bundle leaves in the start dir: the bundler reports
     /// closure ids by realpath, the start dir's manifest.ts among them.
     fn write_build(&self) {
         let start = self.start_dir();

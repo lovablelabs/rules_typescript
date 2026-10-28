@@ -1,7 +1,38 @@
-diff --git a/snapshot.rs b/snapshot.rs
---- a/snapshot.rs
-+++ b/snapshot.rs
-@@ -17,11 +17,8 @@
+diff --git a/crates/oj_deno_runtime/js.rs b/crates/oj_deno_runtime/js.rs
+index 6a92d48..95e2adb 100644
+--- a/crates/oj_deno_runtime/js.rs
++++ b/crates/oj_deno_runtime/js.rs
+@@ -1,4 +1,3 @@
+ // Copyright 2018-2026 the Deno authors. MIT license.
+ 
+-pub static PATH_FOR_99_MAIN_JS: &str =
+-  concat!(env!("CARGO_MANIFEST_DIR"), "/js/99_main.js");
++pub static PATH_FOR_99_MAIN_JS: &str = "js/99_main.js";
+diff --git a/crates/oj_deno_runtime/shared.rs b/crates/oj_deno_runtime/shared.rs
+index 8390bed..3287670 100644
+--- a/crates/oj_deno_runtime/shared.rs
++++ b/crates/oj_deno_runtime/shared.rs
+@@ -54,12 +54,9 @@ extension!(runtime,
+         "ext:deno_features/flags.js",
+         deno_features::JS_SOURCE,
+       ));
+-      // 99_main.js is the snapshot's ESM entry point; its source is loaded
+-      // from disk only during snapshot creation, so we don't duplicate it in
+-      // the final binary's `.rodata`.
+-      ext.esm_files.to_mut().push(ExtensionFileSource::loaded_during_snapshot(
++      ext.esm_files.to_mut().push(ExtensionFileSource::embedded_during_snapshot(
+         "ext:runtime_main/js/99_main.js",
+-        concat!(env!("CARGO_MANIFEST_DIR"), "/js/99_main.js"),
++        deno_core::ascii_str_include!(concat!(env!("CARGO_MANIFEST_DIR"), "/js/99_main.js")),
+       ));
+       ext.esm_entry_point = Some("ext:runtime_main/js/99_main.js");
+     }
+diff --git a/crates/oj_deno_runtime/snapshot.rs b/crates/oj_deno_runtime/snapshot.rs
+index c4da57c..c344f1d 100644
+--- a/crates/oj_deno_runtime/snapshot.rs
++++ b/crates/oj_deno_runtime/snapshot.rs
+@@ -16,13 +16,10 @@ use crate::ops;
+ use crate::ops::bootstrap::SnapshotOptions;
  use crate::shared::runtime;
  
 -/// A single lazy_loaded_* entry declared by an extension, in
@@ -14,7 +45,18 @@ diff --git a/snapshot.rs b/snapshot.rs
 +  pub source: ExtensionFileSource,
    pub kind: LazyExtensionFileKind,
  }
-@@ -181,17 +178,14 @@
+ 
+@@ -108,7 +105,7 @@ pub fn create_runtime_snapshot(
+ 
+   let output = create_snapshot(
+     CreateSnapshotOptions {
+-      cargo_manifest_dir: env!("CARGO_MANIFEST_DIR"),
++      cargo_manifest_dir: "",
+       startup_snapshot: None,
+       extensions,
+       extension_transpiler: Some(Rc::new(move |specifier, source| {
+@@ -180,19 +177,16 @@ fn lazy_file_entry(
+   kind: LazyExtensionFileKind,
  ) -> Option<LazyExtensionFile> {
    #[allow(deprecated, reason = "matching deprecated variant we still inspect")]
 -  let path = match &file.code {
@@ -37,32 +79,4 @@ diff --git a/snapshot.rs b/snapshot.rs
 +    source: file.clone(),
      kind,
    })
-diff --git a/shared.rs b/shared.rs
---- a/shared.rs
-+++ b/shared.rs
-@@ -55,10 +55,7 @@
-         deno_features::JS_SOURCE,
-       ));
--      // 99_main.js is the snapshot's ESM entry point; its source is loaded
--      // from disk only during snapshot creation, so we don't duplicate it in
--      // the final binary's `.rodata`.
--      ext.esm_files.to_mut().push(ExtensionFileSource::loaded_during_snapshot(
-+      ext.esm_files.to_mut().push(ExtensionFileSource::embedded_during_snapshot(
-         "ext:runtime_main/js/99_main.js",
--        concat!(env!("CARGO_MANIFEST_DIR"), "/js/99_main.js"),
-+        deno_core::ascii_str_include!(concat!(env!("CARGO_MANIFEST_DIR"), "/js/99_main.js")),
-       ));
-       ext.esm_entry_point = Some("ext:runtime_main/js/99_main.js");
-diff --git a/snapshot.rs b/snapshot.rs
---- a/snapshot.rs
-+++ b/snapshot.rs
-@@ -108,1 +108,1 @@
--      cargo_manifest_dir: env!("CARGO_MANIFEST_DIR"),
-+      cargo_manifest_dir: "",
-diff --git a/js.rs b/js.rs
---- a/js.rs
-+++ b/js.rs
-@@ -3,2 +3,1 @@
--pub static PATH_FOR_99_MAIN_JS: &str =
--  concat!(env!("CARGO_MANIFEST_DIR"), "/js/99_main.js");
-+pub static PATH_FOR_99_MAIN_JS: &str = "js/99_main.js";
+ }

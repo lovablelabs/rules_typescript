@@ -158,27 +158,26 @@ use_repo(
     "oj_v8_windows_amd64",
 )
 
+# oj's crates share one git checkout: their patches apply at its root, and all
+# of them must use the same patch_args.
 crate.annotation(
     crate = "oj_cache",
     patch_args = ["-p1"],
     patches = ["//oj:oj-cache-start-bundle-stable-key.patch"],
     repositories = ["oj_crates"],
-    version = "0.2.44",
 )
 
-# Vite's resolveId order for oj: bare imports go to pre plugins before oj's own
-# resolver, in the browser and in SSR, and this.resolve runs it where Vite runs
-# vite:resolve, pre-bundle included. Carried until an oj release ships it.
+# Vite's resolveId order (pre plugins before oj's resolver, this.resolve at
+# vite:resolve); carried until an oj release ships it.
 crate.annotation(
     crate = "oj_server",
     patch_args = ["-p1"],
     patches = [
         "//oj:oj-server-pre-resolve-id.patch",
-        # A dependency's `.css?url` reaches pre plugins; a plugin-loaded sheet is CSS.
+        # A dependency import with a query (`.css?url`) stays out of Node in SSR.
         "//oj:oj-server-ssr-css-url.patch",
     ],
     repositories = ["oj_crates"],
-    version = "0.2.44",
 )
 crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
@@ -191,7 +190,26 @@ crate.annotation(
         "//oj:oj-start-host-query-resolve-id.patch",
     ],
     repositories = ["oj_crates"],
-    version = "0.2.44",
+)
+crate.annotation(
+    crate = "oj_deno_napi",
+    gen_build_script = "off",
+    patch_args = ["-p1"],
+    patches = ["//oj:napi-symbol-bytes.patch"],
+    repositories = ["oj_crates"],
+)
+crate.annotation(
+    crate = "oj_deno_runtime",
+    patch_args = ["-p1"],
+    patches = ["//oj:deno-runtime-snapshot-source.patch"],
+    repositories = ["oj_crates"],
+)
+crate.annotation(
+    additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
+    crate = "oj_deno_snapshots",
+    patch_args = ["-p1"],
+    patches = ["//oj:deno-snapshots-source.patch"],
+    repositories = ["oj_crates"],
 )
 crate.annotation(
     crate = "cranelift-assembler-x64",
@@ -207,18 +225,12 @@ crate.annotation(
     repositories = ["oj_crates"],
     version = "0.117.2",
 )
-crate.annotation(
-    crate = "oj_deno_napi",
-    gen_build_script = "off",
-    patch_args = ["-p1"],
-    patches = ["//oj:napi-symbol-bytes.patch"],
-    repositories = ["oj_crates"],
-    version = "0.2.44",
-)
+
+# Same patch as oj_deno_napi, its fork; -p3 strips a/crates/oj_deno_napi/.
 crate.annotation(
     crate = "deno_napi",
     gen_build_script = "off",
-    patch_args = ["-p1"],
+    patch_args = ["-p3"],
     patches = ["//oj:napi-symbol-bytes.patch"],
     repositories = ["oj_crates"],
     version = "0.190.0",
@@ -249,27 +261,14 @@ crate.annotation(
     repositories = ["oj_crates"],
     version = "0.412.0",
 )
+
+# Same patch as oj_deno_runtime, its fork; -p3 strips a/crates/oj_deno_runtime/.
 crate.annotation(
     crate = "deno_runtime",
-    patch_args = ["-p1"],
+    patch_args = ["-p3"],
     patches = ["//oj:deno-runtime-snapshot-source.patch"],
     repositories = ["oj_crates"],
     version = "0.267.0",
-)
-crate.annotation(
-    crate = "oj_deno_runtime",
-    patch_args = ["-p1"],
-    patches = ["//oj:deno-runtime-snapshot-source.patch"],
-    repositories = ["oj_crates"],
-    version = "0.2.44",
-)
-crate.annotation(
-    additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
-    crate = "oj_deno_snapshots",
-    patch_args = ["-p1"],
-    patches = ["//oj:deno-snapshots-source.patch"],
-    repositories = ["oj_crates"],
-    version = "0.2.44",
 )
 crate.annotation(
     crate = "deno_features",
