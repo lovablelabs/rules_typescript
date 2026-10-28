@@ -15,12 +15,12 @@ The dev server does not type-check; type errors come from the editor and
 
 Gazelle generates a `dev` target for a tsconfig program with non-test sources
 and an application entry: a package index.html or a listed main.ts[x] or
-app.ts[x]. Gazelle manages `entry_point`, `node_modules`, `plugin` and
-`visibility`, and withdraws a `ts_dev_server` named `dev` (`dev_server` in a
+app.ts[x]. Gazelle manages `entry_point`, `node_modules`, `plugin`,
+`cloudflare` and `visibility`, and withdraws a `ts_dev_server` named `dev` (`dev_server` in a
 package named `dev`) outside an application package, wherever it runs program
 discovery, hand-written or not, unless a `# keep` above the rule holds it (a
 `# keep` on `entry_point` alone keeps the rule but drops `node_modules`,
-`plugin` and `visibility`). Gazelle keeps every other attribute as written
+`plugin`, `cloudflare` and `visibility`). Gazelle keeps every other attribute as written
 (`server`, `port`, `host`, `open`, `react_refresh`, `vite_config`,
 `vite_config_srcs`) and every value under `# keep`.
 
@@ -68,6 +68,7 @@ output paths and npm resolution remain relative to the workspace.
 | `entry_point` | `label` | required | `ts_compile` target for the application entry point |
 | `port` | `int` | `5173` | Dev server port |
 | `host` | `string` | `"localhost"` | Dev server host. Set to `"0.0.0.0"` to bind on all interfaces |
+| `cloudflare` | `bool` | `False` | `vite_config` loads `@cloudflare/vite-plugin`. The generated config names the plugin, which oj reads to defer the TanStack Start client bundle, and logs plugin output, the Worker's console and errors among it, to stdout/stderr. Gazelle sets it when `vite_config`, or a `vite.config.*` it names, names the plugin. Requires `vite_config` |
 | `open` | `bool` | `False` | Open the browser automatically on start. An analysis-time error against a server whose provider lists `server.open` in `ignored_config_fields` |
 | `node_modules` | `label` | `None` | The importer's [`node_modules`](node-modules.md) target linking the application's runtime deps, plus Vite on the Vite path; also what makes a bare npm import resolve; see [npm Resolution](#npm-resolution) |
 | `plugin` | `label` | `None` | Compiled `vite-plugin-bazel` `.mjs` file. It resolves generated code out of `bazel-bin`, invalidates on a rebuild, and makes the restart decision. Without it `bazel-bin` is invisible to Vite |

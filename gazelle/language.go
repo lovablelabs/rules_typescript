@@ -329,6 +329,7 @@ func (l *tsLang) Kinds() map[string]rule.KindInfo {
 		"ts_dev_server": {
 			NonEmptyAttrs: map[string]bool{"entry_point": true},
 			MergeableAttrs: map[string]bool{
+				"cloudflare":   true,
 				"entry_point":  true,
 				"node_modules": true,
 				"plugin":       true,

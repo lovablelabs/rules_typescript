@@ -288,6 +288,9 @@ func packageRules(args language.GenerateArgs, tc *tsConfig, set srcSet) language
 		if nodeModules != "" {
 			r.SetAttr("node_modules", nodeModules)
 		}
+		if s.loadsCloudflarePlugin(args, pkg, devTargetName(name)) {
+			r.SetAttr("cloudflare", true)
+		}
 		r.SetAttr("visibility", []string{"//visibility:public"})
 		add(r, nil)
 	} else {
@@ -714,14 +717,17 @@ func codegenOutDirResult(args language.GenerateArgs, root string) language.Gener
 	return res
 }
 
-// vitestConfigNames are the file names vitest itself looks for, in its own
-// order of preference.
-var vitestConfigNames = []string{
-	"vitest.config.ts", "vitest.config.mts", "vitest.config.cts",
-	"vitest.config.js", "vitest.config.mjs", "vitest.config.cjs",
+var viteConfigNames = []string{
 	"vite.config.ts", "vite.config.mts", "vite.config.cts",
 	"vite.config.js", "vite.config.mjs", "vite.config.cjs",
 }
+
+// vitestConfigNames are the file names vitest itself looks for, in its own
+// order of preference.
+var vitestConfigNames = append([]string{
+	"vitest.config.ts", "vitest.config.mts", "vitest.config.cts",
+	"vitest.config.js", "vitest.config.mjs", "vitest.config.cjs",
+}, viteConfigNames...)
 
 func (s *programStore) vitestConfigIn(c *config.Config, rel string) string {
 	for _, name := range vitestConfigNames {
