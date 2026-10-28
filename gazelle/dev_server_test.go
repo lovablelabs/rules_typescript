@@ -95,6 +95,48 @@ func TestDevServer_KeepsServerAndPort(t *testing.T) {
 	}
 }
 
+func TestDevServer_CloudflareFollowsTheViteConfig(t *testing.T) {
+	requireTsgo(t)
+	const plugin = `import { cloudflare } from "@cloudflare/vite-plugin";
+export default { plugins: [cloudflare()] };
+`
+	for _, tc := range []struct {
+		name, viteConfig, devConfig, sibling string
+		had, want                            bool
+	}{
+		{"vite_config names it", "dev.vite.mjs", plugin, "", false, true},
+		{"vite_config loads a vite.config naming it", "//src/app:dev.vite.mjs",
+			`export default await import("./vite.config.ts");` + "\n", plugin, false, true},
+		{"only an unloaded vite.config names it", "dev.vite.mjs",
+			"export default { plugins: [] };\n", plugin, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			had := ""
+			if tc.had {
+				had = "    cloudflare = True,\n"
+			}
+			files := appPackageFiles(`load("@rules_typescript//ts:defs.bzl", "ts_dev_server")
+
+ts_dev_server(
+    name = "dev",
+` + had + `    entry_point = ":app",
+    vite_config = "` + tc.viteConfig + `",
+)
+`)
+			files["src/app/dev.vite.mjs"] = tc.devConfig
+			if tc.sibling != "" {
+				files["src/app/vite.config.ts"] = tc.sibling
+			}
+			writeWorkspace(t, root, files)
+			captureLog(t, func() { convergeGazelle(t, root) })
+			if text := buildFileText(t, root, "src/app"); strings.Contains(text, "cloudflare = True") != tc.want {
+				t.Fatalf("cloudflare = True present: %v, want %v:\n%s", !tc.want, tc.want, indent(text))
+			}
+		})
+	}
+}
+
 func TestAppPackageSignals(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

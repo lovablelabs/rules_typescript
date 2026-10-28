@@ -393,7 +393,7 @@ Gazelle would use, without `# keep`, fails the run.
 | `ts_compile` | the directory's basename, `root` at the repository root | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `visibility` |
 | `ts_test` | `<basename>_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
 | `ts_config` | `tsconfig` | `src`, `deps`, `jsx`, `module`, `visibility` |
-| `ts_dev_server` | `dev` (`dev_server` when the compile target is `dev`) | `entry_point`, `plugin`, `node_modules`, `visibility` |
+| `ts_dev_server` | `dev` (`dev_server` when the compile target is `dev`) | `entry_point`, `plugin`, `node_modules`, `cloudflare`, `visibility` |
 | `filegroup` | `vitest_config` | `srcs`, `visibility` |
 | `filegroup` | `wrangler_config` | `srcs`, `visibility` |
 | `node_modules` | `node_modules` | `deps`, `parent`, `hoist`, `visibility` |
@@ -410,11 +410,14 @@ Gazelle writes there; Gazelle never writes one. A program listing only
 declaration files writes neither target and says so under `-ts_verbose`. An
 application with non-test program sources and a package index.html or listed
 main.ts[x]/app.ts[x] also gets a default oj dev target. Gazelle updates its
-entry point, npm tree, plugin and visibility, and withdraws a `ts_dev_server`
-named `dev` (`dev_server` in a package named `dev`) in every other directory
-where it runs program discovery, hand-written or not, unless a `# keep` above
-the rule holds it (a `# keep` on `entry_point` alone keeps the rule but drops
-`node_modules`, `plugin` and `visibility`). It keeps every other attribute as
+entry point, npm tree, plugin and visibility, sets `cloudflare = True` when the
+target's `vite_config`, or a `vite.config.*` it names, names
+`@cloudflare/vite-plugin` (a config outside the package needs `# keep`), and
+withdraws a `ts_dev_server` named `dev` (`dev_server` in a package named `dev`)
+in every other directory where it runs program discovery, hand-written or not,
+unless a `# keep` above the rule holds it (a `# keep` on `entry_point` alone
+keeps the rule but drops `node_modules`, `plugin`, `cloudflare` and
+`visibility`). It keeps every other attribute as
 written (`server`, `port`, `host`, `open`, `react_refresh`, `vite_config`,
 `vite_config_srcs`) and every value under `# keep`
 ([Dev Server](../guides/dev-server.md)). A src whose name Bazel cannot spell

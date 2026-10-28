@@ -29,11 +29,12 @@ explicitly and follow the setup below.
 
 Gazelle creates a `dev` target for a tsconfig program with non-test sources and
 a package index.html or listed main.ts[x] or app.ts[x]. Gazelle manages
-`entry_point`, `node_modules`, `plugin` and `visibility`, and withdraws a
-`ts_dev_server` named `dev` (`dev_server` in a package named `dev`) outside an
-application package, wherever it runs program discovery, hand-written or not,
-unless a `# keep` above the rule holds it (a `# keep` on `entry_point` alone
-keeps the rule but drops `node_modules`, `plugin` and `visibility`). A
+`entry_point`, `node_modules`, `plugin`, `cloudflare` and `visibility`, and
+withdraws a `ts_dev_server` named `dev` (`dev_server` in a package named `dev`)
+outside an application package, wherever it runs program discovery,
+hand-written or not, unless a `# keep` above the rule holds it (a `# keep` on
+`entry_point` alone keeps the rule but drops `node_modules`, `plugin`,
+`cloudflare` and `visibility`). A
 hand-written dev server outside an application package needs `# keep` or
 another name. Gazelle keeps every other attribute as written (`server`,
 `port`, `host`, `open`, `react_refresh`, `vite_config`, `vite_config_srcs`) and

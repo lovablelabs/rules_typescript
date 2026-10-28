@@ -114,3 +114,34 @@ func TestReactPluginEntryIsNotHardcoded(t *testing.T) {
 	config.ExcludesRE(`@vitejs/plugin-react/[A-Za-z0-9_.-]+`)
 	config.Contains("npmEntryPath('@vitejs/plugin-react')", "manifest.exports")
 }
+
+// oj defers a Cloudflare app's client bundle only when its --config text names the plugin.
+func TestCloudflareConfigNamesThePluginForOj(t *testing.T) {
+	verify.New(t).File("tests/dev_server/dev_cloudflare_dev/vite.config.mjs").Contains("@cloudflare/vite-plugin")
+}
+
+// oj resolves its plugins' config at logLevel 'silent'; the Cloudflare plugin logs the Worker's errors to its logger.
+func TestCloudflareConfigLogsWorkerErrors(t *testing.T) {
+	tree := verify.New(t)
+	node := tree.File("ts/toolchain/node_resolved/node")
+	config := tree.File("tests/dev_server/dev_cloudflare_dev/vite.config.mjs")
+	if !node.Exists() || !config.Exists() {
+		t.FailNow()
+	}
+	cmd := exec.Command(node.Abs(), "--input-type=module", "-e",
+		"const { default: config } = await import(process.argv[1]); config.customLogger.error('worker failed');",
+		config.Abs())
+	ws := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ws, "bazel-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), readLauncherConfig(t, tree, "dev_cloudflare").env(tree, ws)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("evaluating the config: %v\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "worker failed") {
+		t.Errorf("customLogger.error wrote nothing to stderr:\n%s", stderr.String())
+	}
+}

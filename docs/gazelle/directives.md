@@ -73,7 +73,7 @@ is replaced unless a `# keep` holds it:
 | `ts_compile` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `visibility` |
 | `ts_test` | `emit`, `srcs`, `package_scopes`, `type_inputs`, `test_srcs`, `deps`, `tsconfig`, `node_modules`, `source_node_modules`, `config`, `config_srcs`, `config_node_modules`, `workers_pool`, `wrangler_config`, `coverage_provider` |
 | `ts_config` | `src`, `deps`, `jsx`, `module`, `visibility` |
-| `ts_dev_server` | `entry_point`, `node_modules`, `plugin`, `visibility` |
+| `ts_dev_server` | `entry_point`, `node_modules`, `plugin`, `cloudflare`, `visibility` |
 | `filegroup(name = "vitest_config")` | `srcs`, `visibility` |
 | `filegroup(name = "wrangler_config")` | `srcs`, `visibility` |
 | `node_modules` | `deps`, `parent`, `hoist`, `visibility` |

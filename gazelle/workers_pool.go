@@ -1,6 +1,7 @@
 package typescript
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"path"
@@ -13,6 +14,7 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/rule"
+	bzl "github.com/bazelbuild/buildtools/build"
 
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
@@ -24,6 +26,7 @@ const (
 	wranglerConfigTargetName = "wrangler_config"
 	workersPoolPackage       = "@cloudflare/vitest-pool-workers"
 	istanbulPackage          = "@vitest/coverage-istanbul"
+	cloudflareVitePlugin     = "@cloudflare/vite-plugin"
 )
 
 // A string literal naming a wrangler config: `wrangler.configPath` as written.
@@ -233,4 +236,44 @@ func wranglerConfigLabel(tc *tsConfig, file, cfg, pkg string) string {
 	}
 	fatalf("typescript: %s names %s, which cannot be a Bazel file label; rename the Wrangler config", cfg, file)
 	return ""
+}
+
+// loadsCloudflarePlugin reports whether the dev server's vite_config names the
+// plugin, or names a vite.config beside it that does.
+func (s *programStore) loadsCloudflarePlugin(args language.GenerateArgs, rel, name string) bool {
+	stored := existingRule(args, "ts_dev_server", name)
+	if stored == nil {
+		return false
+	}
+	cfg, err := label.Parse(stored.AttrString("vite_config"))
+	if err != nil || cfg.Repo != "" || (!cfg.Relative && cfg.Pkg != rel) || cfg.Name == "" {
+		return false
+	}
+	text := func(file string) []byte {
+		file = path.Join(rel, file)
+		switch s.metadataIdentity(args.Config, file) {
+		case unknownInput:
+			fatal(s.incompleteOutput(file))
+		case authoredInput:
+			if data, err := readInput(filepath.Join(args.Config.RepoRoot, file)); err == nil {
+				return data
+			}
+		}
+		return nil
+	}
+	data := text(cfg.Name)
+	if data == nil {
+		// A generated or unreadable config: keep what the BUILD file says.
+		set, _ := stored.Attr("cloudflare").(*bzl.Ident)
+		return set != nil && set.Name == "True"
+	}
+	if bytes.Contains(data, []byte(cloudflareVitePlugin)) {
+		return true
+	}
+	for _, sibling := range viteConfigNames {
+		if bytes.Contains(data, []byte(sibling)) && bytes.Contains(text(sibling), []byte(cloudflareVitePlugin)) {
+			return true
+		}
+	}
+	return false
 }

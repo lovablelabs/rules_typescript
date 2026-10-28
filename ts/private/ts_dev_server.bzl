@@ -524,6 +524,23 @@ def _generate_dev_config(
         config_content += "plugins.push(bazelNpmResolve);\n"
     config_content += "\n"
 
+    if ctx.attr.cloudflare:
+        config_content += (
+            "// oj defers the client bundle when this file names @cloudflare/vite-plugin, and resolves plugin\n" +
+            "// configs at logLevel 'silent': only a customLogger carries the Worker's console and errors.\n" +
+            "const writeLine = stream => message => { stream.write(String(message) + '\\n'); };\n" +
+            "const warned = new Set();\n" +
+            "const loggedErrors = new WeakSet();\n" +
+            "const workerLogger = {\n" +
+            "  hasWarned: false,\n" +
+            "  info: writeLine(process.stdout),\n" +
+            "  warn(message) { workerLogger.hasWarned = true; writeLine(process.stderr)(message); },\n" +
+            "  warnOnce(message) { if (!warned.has(message)) { warned.add(message); workerLogger.warn(message); } },\n" +
+            "  error(message, options) { if (options?.error) loggedErrors.add(options.error); writeLine(process.stderr)(message); },\n" +
+            "  clearScreen() {},\n" +
+            "  hasErrorLogged: error => loggedErrors.has(error),\n" +
+            "};\n\n"
+        )
     config_content += (
         "// @type {import('vite').UserConfig}\n" +
         "export default {\n" +
@@ -567,6 +584,7 @@ def _generate_dev_config(
         "  publicDir: false,\n" +
         "\n" +
         "  logLevel: 'info',\n" +
+        ("  customLogger: workerLogger,\n" if ctx.attr.cloudflare else "") +
         "};\n"
     )
 
@@ -580,6 +598,7 @@ def _generate_dev_config(
 # the attr named beside it. A server that does not read one is only a problem for
 # a target that asked for it, so the check is per-attr rather than per-field.
 _CONFIG_FIELD_ATTRS = {
+    "customLogger": "cloudflare",
     "server.open": "open",
     "root": None,
 }
@@ -677,6 +696,8 @@ def _ts_dev_server_impl(ctx):
     plugin_rl = ""
     if plugin_files:
         plugin_rl = rlocation_path(ctx, plugin_files[0])
+    if ctx.attr.cloudflare and not ctx.file.vite_config:
+        fail("ts_dev_server: {} sets cloudflare = True without a vite_config to load @cloudflare/vite-plugin.".format(ctx.label))
 
     # A copy in bin, not the source file: Node resolves the runfiles symlink
     # before that file's own imports, which would then leave the Bazel tree.
@@ -873,6 +894,13 @@ ts_dev_server = rule(
         ),
         "open": attr.bool(
             doc = "Whether to open the browser automatically when the dev server starts.",
+            default = False,
+        ),
+        "cloudflare": attr.bool(
+            doc = "Whether `vite_config` loads @cloudflare/vite-plugin; requires `vite_config`. The " +
+                  "generated config then names the plugin, which oj reads to defer the TanStack Start " +
+                  "client bundle, and logs every plugin's output (the Worker's console and errors " +
+                  "among it), unfiltered by logLevel, to stdout/stderr through a `customLogger`.",
             default = False,
         ),
         "server": attr.label(

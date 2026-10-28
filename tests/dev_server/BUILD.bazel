@@ -445,6 +445,15 @@ ts_dev_server(
     server = "//vite:dev_server",
 )
 
+ts_dev_server(
+    name = "dev_cloudflare",
+    cloudflare = True,
+    entry_point = ":dev_app",
+    node_modules = ":node_modules",
+    server = "//vite:dev_server",
+    vite_config = "user_config.mjs",
+)
+
 # Dev server with the vite-plugin-bazel for enhanced .ts resolution and HMR.
 # This demonstrates SP2.2: building the plugin inside Bazel and wiring it in.
 ts_dev_server(
@@ -643,6 +652,7 @@ go_test(
     ],
     data = [
         "user_config_helper.mjs",
+        ":dev_cloudflare",
         ":dev_with_react_refresh",
         ":dev_with_relative_user_config",
         ":dev_with_user_config",
