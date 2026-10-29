@@ -15,7 +15,9 @@ ts_proto_library(name = "messages", proto = ":messages_proto", out_dir = "genera
 
 The rule calls protobuf's `proto_common.compile` with the protoc of protobuf's proto toolchain and the declared protobuf-es plugin. Under Bazel 9 that is the protoc `proto_library` uses: protobuf's prebuilt binary where one exists for the exec platform, otherwise the source build, which `--@protobuf//bazel/toolchains:prefer_prebuilt_protoc=false` also forces. The proto dependency enables protobuf's source-info flag to preserve comments. Only direct files are generated; imported TypeScript modules belong to their own generated libraries.
 
-The Bazel target graph selects schemas. The rule does not interpret Buf configuration or apply managed schema options. Schema options affecting generated descriptors belong in the proto sources. Migration checks compare the exact generated path set and TypeScript text outside embedded descriptors, then compare decoded `FileDescriptorProto` messages with top-level `FileOptions` cleared and absent or empty descriptor-options messages treated equally. Decode custom extensions with their schemas so wire-field ordering does not count as a change; retain extension values, scalar presence, repeated-value order, and unknown fields. Other message presence remains significant.
+The Bazel target graph selects schemas. The rule does not interpret Buf configuration or apply managed schema options. Schema options affecting generated descriptors belong in the proto sources.
+
+Between protoc and protobuf-es sits `//proto/private/bufrequest`, which re-encodes protoc's `CodeGeneratorRequest` the way `buf generate` v1.73.0 does for a plugin with `types` or `exclude_types`: custom option values decoded against the request's own files and marshalled deterministically, and options messages with no fields dropped. The embedded `fileDesc(...)` bytes are then buf's. Without a type filter buf keeps the empty `MethodOptions` protoc writes for `rpc ... {}`; the rule drops it. The wrapper links whichever protobuf-go the module graph selects, at least v1.36.12, buf v1.73.0's.
 
 ## Generated BUILD targets
 
@@ -28,4 +30,5 @@ The selected tsconfig's compiler-observed ambient types use the same dependency 
 1. Canonical proto import paths determine generated paths. The import-prefix fixture fails if generated sibling imports no longer resolve.
 2. Each proto target owns only its direct generated files. The two-library fixture fails on duplicate ownership or missing imported sources.
 3. Generated TypeScript uses the existing source-mode compiler and test runner. The JSON source-runtime fixture fails if emit-disabled generated sources cannot compile or execute.
-4. Selected-config ambient inputs survive separate owner updates and repeated generation. `TestProtoAmbientSourceDependencySurvivesSeparateOwnerUpdates` fails if either a declared owner or an unowned declaration closure disappears.
+4. Embedded descriptors are buf's bytes. `//tests/proto:service_buf_descriptor_test` fails if an extension value's wire order or an empty options message differs from buf's output.
+5. Selected-config ambient inputs survive separate owner updates and repeated generation. `TestProtoAmbientSourceDependencySurvivesSeparateOwnerUpdates` fails if either a declared owner or an unowned declaration closure disappears.

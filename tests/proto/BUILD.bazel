@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("//npm:defs.bzl", "node_modules")
 load("//proto:defs.bzl", "ts_proto_library")
@@ -18,6 +19,14 @@ proto_library(
     import_prefix = "proof/v1",
     strip_import_prefix = "/tests/proto",
     deps = [":common_proto"],
+)
+
+proto_library(
+    name = "service_proto",
+    srcs = ["service.proto"],
+    import_prefix = "proof/v1",
+    strip_import_prefix = "/tests/proto",
+    deps = ["@protobuf//:descriptor_proto"],
 )
 
 node_modules(
@@ -70,4 +79,21 @@ ts_test(
         "@npm//:vitest",
         "@npm_ts_proto//:bufbuild_protobuf",
     ],
+)
+
+ts_proto_library(
+    name = "service",
+    node_modules = ":node_modules",
+    out_dir = "generated",
+    proto = ":service_proto",
+    tsconfig = "tsconfig.json",
+    deps = ["@npm_ts_proto//:bufbuild_protobuf"],
+)
+
+# The golden is buf v1.73.0's `buf generate` of proof/v1/service.proto with
+# protoc-gen-es 2.12.0, `opt: target=ts` and `types: [proof.v1]`.
+diff_test(
+    name = "service_buf_descriptor_test",
+    file1 = ":service_generate",
+    file2 = "service_pb.ts.golden",
 )

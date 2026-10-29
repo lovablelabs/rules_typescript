@@ -1,0 +1,25 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "bufrequest_lib",
+    srcs = ["main.go"],
+    data = ["//proto/private:protoc_gen_es"],
+    importpath = "github.com/mikn/rules_typescript/proto/private/bufrequest",
+    visibility = ["//visibility:private"],
+    x_defs = {"pluginRlocationpath": "$(rlocationpath //proto/private:protoc_gen_es)"},
+    deps = [
+        "@io_bazel_rules_go//go/runfiles",
+        "@org_golang_google_protobuf//proto",
+        "@org_golang_google_protobuf//reflect/protodesc",
+        "@org_golang_google_protobuf//reflect/protoreflect",
+        "@org_golang_google_protobuf//types/descriptorpb",
+        "@org_golang_google_protobuf//types/dynamicpb",
+        "@org_golang_google_protobuf//types/pluginpb",
+    ],
+)
+
+go_binary(
+    name = "bufrequest",
+    embed = [":bufrequest_lib"],
+    visibility = ["//proto:__subpackages__"],
+)

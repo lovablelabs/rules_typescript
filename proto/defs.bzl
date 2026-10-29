@@ -44,7 +44,7 @@ _generate = rule(
         "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
         "out_dir": attr.string(mandatory = True),
         "options": attr.string_list(),
-        "_plugin": attr.label(default = "//proto/private:protoc_gen_es", executable = True, cfg = config.exec(_PROTOC)),
+        "_plugin": attr.label(default = "//proto/private/bufrequest", executable = True, cfg = config.exec(_PROTOC)),
     },
     exec_groups = {_PROTOC: exec_group(toolchains = [_PROTO_TOOLCHAIN])},
 )
