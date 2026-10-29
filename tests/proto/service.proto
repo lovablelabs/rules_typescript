@@ -1,0 +1,46 @@
+syntax = "proto3";
+package proof.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// The google.api.http and buf.validate shapes: a field outside a oneof after one inside it.
+message HttpRule {
+  oneof pattern {
+    string get = 2;
+    string post = 4;
+  }
+  string body = 7;
+}
+
+message StringRules {
+  uint64 min_len = 2;
+}
+
+message FieldRules {
+  oneof type {
+    StringRules string = 14;
+  }
+  bool required = 25;
+}
+
+extend google.protobuf.MethodOptions {
+  HttpRule http = 72295728;
+}
+
+extend google.protobuf.FieldOptions {
+  FieldRules field = 1159;
+}
+
+message CreateRequest {
+  string name = 1 [(proof.v1.field) = {string: {min_len: 1}, required: true}];
+}
+
+message CreateResponse {}
+
+service Service {
+  rpc Create(CreateRequest) returns (CreateResponse) {
+    option (proof.v1.http) = {post: "/v1/create", body: "*"};
+  }
+  // protoc writes an empty MethodOptions for these braces.
+  rpc Get(CreateRequest) returns (CreateResponse) {}
+}
