@@ -86,6 +86,7 @@ load(
 )
 load("//ts/private/actions:emit.bzl", "emit_action")
 load("//ts/private/actions:format.bzl", "FORMAT_ATTR", "FormatConfigInfo", "format_action")
+load("//ts/private/actions:check.bzl", "CheckConfigInfo")
 load("//ts/private/actions:lint.bzl", "LintConfigInfo", "lint_action")
 load("//ts/private/actions:manifest.bzl", "manifest_action", "runtime_scope_inputs")
 load(
@@ -1286,6 +1287,7 @@ def compile_program(
             npm_files = npm_files,
             ownership = ownership,
             checkers = checkers,
+            check = ctx.attr._check[CheckConfigInfo],
             runtime_scopes = [] if emit and compile_srcs else scope_checks,
         ))
         if tsgo_emits_dts:
@@ -1599,6 +1601,10 @@ for all of them but Node16/NodeNext.""",
         allow_single_file = [".json"],
     ),
     "_format": FORMAT_ATTR,
+    "_check": attr.label(
+        default = Label("//ts:check"),
+        providers = [CheckConfigInfo],
+    ),
     "_lint": attr.label(
         default = Label("//ts:lint"),
         providers = [LintConfigInfo],

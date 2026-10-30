@@ -22,6 +22,7 @@ load(
 )
 load("//ts/private:tsgo_lock.bzl", "tsgo_from_pnpm_lock", "tsgo_from_version")
 load("//ts/private/actions:format.bzl", "format_config_repo")
+load("//ts/private/actions:check.bzl", "check_config_repo")
 load("//ts/private/actions:lint.bzl", "lint_config_repo")
 
 # Label(), not a string, so it resolves in this repository from any consumer.
@@ -68,6 +69,18 @@ def _spec_for(module_ctx, tag):
             workspace_registries(npmrc, ""),
         )
     fail("ts.tsgo(): set pnpm_lock (the lockfile whose TypeScript the toolchain fetches, verified) or version (a release to download unverified).")
+
+def _check_for(module_ctx):
+    for mod in module_ctx.modules:
+        if mod.is_root:
+            if len(mod.tags.check) > 1:
+                fail(("ts.check(): the root module calls it {} times; one " +
+                      "call names the checker every target runs.").format(
+                    len(mod.tags.check),
+                ))
+            for tag in mod.tags.check:
+                return tag
+    return None
 
 def _lint_for(module_ctx):
     for mod in module_ctx.modules:
@@ -166,6 +179,13 @@ def _ts_impl(module_ctx):
     spec = _spec_for(module_ctx, tag)
     if spec.error:
         fail(spec.error)
+
+    check = _check_for(module_ctx)
+    check_config_repo(
+        name = "check_config",
+        binary = str(check.binary) if check else "",
+        args = check.args if check else [],
+    )
 
     lint = _lint_for(module_ctx)
     lint_config_repo(
@@ -285,6 +305,27 @@ _format_tag = tag_class(
     doc = "Read-only formatting validation on checked-in program sources and ts_format file sets; only the root module configures it.",
 )
 
+_check_tag = tag_class(
+    attrs = {
+        "binary": attr.label(
+            mandatory = True,
+            doc = """The type checker TsgoCheck runs instead of the tsgo
+toolchain's compiler. It is called with `args` and then tsgo's command line
+(`--project`, `--noEmit`, `--explainFiles`, `--pretty false`, `--checkers`),
+and has to print and exit as tsgo does. Declaration emit, the editor project
+and Gazelle stay on tsgo.""",
+        ),
+        "args": attr.string_list(
+            doc = "Arguments before tsgo's command line: `[\"tsc\"]` for `oj tsc`.",
+        ),
+    },
+    doc = """Which type checker TsgoCheck runs; only the root module's call
+takes effect.
+
+    ts.check(binary = "@oj//:oj", args = ["tsc"])
+""",
+)
+
 _lint_tag = tag_class(
     attrs = {
         "binary": attr.label(
@@ -336,6 +377,7 @@ ts = module_extension(
     implementation = _ts_impl,
     tag_classes = {
         "tsgo": _tsgo_tag,
+        "check": _check_tag,
         "lint": _lint_tag,
         "format": _format_tag,
         "prebuilt_tools": tag_class(attrs = {}, doc = "Opt into the pinned Go tools release from the root module."),
