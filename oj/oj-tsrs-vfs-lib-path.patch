@@ -1,0 +1,11 @@
+diff --git a/crates/typecheck/oj_tsrs_vfs/src/bundled/bundled.rs b/crates/typecheck/oj_tsrs_vfs/src/bundled/bundled.rs
+index 639856b..73b23e5 100644
+--- a/crates/typecheck/oj_tsrs_vfs/src/bundled/bundled.rs
++++ b/crates/typecheck/oj_tsrs_vfs/src/bundled/bundled.rs
+@@ -40,5 +40,5 @@ pub fn embedded_file(path: &str) -> Option<&'static str> {
+ // TestingLibPath returns the path to the source bundled libs directory.
+ // It's only valid to use where the source code is available.
+ pub fn testing_lib_path() -> String {
+-    tspath::normalize_slashes(concat!(env!("CARGO_MANIFEST_DIR"), "/libs"))
++    tspath::normalize_slashes("libs")
+ }
