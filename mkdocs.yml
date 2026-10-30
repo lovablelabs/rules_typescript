@@ -60,6 +60,7 @@ nav:
     - Monorepo Layout: guides/monorepo.md
     - Troubleshooting: guides/troubleshooting.md
     - Lint: guides/lint.md
+    - Type checker: guides/check.md
     - Format: guides/format.md
     - Benchmark: guides/benchmark.md
   - Gazelle:

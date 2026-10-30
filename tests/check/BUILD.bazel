@@ -1,0 +1,36 @@
+"""ts.check()'s checker replaces the tsgo toolchain's compiler on TsgoCheck
+and nowhere else; //ts:tsgo_check restores it."""
+
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("//ts:defs.bzl", "ts_compile")
+load("//ts/private/actions:check.bzl", "check_config")
+load(":check_tests.bzl", "checker_test", "tsgo_checks_test")
+
+package(default_visibility = ["//:__pkg__"])
+
+sh_binary(
+    name = "fake_checker",
+    srcs = ["fake_checker.sh"],
+)
+
+check_config(
+    name = "fake",
+    args = ["typecheck"],
+    binary = ":fake_checker",
+)
+
+ts_compile(
+    name = "lib",
+    srcs = ["lib.ts"],
+    emit = True,  # keep
+)
+
+checker_test(
+    name = "checker_test",
+    target_under_test = ":lib",
+)
+
+tsgo_checks_test(
+    name = "tsgo_checks_test",
+    target_under_test = ":lib",
+)

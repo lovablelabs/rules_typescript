@@ -401,6 +401,7 @@ ts.lint(
 )
 use_repo(
     ts,
+    "check_config",
     "format_config",
     "lint_config",
     "tsgo_darwin_amd64",

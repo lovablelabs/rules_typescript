@@ -108,7 +108,7 @@ def program_inputs(tsconfig, srcs, chain, dep_dts, npm_files, extra = [], tool_f
         transitive = [dep_dts, npm_files, tool_files],
     )
 
-def _run_tsgo(ctx, run_args, inputs, outputs, mnemonic, checkers):
+def _run_tsgo(ctx, run_args, inputs, outputs, mnemonic, checkers, tools = []):
     requirements = {}
     if checkers > 0:
         run_args.add("--checkers", str(checkers))
@@ -116,6 +116,7 @@ def _run_tsgo(ctx, run_args, inputs, outputs, mnemonic, checkers):
     ctx.actions.run(
         inputs = inputs,
         outputs = outputs,
+        tools = tools,
         executable = get_tools_toolchain(ctx).tsaction,
         arguments = ["tsgo", run_args],
         mnemonic = mnemonic,
@@ -177,6 +178,7 @@ def tsgo_check(
         npm_files,
         ownership,
         checkers,
+        check = None,
         runtime_scopes = [],
         generated_srcs = [],
         inherited_importers = []):
@@ -190,7 +192,8 @@ def tsgo_check(
     at or above the target's package, `manifests` those deps' package.json as
     built, each laid at its package's path, `npm_files` the store files the
     program reaches and `ownership` the manifest the listing is checked
-    against. Returns the stamp written when tsgo and the check pass, for the
+    against. `check` is the CheckConfigInfo //ts:check names: its binary,
+    when set, runs in place of the tsgo toolchain's compiler. Returns the stamp written when tsgo and the check pass, for the
     _validation group.
     """
     stamp = ctx.actions.declare_file("{}.tscheck".format(ctx.label.name))
@@ -212,7 +215,15 @@ def tsgo_check(
         run_args.add(ctx.file.tsconfig, format = "-tsconfig=%s")
     run_args.add(stamp, format = "-stamp=%s")
     run_args.add("--")
-    run_args.add(tsgo.tsgo_binary)
+    tools = []
+    if check and check.binary:
+        run_args.add(check.binary.executable)
+        run_args.add_all(check.args)
+        tools = [check.binary]
+        tool_files = depset()
+    else:
+        run_args.add(tsgo.tsgo_binary)
+        tool_files = tsgo.files
     run_args.add("--project", tsconfig)
     run_args.add("--noEmit")
     run_args.add("--explainFiles")
@@ -227,10 +238,11 @@ def tsgo_check(
             dep_dts,
             npm_files,
             [ownership] + scope_inputs,
-            tool_files = tsgo.files,
+            tool_files = tool_files,
         ),
         [stamp],
         "TsgoCheck",
         checkers,
+        tools = tools,
     )
     return stamp
