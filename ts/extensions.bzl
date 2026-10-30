@@ -316,13 +316,13 @@ and has to print and exit as tsgo does. Declaration emit, the editor project
 and Gazelle stay on tsgo.""",
         ),
         "args": attr.string_list(
-            doc = "Arguments before tsgo's command line: `[\"typecheck\"]` for `oj typecheck`.",
+            doc = "Arguments before tsgo's command line: `[\"tsc\"]` for `oj tsc`.",
         ),
     },
     doc = """Which type checker TsgoCheck runs; only the root module's call
 takes effect.
 
-    ts.check(binary = "@oj//:oj", args = ["typecheck"])
+    ts.check(binary = "@oj//:oj", args = ["tsc"])
 """,
 )
 
