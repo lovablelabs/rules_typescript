@@ -100,8 +100,8 @@ importers:
         specifier: 2.1.0
         version: 2.1.0
       '@types/node':
-        specifier: 22.20.1
-        version: 22.20.1
+        specifier: 24.19.2
+        version: 24.19.2
 
   # Two workspace members that resolve one name to two different majors, and one
   # package that pnpm resolved twice -- once per peer set. Both are recorded the
@@ -147,8 +147,8 @@ packages:
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
 
-  '@types/node@22.20.1':
-    resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+  '@types/node@24.19.2':
+    resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
 
   '@vendored/local-pkg@file:vendor/vendored-local-pkg-1.0.0.tgz':
     resolution: {integrity: sha512-lknO1+gJFNzEyadnN/Q+NEZgFePkqq3w+K7uKjwWIKeroa6csLbQWkYQUeunDfDTUSzCZcMnXHj4PWVCDpRweQ==, tarball: file:vendor/vendored-local-pkg-1.0.0.tgz}
@@ -190,8 +190,8 @@ packages:
     resolution: {integrity: sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w==}
     engines: {node: '>=12'}
 
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+  undici-types@7.24.6:
+    resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
 
   wrap-ansi@8.1.0:
     resolution: {integrity: sha512-si7QWI6zUMq56bESFvagtmzMdGOtoxfR+Sez11Mobfc7tm+VkUckk9bW2UeffTGVUbOksxmSw0AA2gs8g71NCQ==}
@@ -204,9 +204,9 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@22.20.1':
+  '@types/node@24.19.2':
     dependencies:
-      undici-types: 6.21.0
+      undici-types: 7.24.6
 
   '@vendored/local-pkg@file:vendor/vendored-local-pkg-1.0.0.tgz': {}
 
@@ -243,7 +243,7 @@ snapshots:
     dependencies:
       ansi-regex: 6.2.2
 
-  undici-types@6.21.0: {}
+  undici-types@7.24.6: {}
 
   # A dependent of ansi-styles, and the only route to the (ansi-regex@6.2.2)
   # resolution that does not go through an importer. Its own key carries the peer

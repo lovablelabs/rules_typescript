@@ -96,7 +96,7 @@ func buildIndex(t *testing.T, c *config.Config, rules ...indexedRule) *resolve.R
 	return ix
 }
 
-// seedResolveConfig gives c the resolve config Gazelle 0.51.3 seeds in
+// seedResolveConfig gives c the resolve config Gazelle 0.54.0 seeds in
 // RegisterFlags and Gazelle 2 in Configure.
 func seedResolveConfig(c *config.Config) {
 	(&resolve.Configurer{}).RegisterFlags(nil, "", c)

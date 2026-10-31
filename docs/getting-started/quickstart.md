@@ -106,7 +106,7 @@ Once a version is published to the BCR, drop the override; the plain
 **Step 1.** Create `.bazelversion`:
 
 ```
-9.2.0
+9.3.1
 ```
 
 **Step 2.** Create `MODULE.bazel`, pinning `rules_typescript` with
@@ -129,14 +129,13 @@ git_override(
 
 register_toolchains("@rules_typescript//ts/toolchain:all")
 
-bazel_dep(name = "gazelle", version = "0.51.3")
+bazel_dep(name = "gazelle", version = "0.54.0")
 ```
 
 **Step 3.** Create `.bazelrc`:
 
 ```
 build --incompatible_strict_action_env
-build --nolegacy_external_runfiles
 build --output_groups=+_validation
 ```
 
@@ -373,7 +372,7 @@ A checkout of this repository writes the Path A files itself:
 bazel run //tools/quickstart -- --dir ../my_project --rules-path "$PWD"
 ```
 
-It writes ten files: `.bazelversion` (`9.2.0`), `.bazelrc`, `MODULE.bazel`, a
+It writes ten files: `.bazelversion` (`9.3.1`), `.bazelrc`, `MODULE.bazel`, a
 root `BUILD.bazel` holding the Gazelle target, `src/BUILD.bazel`,
 `src/lib/math.ts`, `src/lib/index.ts`, `src/lib/BUILD.bazel`, `src/app/main.ts`
 and `src/app/BUILD.bazel`. `src/lib` and `src/app` each hold a hand-written
@@ -434,7 +433,7 @@ warning naming the URL. Prefer `pnpm_lock` wherever there is a lockfile.
 The tests run under the Node your `.nvmrc` names. Add to `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "rules_nodejs", version = "6.7.5")
+bazel_dep(name = "rules_nodejs", version = "6.7.7")
 
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(
@@ -447,14 +446,14 @@ Every `ts_test`, and every build tool that is node, runs under that version;
 an edit to the file moves the runtime with it. The file holds the bare
 version, `24.18.0`. `node_version = "24.18.0"` in place of the
 `node_version_from_nvmrc` line pins the same without a file. With no
-`node.toolchain()` call the runtime is the `22.23.1` `rules_typescript`'s own
+`node.toolchain()` call the runtime is the `24.22.1` `rules_typescript`'s own
 `MODULE.bazel` pins: a default, not a decision for your workspace.
 `//tests/integration/node_version` pins the three cases.
 
 The `bazel_dep` line is required. `rules_nodejs` reaches your build as a
 transitive dependency of `rules_typescript`, so without it `@rules_nodejs` is
 not in your repository mapping and the `use_extension` fails with
-`no repo visible as '@rules_nodejs' here`. `6.7.5` is the version
+`no repo visible as '@rules_nodejs' here`. `6.7.7` is the version
 `rules_typescript`'s `MODULE.bazel` pins.
 
 Keep `name = "nodejs"`. `rules_nodejs` keeps the root module's registration of

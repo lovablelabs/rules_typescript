@@ -1,5 +1,13 @@
 {
   "rules": {
     "no-var": "error"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["*.d.ts"],
+      "rules": {
+        "no-var": "off"
+      }
+    }
+  ]
 }

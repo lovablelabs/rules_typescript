@@ -48,8 +48,6 @@ func getConfig(c *config.Config) *tsConfig {
 	}
 	if tc.programs.repoConfig == nil {
 		tc.programs.repoConfig = c.Clone()
-		// Gazelle 0.51.3's Config.Clone leaves AliasMap shared.
-		tc.programs.repoConfig.AliasMap = maps.Clone(c.AliasMap)
 	}
 	return tc
 }
@@ -69,13 +67,6 @@ func (s *programStore) recordBuild(c *config.Config, pkg string, f *rule.File) {
 		}
 	}
 	projected := s.buildConfig(pkg)
-	if pkg != "" && c.AliasMap != nil {
-		// Gazelle 0.51.3 mutates the shared parent map before this Configure boundary.
-		// https://github.com/bazelbuild/bazel-gazelle/blob/v0.51.3/config/config.go
-		parent := s.buildConfig(parentDir(pkg))
-		clear(c.AliasMap)
-		maps.Copy(c.AliasMap, parent.AliasMap)
-	}
 	c.AliasMap = maps.Clone(projected.AliasMap)
 	c.KindMap = maps.Clone(projected.KindMap)
 	ownerConfig := *c
@@ -95,12 +86,11 @@ func (s *programStore) buildConfig(pkg string) *config.Config {
 		}
 	}
 	c := s.repoConfig.Clone()
-	c.AliasMap = maps.Clone(s.repoConfig.AliasMap)
 	for _, dir := range slices.Backward(ancestors) {
 		(&config.CommonConfigurer{}).Configure(c, dir, s.emission.files[dir])
 	}
 	for kind, mapped := range c.KindMap {
-		// Gazelle 0.51.3 resolves a chain through the terminal mapping's FromKind.
+		// Gazelle resolves a chain through the terminal mapping's FromKind.
 		mapped.FromKind = canonicalRule(c, rule.NewRule(mapped.FromKind, "")).Kind()
 		c.KindMap[kind] = mapped
 	}

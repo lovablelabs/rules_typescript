@@ -3,22 +3,22 @@
   "version": "0.0.0",
   "private": true,
   "dependencies": {
-    "@types/bun": "1.3.5",
+    "@types/bun": "1.4.4",
     "@types/culori": "2.1.1",
     "@vitejs/plugin-react": "5.2.0",
-    "@vitest/coverage-v8": "4.1.11",
+    "@vitest/coverage-v8": "4.1.12",
     "bun-types": "1.1.34",
     "culori": "4.0.2",
-    "happy-dom": "20.8.3",
-    "oxlint": "0.16.6",
+    "happy-dom": "21.0.4",
+    "oxlint": "1.90.0",
     "test-exclude": "7.0.2",
-    "typescript": "5.9.2",
-    "vite": "8.2.2",
-    "vitest": "4.1.11",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vitest": "4.1.12",
     "zod": "3.24.2"
   },
   "devDependencies": {
-    "@types/node": "22.20.1",
-    "tsup": "8.5.1"
+    "@types/node": "24.19.2",
+    "tsup": "9.0.0"
   }
 }

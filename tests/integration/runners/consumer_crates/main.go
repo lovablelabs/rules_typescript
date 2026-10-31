@@ -90,8 +90,8 @@ func main() {
 		it.Pass("native tools keep Rust 1.99 across exec dependencies without changing the consumer's Rust 1.91")
 
 		graph := it.BazelStdout("mod", "graph", "--depth=1")
-		if !strings.Contains(graph, "rules_rs@0.0.111") {
-			it.Fail("bazel mod graph names no rules_rs@0.0.111:\n%s", graph)
+		if !strings.Contains(graph, "rules_rs@0.2.1") {
+			it.Fail("bazel mod graph names no rules_rs@0.2.1:\n%s", graph)
 		}
 		it.Pass("rules_rs is pinned by the consumer")
 

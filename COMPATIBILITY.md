@@ -2,46 +2,24 @@
 
 ## Bazel Versions
 
-| Bazel Version | Support Level |
-|---------------|--------------|
-| 9.x | Fully supported (the only version CI runs) |
-| 8.x | Untested (bzlmod is available; nothing verifies it) |
-| 7.x | Untested |
-| < 7.0 | Not supported (no bzlmod) |
+rules_typescript supports Bazel 9.x only; `.bazelversion` in this repository
+pins 9.3.1 and CI installs Bazelisk against it. Earlier majors are not
+supported.
 
-rules_typescript requires bzlmod (MODULE.bazel). WORKSPACE-based setups are not
-supported, and no workspace here carries a `WORKSPACE.bazel`: Bazel 8 made the
-file optional and Bazel 9 stopped reading it, so `MODULE.bazel` alone marks a
-repository root. `.bazelversion` in this repository pins 9.2.0 and CI installs
-Bazelisk against it.
+It requires bzlmod (MODULE.bazel). WORKSPACE-based setups are not supported,
+and no workspace here carries a `WORKSPACE.bazel`: Bazel 9 does not read it, so
+`MODULE.bazel` alone marks a repository root.
 
-Each npm package reaches its store copy as one source directory. Bazel 9
-tracks a source directory by its contents by default. Bazel 7 and 8 do so only
-with the startup environment variable `BAZEL_TRACK_SOURCE_DIRECTORIES=1`
-(e.g. `export BAZEL_TRACK_SOURCE_DIRECTORIES=1` before the server starts);
-without it they warn "dependency checking of directories is unsound" per
-package and detect a changed package by mtime alone.
-
-The `//ts:*` build flags carry `scope = "target"`, so Bazel 9 builds exec
-tools with their defaults. Bazel 7 ignores the attribute and passes a set value
-into the exec configuration; whether Bazel 8 accepts it is unverified.
+Each npm package reaches its store copy as one source directory, which Bazel 9
+tracks by its contents.
 
 ## bazel-gazelle
 
 | bazel-gazelle | Status |
 |---------------|--------|
 | 2.0.0-beta.2 | Supported; `e2e/gazelle_latest` runs the golden cases and most of the extension's tests on it; most binary-driven tests pin `-r=true -index=true`, the run-record and fast-path tests run its defaults, and the lazy-index tests its `-index=lazy`. Under its default `-index=lazy`, a run never visits, so never reports, the files under a package outside the directories it updates |
-| Other versions above 0.54.0 | Untested; no workspace here resolves one |
-| 0.54.0 | Supported; the ruleset's own build, examples and integration tests |
-| Above 0.51.3, below 0.54.0 | Untested; no workspace here resolves one |
-| 0.51.3 | Supported floor; `e2e/basic` pins it |
-| < 0.51.3 | Not supported: rules_go 0.62 requires 0.51.3, so the graph raises it |
-
-Bazel resolves the highest version any module in the graph declares, and by
-default only warns when that differs from your own `bazel_dep`.
-`e2e/basic/.bazelrc` sets `--check_direct_dependencies=error`, so a graph that
-raises Gazelle past the declared 0.51.3 fails the build there instead of
-running the floor tests on a newer Gazelle.
+| 0.54.0 | Supported; the ruleset's own build, `e2e/basic`, the examples and integration tests |
+| Other versions | Not supported |
 
 ## Platforms
 
@@ -95,7 +73,7 @@ If you need TypeScript on Bazel on Windows today, use
 
 ## Rust and C/C++ toolchains
 
-Rust rules and Cargo resolution use rules_rs 0.0.111; C/C++ uses hermetic LLVM 0.8.21. Both crate closures read Cargo.toml and Cargo.lock directly. There is no vendored cargo-bazel rendering or rules_rust version compatibility layer. Oxc and OJ select Rust 1.99.1 for their own dependency closures; tsgo and its wrapper use Go. Consumers can keep a different Rust compiler. With rules_rs 0.0.111, give the consumer toolchain a distinct repository name, for example `rust.toolchain(name = "consumer_rust_toolchains", version = "1.91.0", edition = "2024")`, and import it with `use_repo(rust, "consumer_rust_toolchains", "default_rust_toolchains")`. Register `@consumer_rust_toolchains//...`. Keep the upstream default import under its own name: `bazel mod tidy` requires it and would collide with an alias using that name. rules_typescript retains the upstream-required default repository for its tools, but does not register it globally in consumer builds.
+Rust rules and Cargo resolution use rules_rs 0.2.1; C/C++ uses hermetic LLVM 0.8.26. Both crate closures read Cargo.toml and Cargo.lock directly. There is no vendored cargo-bazel rendering or rules_rust version compatibility layer. Oxc and OJ select Rust 1.99.1 for their own dependency closures; tsgo and its wrapper use Go. Consumers can keep a different Rust compiler. With rules_rs 0.2.1, give the consumer toolchain a distinct repository name, for example `rust.toolchain(name = "consumer_rust_toolchains", version = "1.91.0", edition = "2024")`, and import it with `use_repo(rust, "consumer_rust_toolchains", "default_rust_toolchains")`. Register `@consumer_rust_toolchains//...`. Keep the upstream default import under its own name: `bazel mod tidy` requires it and would collide with an alias using that name. rules_typescript retains the upstream-required default repository for its tools, but does not register it globally in consumer builds.
 
 ## Vite and vitest
 
@@ -110,10 +88,10 @@ no test runs a generated config against a second major:
 
 | Hub | Lockfile | Vite | vitest | Coverage |
 |---|---|---|---|---|
-| `@npm` | `tests/npm/pnpm-lock.yaml` | 8.2.2 | 4.1.11 | `ts_test` (the whole `tests/vitest` suite), `ts_dev_server` (six servers started and interrogated over HTTP), and `vite-plugin-bazel`'s own tests |
-| `@npm_tailwind` | `tests/tailwind/lock/pnpm-lock.yaml` | 8.2.2 | — | Tailwind v4 through `vite_config`, under the dev server |
-| `@npm_workers` | `tests/workers/pnpm-lock.yaml` | 8.2.2 | 4.1.11 | `ts_test` with the Workers pool (vitest inside workerd), and the `wrangler types` generator `//tools/codegen:wrangler_types` under `ts_codegen` (`tests/worker_types`) |
-| `@npm_eslint` | `tests/eslint/pnpm-lock.yaml` | 8.2.2 | 4.1.11 | the ESLint plugin's own `ts_test` target, against `@typescript-eslint`'s rule tester |
+| `@npm` | `tests/npm/pnpm-lock.yaml` | 8.3.5 | 4.1.12 | `ts_test` (the whole `tests/vitest` suite), `ts_dev_server` (six servers started and interrogated over HTTP), and `vite-plugin-bazel`'s own tests |
+| `@npm_tailwind` | `tests/tailwind/lock/pnpm-lock.yaml` | 8.3.5 | — | Tailwind v4 through `vite_config`, under the dev server |
+| `@npm_workers` | `tests/workers/pnpm-lock.yaml` | 8.3.5 | 4.1.12 | `ts_test` with the Workers pool (vitest inside workerd), and the `wrangler types` generator `//tools/codegen:wrangler_types` under `ts_codegen` (`tests/worker_types`) |
+| `@npm_eslint` | `tests/eslint/pnpm-lock.yaml` | 8.3.5 | 4.1.12 | the ESLint plugin's own `ts_test` target, against `@typescript-eslint`'s rule tester |
 | `@npm_features` | `tests/npm/features/pnpm-lock.yaml` | — | — | pnpm's patched dependencies, npm aliases, peer-dependency variants, per-importer resolution; resolves neither tool |
 | `@npm_esbuild` | `vite/esbuild/pnpm-lock.yaml` | — | — | the esbuild that bundles `vite-plugin-bazel`. The one hub that is not a fixture; the bundle ships to consumers as API |
 
@@ -121,7 +99,7 @@ The `examples/` modules and the integration workspaces under `tests/integration/
 are separate Bazel modules with their own lockfiles, outside the table above.
 `examples/app`, `examples/react-app`, `e2e/basic`,
 `tests/integration/gazelle_roundtrip` and `tests/integration/npm_deps` resolve
-Vite 8.2.2 and vitest 4.1.11; `tests/integration/lsp` resolves neither tool,
+Vite 8.3.5 and vitest 4.1.12; `tests/integration/lsp` resolves neither tool,
 `tests/integration/store_cache` resolves one package with one dependency, and
 `examples/basic` has no npm dependencies.
 

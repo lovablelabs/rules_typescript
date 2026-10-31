@@ -91,7 +91,7 @@ ts_proto_library(
 )
 
 # The golden is buf v1.73.0's `buf generate` of proof/v1/service.proto with
-# protoc-gen-es 2.12.0, `opt: target=ts` and `types: [proof.v1]`.
+# protoc-gen-es 2.16.0, `opt: target=ts` and `types: [proof.v1]`.
 diff_test(
     name = "service_buf_descriptor_test",
     file1 = ":service_generate",

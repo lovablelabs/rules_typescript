@@ -21,7 +21,7 @@ jobs:
       sha256: ${{ steps.build.outputs.sha256_hex }}
       integrity: ${{ steps.build.outputs.sha256_sri }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version from tag
         id: version
@@ -71,7 +71,7 @@ jobs:
           subject-path: ${{ steps.build.outputs.tarball }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.build.outputs.tarball }}
           generate_release_notes: true
@@ -91,7 +91,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download release artifact
         uses: actions/download-artifact@v8
@@ -131,7 +131,7 @@ jobs:
           cat .bcr/presubmit.yml
 
       - name: Create PR for BCR submission
-        uses: peter-evans/create-pull-request@v5
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore: Update BCR metadata for v${{ needs.release.outputs.version }}"
@@ -152,7 +152,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/tools-v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         with:
@@ -181,7 +181,7 @@ jobs:
           subject-path: dist/*.tar.gz
 
       - name: Create the tools release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.tar.gz
           name: ${{ github.ref_name }}

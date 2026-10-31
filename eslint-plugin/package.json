@@ -52,15 +52,15 @@
     "eslint": ">=9.0.0"
   },
   "dependencies": {
-    "@typescript-eslint/utils": "^8.72.0"
+    "@typescript-eslint/utils": "^8.72.1"
   },
   "devDependencies": {
-    "@typescript-eslint/parser": "^8.72.0",
-    "@typescript-eslint/rule-tester": "^8.72.0",
-    "@types/node": "^26.6.5",
-    "eslint": "^10.13.0",
+    "@typescript-eslint/parser": "^8.72.1",
+    "@typescript-eslint/rule-tester": "^8.72.1",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
     "tsup": "^9.0.0",
-    "typescript": "^5.7.0",
+    "typescript": "^6.0.3",
     "vitest": "^5.0.5"
   }
 }

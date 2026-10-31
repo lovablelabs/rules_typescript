@@ -84,7 +84,7 @@ jobs:
     # overrun fails, and main still keeps what it built.
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         id: setup
@@ -226,7 +226,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'macos-latest' && 75 || 60 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         with:
@@ -256,7 +256,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         with:
@@ -282,7 +282,7 @@ jobs:
           - react-app
       fail-fast: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         with:
@@ -308,7 +308,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         with:
@@ -357,7 +357,7 @@ jobs:
         # job) fails if these three sources ever disagree.
         shard: [npm, roundtrip-1, roundtrip-2, roundtrip-3, roundtrip-4, core]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: bazel-contrib/setup-bazel@0.19.1
         with:
@@ -510,7 +510,7 @@ jobs:
     name: Linting & Code Quality
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # There is no buildifier bazel_dep in MODULE.bazel: `bazel run
       # @buildifier//:buildifier` fails with "No repository visible as
@@ -518,7 +518,7 @@ jobs:
       - name: Install buildifier
         run: |
           curl -fsSL -o /usr/local/bin/buildifier \
-            https://github.com/bazelbuild/buildtools/releases/download/v8.2.1/buildifier-linux-amd64
+            https://github.com/bazelbuild/buildtools/releases/download/v10.2.0/buildifier-linux-amd64
           chmod +x /usr/local/bin/buildifier
           buildifier --version
 
