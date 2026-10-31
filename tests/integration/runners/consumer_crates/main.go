@@ -54,7 +54,7 @@ func main() {
 			}
 			tool := strings.Contains(label, "rules_typescript_crates__") || strings.Contains(label, "oj_crates__") || strings.HasSuffix(label, "//oxc_cli:oxc-bazel_source")
 			if tool {
-				want = "_1_98_0_rust_toolchain/"
+				want = "_1_99_1_rust_toolchain/"
 				tools++
 			}
 			if want == "" {
@@ -87,7 +87,7 @@ func main() {
 		}
 		it.MustBazel("run", "@rules_typescript//oxc_cli:oxc-bazel", "--", "--help")
 		it.MustBazel("run", "@rules_typescript//oj:oj", "--", "--help")
-		it.Pass("native tools keep Rust 1.98 across exec dependencies without changing the consumer's Rust 1.91")
+		it.Pass("native tools keep Rust 1.99 across exec dependencies without changing the consumer's Rust 1.91")
 
 		graph := it.BazelStdout("mod", "graph", "--depth=1")
 		if !strings.Contains(graph, "rules_rs@0.0.111") {

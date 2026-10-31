@@ -454,7 +454,7 @@ func TestDevServerBehaviour(t *testing.T) {
 					// Under oj, a server-side render takes the member's source through the same transform.
 					if launcher == "member_sources_dev_launcher" {
 						marker := regexp.MustCompile(`FIRST_PARTY_TRANSFORM SIBLING_RESOLVED (\w+)`)
-						var resolved struct {
+						var resolved, claimed struct {
 							ID       string `json:"id"`
 							External bool   `json:"external"`
 						}
@@ -467,8 +467,8 @@ func TestDevServerBehaviour(t *testing.T) {
 							t.Errorf("a server-side render dropped an external pre resolveId answer's id: HTTP %d %s", external.status, external.body)
 						}
 						dependency := get(t, base, "/@ssr-resolve?"+url.Values{"importer": {filepath.Join(app, "entry.ts")}, "spec": {"dependency-claimed"}}.Encode())
-						if !strings.Contains(dependency.body, `"external":true`) || !strings.Contains(dependency.body, "/zod/") {
-							t.Errorf("a server-side render did not externalize the dependency file a pre resolveId chose: HTTP %d %s", dependency.status, dependency.body)
+						if err := json.Unmarshal([]byte(dependency.body), &claimed); err != nil || claimed.External || !strings.Contains(filepath.ToSlash(claimed.ID), "/node_modules/zod/") {
+							t.Errorf("a server-side render handed Node the dependency file a pre resolveId chose, which Vite loads as a module: HTTP %d %s", dependency.status, dependency.body)
 						}
 						rendered := get(t, base, "/@ssr-module?"+url.Values{"id": {resolved.ID}}.Encode())
 						browser, server := marker.FindStringSubmatch(member.body), marker.FindStringSubmatch(rendered.body)

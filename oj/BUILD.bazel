@@ -27,11 +27,8 @@ exports_files([
     "deno-runtime-snapshot-source.patch",
     "deno-snapshots-source.patch",
     "napi-symbol-bytes.patch",
-    "oj-cache-start-bundle-stable-key.patch",
     "oj-napi-link.patch",
-    "oj-server-pre-resolve-id.patch",
-    "oj-server-ssr-css-url.patch",
-    "oj-start-host-query-resolve-id.patch",
+    "oj-tsrs-vfs-lib-path.patch",
     "v8-output-dir.patch",
     "sqlite-build-script-path.patch",
 ])
@@ -71,14 +68,6 @@ rust_test(
         "@oj_crates//:oj_js",
         "@oj_crates//:tokio",
     ],
-)
-
-rust_test(
-    name = "start_bundle_key_test",
-    srcs = ["start_bundle_key_tests.rs"],
-    edition = "2024",
-    target_compatible_with = ["@platforms//os:linux"],
-    deps = ["@oj_crates//:oj_cache"],
 )
 
 rust_test(

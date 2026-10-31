@@ -1,7 +1,7 @@
 ### Changed
 
-- **The default oj dev server moves from 0.2.22 to 0.2.49, built from oj's
-  git tag `v0.2.49`.** `oj/Cargo.lock` pins every oj crate to that tag's
+- **The default oj dev server moves from 0.2.22 to 0.3.1, built from oj's
+  git tag `v0.3.1`.** `oj/Cargo.lock` pins every oj crate to that tag's
   commit, so Bazel fetches one checkout at a fixed sha. Fetching it needs
   `git` on PATH and access to github.com; a crates.io mirror no longer
   covers it, and the pin is the commit id, not a content digest. Elapsed
@@ -26,6 +26,13 @@
   `OJ_DEBUG_MEM` and `OJ_DEBUG_HOOK_GATE`; Start links stylesheets in
   Vite's order; and FSEvents streams are shared as chokidar shares them
   (0.2.48). oj returns the memory the npm rolldown binding frees (0.2.49).
+  A server-side render externalizes only what Vite's `canExternalizeFile`
+  does and honors `ssr.noExternal`/`ssr.external`, plugins resolve in Vite's
+  order (`pre` hooks, then Vite's resolver, then the rest), Start resolves
+  an import once with its query, and a symlinked cache dir no longer changes
+  the Start bundle key (0.2.50). `oj typecheck` type-checks an app as
+  `tsc -b --noEmit` does (0.3.0); its checker needs Rust 1.99, so Oxc and oj
+  build with Rust 1.99.1 (see Breaking — native toolchains).
   `GET /@oj/diagnostics` and `OJ_LOG_JSON=1` report structured diagnostics
   (0.2.23). The V8, deno_core, Cranelift and tokio pins are unchanged;
   `notify` gives way to oj's `oj_notify` fork. Three oj
@@ -33,10 +40,4 @@
   restart's launch environment (0.2.33), and the in-host dependency scan
   that `oj/oj-server-scan-outside-plugin-host.patch` kept out of the plugin
   host no longer runs under a deadline that stops in-flight hooks (0.2.25,
-  0.2.33). `oj/oj-cache-start-bundle-stable-key.patch` is re-cut: oj still
-  drops its own build dir from the Start bundle key by path prefix, which
-  misses under a symlinked `bazel-bin`. `oj/oj-server-pre-resolve-id.patch`
-  is re-cut onto 0.2.49's single plugin host, whose ssr environment is a
-  container of the dev host and which passes `scan` on itself, and
-  `oj/oj-server-ssr-css-url.patch` drops its plugin-loaded stylesheet hunk,
-  which 0.2.46 ships.
+  0.2.33).
