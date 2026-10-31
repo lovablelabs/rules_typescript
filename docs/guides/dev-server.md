@@ -4,14 +4,14 @@
 //src/app:dev` builds the target once. The server then transforms first-party
 source in memory, so a save reaches the browser without a Bazel build.
 
-oj 0.3.1 is the default implementation at `@rules_typescript//oj:dev_server`.
+oj 0.3.2 is the default implementation at `@rules_typescript//oj:dev_server`.
 Vite is optional: set `server = "@rules_typescript//vite:dev_server"`.
 Other implementations return `DevServerInfo`; see
 [Bringing your own server](#bringing-your-own-server).
 
 ## Default oj server
 
-oj's crates come from its git tag `v0.3.1`, pinned by its commit in
+oj's crates come from its git tag `v0.3.2`, pinned by its commit in
 `oj/Cargo.lock`, and are built from Rust source. Fetching them needs `git` on
 PATH and access to github.com; the pin is the commit id, not a content digest.
 Their V8 dependency uses an upstream static library fetched by Bazel with a
