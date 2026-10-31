@@ -9,7 +9,7 @@
 - **A plugin's `server.restart()` restores the Start client bundle from
   cache** instead of rebundling it. With the cache under a symlinked
   `bazel-bin`, the bundle's key covered oj's own `start/manifest.ts`, which
-  every boot rewrites (`oj/oj-cache-start-bundle-stable-key.patch`); and the
-  restarted process inherited the `process.env` writes of the app's Vite
-  config, which changed the key again. A restart now starts with the
-  environment oj was launched with (oj 0.2.33, lovablelabs/oj#348).
+  every boot rewrites (fixed in oj 0.2.50); and the restarted process
+  inherited the `process.env` writes of the app's Vite config, which changed
+  the key again. A restart now starts with the environment oj was launched
+  with (oj 0.2.33, lovablelabs/oj#348).

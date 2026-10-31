@@ -71,7 +71,7 @@ bazel_dep(name = "rules_license", version = "1.0.0")
 rust = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 rust.toolchain(
     edition = "2024",
-    version = "1.98.0",
+    version = "1.99.1",
 )
 use_repo(rust, "default_rust_toolchains")
 
@@ -168,34 +168,20 @@ use_repo(
 # oj's crates share one git checkout: their patches apply at its root, and all
 # of them must use the same patch_args.
 crate.annotation(
-    crate = "oj_cache",
-    patch_args = ["-p1"],
-    patches = ["//oj:oj-cache-start-bundle-stable-key.patch"],
-    repositories = ["oj_crates"],
-)
-
-# Vite's resolveId order (pre plugins before oj's resolver, this.resolve at
-# vite:resolve); carried until an oj release ships it.
-crate.annotation(
-    crate = "oj_server",
-    patch_args = ["-p1"],
-    patches = [
-        "//oj:oj-server-pre-resolve-id.patch",
-        # A dependency import with a query (`.css?url`) stays out of Node in SSR.
-        "//oj:oj-server-ssr-css-url.patch",
-    ],
-    repositories = ["oj_crates"],
-)
-crate.annotation(
     additive_build_file_content = 'package(features = ["-static_link_cpp_runtimes"])',
     crate = "oj",
     gen_binaries = ["oj"],
     patch_args = ["-p1"],
-    patches = [
-        "//oj:oj-napi-link.patch",
-        # Start SSR offers resolveId the id with its query first, as Vite does.
-        "//oj:oj-start-host-query-resolve-id.patch",
-    ],
+    patches = ["//oj:oj-napi-link.patch"],
+    repositories = ["oj_crates"],
+)
+
+# tsrs's testing_lib_path bakes CARGO_MANIFEST_DIR, the sandbox's absolute
+# path, into the rlib, which rules_rs's process wrapper rejects.
+crate.annotation(
+    crate = "oj_tsrs_vfs",
+    patch_args = ["-p1"],
+    patches = ["//oj:oj-tsrs-vfs-lib-path.patch"],
     repositories = ["oj_crates"],
 )
 crate.annotation(
