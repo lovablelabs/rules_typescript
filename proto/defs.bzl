@@ -11,10 +11,29 @@ _PROTO_TOOLCHAIN = Label("@protobuf//bazel/private:proto_toolchain_type")
 # One exec group for protoc and the plugin, so both are built for the platform the action runs on.
 _PROTOC = "protoc"
 
-def _generate_impl(ctx):
-    proto = ctx.attr.proto[0][ProtoInfo]
-    if not proto.direct_sources:
-        fail("ts_proto_library: proto must have direct sources")
+# protobuf-es imports the protobuf module's schemas, the well-known types, from its runtime.
+_RUNTIME_REPO = Label("@protobuf//:any_proto").repo_name
+
+_ProtoClosureInfo = provider(
+    doc = "The ProtoInfo of every proto_library a target reaches, except the protobuf module's.",
+    fields = ["protos"],
+)
+
+def _closure_aspect_impl(target, ctx):
+    own = [] if ctx.rule.kind == "alias" or target.label.repo_name == _RUNTIME_REPO else [target[ProtoInfo]]
+    deps = []
+    for attribute in ("deps", "exports", "actual"):
+        value = getattr(ctx.rule.attr, attribute, [])
+        deps.extend(value if type(value) == "list" else [value])
+    return [_ProtoClosureInfo(protos = depset(own, transitive = [dep[_ProtoClosureInfo].protos for dep in deps if _ProtoClosureInfo in dep]))]
+
+_closure_aspect = aspect(
+    implementation = _closure_aspect_impl,
+    attr_aspects = ["deps", "exports", "actual"],
+    required_providers = [ProtoInfo],
+)
+
+def _compile(ctx, proto):
     paths = [proto_common.get_import_path(src).removesuffix(".proto") + "_pb.ts" for src in proto.direct_sources]
     outputs = [ctx.actions.declare_file(ctx.attr.out_dir + "/" + path) for path in paths]
     toolchain = proto_common.ProtoLangToolchainInfo(
@@ -35,17 +54,38 @@ def _generate_impl(ctx):
         plugin_output = outputs[0].path.removesuffix(paths[0]),
         experimental_exec_group = _PROTOC,
     )
+    return outputs
+
+def _generate_impl(ctx):
+    proto = ctx.attr.proto[0][ProtoInfo]
+    if not proto.direct_sources:
+        fail("ts_proto_library: %s has no direct sources. Did you mean ts_proto_closure, which takes source-less roots?" % ctx.attr.proto[0].label)
+    return [DefaultInfo(files = depset(_compile(ctx, proto)))]
+
+def _generate_closure_impl(ctx):
+    # One protoc action per proto_library needs the list.
+    closure = depset(transitive = [target[_ProtoClosureInfo].protos for target in ctx.attr.protos]).to_list()
+    outputs = [output for proto in closure if proto.direct_sources for output in _compile(ctx, proto)]
+    if not outputs:
+        fail("ts_proto_closure: %s reach only protobuf's well-known types, which protobuf-es imports from its runtime" % [str(target.label) for target in ctx.attr.protos])
     return [DefaultInfo(files = depset(outputs))]
+
+_GENERATE_ATTRS = {
+    "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
+    "out_dir": attr.string(mandatory = True),
+    "options": attr.string_list(),
+    "_plugin": attr.label(default = "//proto/private/bufrequest", executable = True, cfg = config.exec(_PROTOC)),
+}
 
 _generate = rule(
     implementation = _generate_impl,
-    attrs = {
-        "proto": attr.label(mandatory = True, providers = [ProtoInfo], cfg = proto_source_info),
-        "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
-        "out_dir": attr.string(mandatory = True),
-        "options": attr.string_list(),
-        "_plugin": attr.label(default = "//proto/private/bufrequest", executable = True, cfg = config.exec(_PROTOC)),
-    },
+    attrs = _GENERATE_ATTRS | {"proto": attr.label(mandatory = True, providers = [ProtoInfo], cfg = proto_source_info)},
+    exec_groups = {_PROTOC: exec_group(toolchains = [_PROTO_TOOLCHAIN])},
+)
+
+_generate_closure = rule(
+    implementation = _generate_closure_impl,
+    attrs = _GENERATE_ATTRS | {"protos": attr.label_list(mandatory = True, providers = [ProtoInfo], cfg = proto_source_info, aspects = [_closure_aspect])},
     exec_groups = {_PROTOC: exec_group(toolchains = [_PROTO_TOOLCHAIN])},
 )
 
@@ -68,17 +108,16 @@ ts_proto_config = rule(
     },
 )
 
-def ts_proto_library(name, proto, out_dir, tsconfig, deps = [], node_modules = None, options = ["target=ts"], **kwargs):
-    """Generates direct proto files through the existing source-mode compiler owner."""
+def _library(name, generate, sources, out_dir, tsconfig, deps, node_modules, options, **kwargs):
     _check_options(options)
     generated = name + "_generate"
-    _generate(
+    generate(
         name = generated,
-        proto = proto,
         out_dir = out_dir,
         options = options,
         visibility = ["//visibility:private"],
         testonly = kwargs.get("testonly", False),
+        **sources
     )
     ts_compile(
         name = name,
@@ -89,3 +128,13 @@ def ts_proto_library(name, proto, out_dir, tsconfig, deps = [], node_modules = N
         emit = False,
         **kwargs
     )
+
+def ts_proto_library(name, proto, out_dir, tsconfig, deps = [], node_modules = None, options = ["target=ts"], **kwargs):
+    """Generates direct proto files through the existing source-mode compiler owner."""
+    _library(name, _generate, {"proto": proto}, out_dir, tsconfig, deps, node_modules, options, **kwargs)
+
+def ts_proto_closure(name, protos, out_dir, tsconfig, deps = [], node_modules = None, options = ["target=ts"], **kwargs):
+    """Generates `protos` and every proto_library they reach, except protobuf's well-known types, as one source-mode compiler owner."""
+    if "bootstrap_wkt=true" in options:
+        fail("ts_proto_closure skips the well-known types, so bootstrap_wkt=true would import files it never generates. Did you mean ts_proto_library?")
+    _library(name, _generate_closure, {"protos": protos}, out_dir, tsconfig, deps, node_modules, options, **kwargs)

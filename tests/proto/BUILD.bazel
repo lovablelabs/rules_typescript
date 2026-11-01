@@ -1,8 +1,9 @@
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("//npm:defs.bzl", "node_modules")
-load("//proto:defs.bzl", "ts_proto_library")
+load("//proto:defs.bzl", "ts_proto_closure", "ts_proto_library")
 load("//ts:defs.bzl", "ts_test")
+load(":closure_tests.bzl", "closure_files_test")
 
 # gazelle:ignore
 
@@ -96,4 +97,33 @@ diff_test(
     name = "service_buf_descriptor_test",
     file1 = ":service_generate",
     file2 = "service_pb.ts.golden",
+)
+
+# A source-less root: message_proto through exports, and an alias in this repo to a well-known type.
+proto_library(
+    name = "closure_root_proto",
+    exports = [":message_proto"],
+    deps = [":descriptor_alias"],
+)
+
+alias(
+    name = "descriptor_alias",
+    actual = "@protobuf//:descriptor_proto",
+)
+
+ts_proto_closure(
+    name = "closure",
+    node_modules = ":node_modules",
+    out_dir = "closure",
+    protos = [
+        ":closure_root_proto",
+        ":service_proto",
+    ],
+    tsconfig = "tsconfig.json",
+    deps = ["@npm_ts_proto//:bufbuild_protobuf"],
+)
+
+closure_files_test(
+    name = "closure_files_test",
+    target_under_test = ":closure_generate",
 )
