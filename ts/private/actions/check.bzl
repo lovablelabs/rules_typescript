@@ -4,7 +4,7 @@ The root module's ts.check(binary, args) writes the @check_config repository;
 its one target is what the //ts:check label flag names. With no binary,
 TsgoCheck runs the tsgo toolchain's compiler. A configured checker is called
 with `args` and then tsgo's command line, and has to print and exit as tsgo
-does: the step parses its --explainFiles listing. `oj tsc` is one.
+does: the step parses its --explainFiles listing. `oj typecheck` is one.
 """
 
 CheckConfigInfo = provider(
@@ -35,7 +35,7 @@ check_config = rule(
         ),
         "args": attr.string_list(
             doc = "Arguments passed before tsgo's command line, " +
-                  "`[\"tsc\"]` for `oj tsc`.",
+                  "`[\"typecheck\"]` for `oj typecheck`.",
         ),
     },
     doc = "The type checker //ts:check names; ts.check() writes the one at " +

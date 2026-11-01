@@ -84,9 +84,9 @@ load(
     "get_oxc_toolchain",
     "get_tools_toolchain",
 )
+load("//ts/private/actions:check.bzl", "CheckConfigInfo")
 load("//ts/private/actions:emit.bzl", "emit_action")
 load("//ts/private/actions:format.bzl", "FORMAT_ATTR", "FormatConfigInfo", "format_action")
-load("//ts/private/actions:check.bzl", "CheckConfigInfo")
 load("//ts/private/actions:lint.bzl", "LintConfigInfo", "lint_action")
 load("//ts/private/actions:manifest.bzl", "manifest_action", "runtime_scope_inputs")
 load(

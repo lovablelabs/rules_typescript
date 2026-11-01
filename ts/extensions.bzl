@@ -21,8 +21,8 @@ load(
     "tools_asset_url",
 )
 load("//ts/private:tsgo_lock.bzl", "tsgo_from_pnpm_lock", "tsgo_from_version")
-load("//ts/private/actions:format.bzl", "format_config_repo")
 load("//ts/private/actions:check.bzl", "check_config_repo")
+load("//ts/private/actions:format.bzl", "format_config_repo")
 load("//ts/private/actions:lint.bzl", "lint_config_repo")
 
 # Label(), not a string, so it resolves in this repository from any consumer.
@@ -316,13 +316,13 @@ and has to print and exit as tsgo does. Declaration emit, the editor project
 and Gazelle stay on tsgo.""",
         ),
         "args": attr.string_list(
-            doc = "Arguments before tsgo's command line: `[\"tsc\"]` for `oj tsc`.",
+            doc = "Arguments before tsgo's command line: `[\"typecheck\"]` for `oj typecheck`.",
         ),
     },
     doc = """Which type checker TsgoCheck runs; only the root module's call
 takes effect.
 
-    ts.check(binary = "@oj//:oj", args = ["tsc"])
+    ts.check(binary = "@oj//:oj", args = ["typecheck"])
 """,
 )
 

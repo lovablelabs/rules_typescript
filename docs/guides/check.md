@@ -8,21 +8,21 @@ another checker:
 ts = use_extension("@rules_typescript//ts:extensions.bzl", "ts")
 ts.check(
     binary = "//tools:oj",
-    args = ["tsc"],
+    args = ["typecheck"],
 )
 ```
 
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `binary` | `label` | required | The checker's executable target. A source file needs a rule around it (`copy_file` with `is_executable = True`) |
-| `args` | `string_list` | `[]` | Arguments passed before tsgo's command line: `["tsc"]` for `oj tsc` |
+| `args` | `string_list` | `[]` | Arguments passed before tsgo's command line: `["typecheck"]` for `oj typecheck` |
 
 The checker is called as `binary args... --project <tsconfig> --noEmit
 --explainFiles --pretty false`, plus `--checkers N` under
 `--//ts:checkers=N`, from the program root tsgo would run in. It has to print
 and exit as tsgo does: the step relays its diagnostics when it fails and
 checks the `--explainFiles` listing against the target's deps when it passes
-([Deps Have to Be Direct](../rules/ts-compile.md)). `oj tsc` is such a
+([Deps Have to Be Direct](../rules/ts-compile.md)). `oj typecheck` is such a
 checker.
 
 Only `TsgoCheck` changes. Declaration emit (`TsgoDeclare`), the editor

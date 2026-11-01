@@ -15,7 +15,7 @@ sh_binary(
 
 check_config(
     name = "fake",
-    args = ["tsc"],
+    args = ["typecheck"],
     binary = ":fake_checker",
 )
 

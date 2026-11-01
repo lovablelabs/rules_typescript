@@ -5,8 +5,8 @@ load(
     "int_flag",
     "string_flag",
 )
-load("//ts/private/actions:format.bzl", "format_config")
 load("//ts/private/actions:check.bzl", "check_config")
+load("//ts/private/actions:format.bzl", "format_config")
 load("//ts/private/actions:lint.bzl", "lint_config")
 
 package(default_visibility = ["//visibility:public"])
@@ -114,8 +114,8 @@ bzl_library(
         "//ts/private:toolchain",
         "//ts/private:tools_lock",
         "//ts/private:tsgo_lock",
-        "//ts/private/actions:format",
         "//ts/private/actions:check",
+        "//ts/private/actions:format",
         "//ts/private/actions:lint",
         "@gazelle//:deps",
     ],

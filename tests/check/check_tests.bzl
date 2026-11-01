@@ -30,7 +30,7 @@ def _checker_impl(ctx):
         argv = check.argv
         at = argv.index("--")
         asserts.true(env, argv[at + 1].endswith("/tests/check/fake_checker"), "TsgoCheck runs the checker: " + argv[at + 1])
-        asserts.equals(env, ["tsc", "--project"], argv[at + 2:at + 4], "the checker's args, then tsgo's command line")
+        asserts.equals(env, ["typecheck", "--project"], argv[at + 2:at + 4], "the checker's args, then tsgo's command line")
         for flag in ["--noEmit", "--explainFiles"]:
             asserts.true(env, flag in argv[at:], flag + " reaches the checker")
         inputs = [f.basename for f in check.inputs.to_list()]
