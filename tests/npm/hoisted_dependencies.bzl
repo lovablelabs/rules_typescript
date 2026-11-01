@@ -1,21 +1,20 @@
-"""pnpm's hidden hoist over tests/npm/pnpm-lock.yaml, as pnpm 10.32.1 wrote
+"""pnpm's hidden hoist over tests/npm/pnpm-lock.yaml, as pnpm 12.16.1 wrote
 it: `node_modules/.modules.yaml#hoistedDependencies` after `pnpm install
 --frozen-lockfile` over a scratch copy of the lockfile and its members'
-package.json files (rt-evidence/logs/plan10/perf-forest/wrap/fix-r2/
-01-pnpm-frozen-install.log), and the workspace members it linked beside them
-under `node_modules/.pnpm/node_modules` (02-pnpm-hoist-members.log)."""
+package.json files, and the workspace members it linked beside them under
+`node_modules/.pnpm/node_modules`."""
 
 HOISTED = {
-    "undici-types@6.21.0": {
+    "undici-types@7.24.6": {
         "undici-types": "private",
     },
-    "@babel/core@7.29.0": {
+    "@babel/core@7.29.0(supports-color@7.2.0)": {
         "@babel/core": "private",
     },
-    "@babel/plugin-transform-react-jsx-self@7.27.1(@babel/core@7.29.0)": {
+    "@babel/plugin-transform-react-jsx-self@7.27.1(@babel/core@7.29.0(supports-color@7.2.0))": {
         "@babel/plugin-transform-react-jsx-self": "private",
     },
-    "@babel/plugin-transform-react-jsx-source@7.27.1(@babel/core@7.29.0)": {
+    "@babel/plugin-transform-react-jsx-source@7.27.1(@babel/core@7.29.0(supports-color@7.2.0))": {
         "@babel/plugin-transform-react-jsx-source": "private",
     },
     "@rolldown/pluginutils@1.0.0-rc.3": {
@@ -30,7 +29,7 @@ HOISTED = {
     "@bcoe/v8-coverage@1.0.2": {
         "@bcoe/v8-coverage": "private",
     },
-    "@vitest/utils@4.1.11": {
+    "@vitest/utils@4.1.12": {
         "@vitest/utils": "private",
     },
     "ast-v8-to-istanbul@1.0.5": {
@@ -63,17 +62,20 @@ HOISTED = {
     "@types/whatwg-mimetype@3.0.2": {
         "@types/whatwg-mimetype": "private",
     },
+    "buffer-image-size@0.6.4": {
+        "buffer-image-size": "private",
+    },
     "entities@7.0.1": {
         "entities": "private",
     },
     "whatwg-mimetype@3.0.0": {
         "whatwg-mimetype": "private",
     },
-    "ws@8.19.0": {
+    "ws@8.22.1": {
         "ws": "private",
     },
-    "@oxlint/linux-x64-gnu@0.16.6": {
-        "@oxlint/linux-x64-gnu": "private",
+    "@oxlint/binding-linux-x64-gnu@1.90.0": {
+        "@oxlint/binding-linux-x64-gnu": "private",
     },
     "@istanbuljs/schema@0.1.3": {
         "@istanbuljs/schema": "private",
@@ -84,22 +86,19 @@ HOISTED = {
     "minimatch@10.2.4": {
         "minimatch": "private",
     },
-    "bundle-require@5.1.0(esbuild@0.27.7)": {
+    "bundle-require@5.1.0(esbuild@0.28.2)": {
         "bundle-require": "private",
     },
-    "cac@6.7.14": {
+    "cac@7.1.0": {
         "cac": "private",
     },
-    "chokidar@4.0.3": {
+    "chokidar@5.0.0": {
         "chokidar": "private",
     },
     "consola@3.4.2": {
         "consola": "private",
     },
-    "debug@4.4.3": {
-        "debug": "private",
-    },
-    "esbuild@0.27.7": {
+    "esbuild@0.28.2": {
         "esbuild": "private",
     },
     "fix-dts-default-cjs-exports@1.0.1": {
@@ -111,31 +110,31 @@ HOISTED = {
     "picocolors@1.1.1": {
         "picocolors": "private",
     },
-    "postcss-load-config@6.0.1(postcss@8.5.26)": {
+    "postcss-load-config@6.0.1(postcss@8.5.32)": {
         "postcss-load-config": "private",
     },
     "resolve-from@5.0.0": {
         "resolve-from": "private",
     },
-    "rollup@4.59.0": {
+    "rollup@4.67.3": {
         "rollup": "private",
     },
-    "source-map@0.7.6": {
-        "source-map": "private",
+    "source-map-js@1.2.2": {
+        "source-map-js": "private",
     },
     "sucrase@3.35.1": {
         "sucrase": "private",
     },
-    "tinyexec@0.3.2": {
+    "tinyexec@1.3.1": {
         "tinyexec": "private",
     },
-    "tinyglobby@0.2.15": {
+    "tinyglobby@0.2.17": {
         "tinyglobby": "private",
     },
     "tree-kill@1.2.2": {
         "tree-kill": "private",
     },
-    "postcss@8.5.26": {
+    "postcss@8.5.32": {
         "postcss": "private",
     },
     "lightningcss@1.33.0": {
@@ -144,25 +143,25 @@ HOISTED = {
     "picomatch@4.0.7": {
         "picomatch": "private",
     },
-    "rolldown@1.2.5": {
+    "rolldown@1.2.16": {
         "rolldown": "private",
     },
-    "@vitest/expect@4.1.11": {
+    "@vitest/expect@4.1.12": {
         "@vitest/expect": "private",
     },
-    "@vitest/mocker@4.1.11(vite@8.2.2(@types/node@22.20.1)(esbuild@0.27.7))": {
+    "@vitest/mocker@4.1.12(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.2))": {
         "@vitest/mocker": "private",
     },
-    "@vitest/pretty-format@4.1.11": {
+    "@vitest/pretty-format@4.1.12": {
         "@vitest/pretty-format": "private",
     },
-    "@vitest/runner@4.1.11": {
+    "@vitest/runner@4.1.12": {
         "@vitest/runner": "private",
     },
-    "@vitest/snapshot@4.1.11": {
+    "@vitest/snapshot@4.1.12": {
         "@vitest/snapshot": "private",
     },
-    "@vitest/spy@4.1.11": {
+    "@vitest/spy@4.1.12": {
         "@vitest/spy": "private",
     },
     "es-module-lexer@2.3.2": {
@@ -192,22 +191,22 @@ HOISTED = {
     "@babel/helper-compilation-targets@7.28.6": {
         "@babel/helper-compilation-targets": "private",
     },
-    "@babel/helper-module-transforms@7.28.6(@babel/core@7.29.0)": {
+    "@babel/helper-module-transforms@7.28.6(@babel/core@7.29.0(supports-color@7.2.0))(supports-color@7.2.0)": {
         "@babel/helper-module-transforms": "private",
     },
     "@babel/helpers@7.28.6": {
         "@babel/helpers": "private",
     },
-    "@babel/parser@7.29.0": {
+    "@babel/parser@7.29.8": {
         "@babel/parser": "private",
     },
     "@babel/template@7.28.6": {
         "@babel/template": "private",
     },
-    "@babel/traverse@7.29.0": {
+    "@babel/traverse@7.29.0(supports-color@7.2.0)": {
         "@babel/traverse": "private",
     },
-    "@babel/types@7.29.0": {
+    "@babel/types@7.29.8": {
         "@babel/types": "private",
     },
     "@jridgewell/remapping@2.3.5": {
@@ -215,6 +214,9 @@ HOISTED = {
     },
     "convert-source-map@2.0.0": {
         "convert-source-map": "private",
+    },
+    "debug@4.4.3(supports-color@7.2.0)": {
+        "debug": "private",
     },
     "gensync@1.0.0-beta.2": {
         "gensync": "private",
@@ -258,13 +260,10 @@ HOISTED = {
     "load-tsconfig@0.2.5": {
         "load-tsconfig": "private",
     },
-    "readdirp@4.1.2": {
+    "readdirp@5.1.1": {
         "readdirp": "private",
     },
-    "ms@2.1.3": {
-        "ms": "private",
-    },
-    "@esbuild/linux-x64@0.27.7": {
+    "@esbuild/linux-x64@0.28.2": {
         "@esbuild/linux-x64": "private",
     },
     "mlly@1.8.2": {
@@ -303,28 +302,28 @@ HOISTED = {
     "@jridgewell/sourcemap-codec@1.5.5": {
         "@jridgewell/sourcemap-codec": "private",
     },
-    "source-map-js@1.2.1": {
-        "source-map-js": "private",
-    },
     "brace-expansion@5.0.4": {
         "brace-expansion": "private",
     },
     "lilconfig@3.1.3": {
         "lilconfig": "private",
     },
-    "nanoid@3.3.18": {
+    "nanoid@3.3.20": {
         "nanoid": "private",
     },
-    "@oxc-project/types@0.146.0": {
+    "@oxc-project/types@0.156.0": {
         "@oxc-project/types": "private",
     },
-    "@rolldown/binding-linux-x64-gnu@1.2.5": {
+    "@rolldown/binding-linux-x64-gnu@1.2.16": {
         "@rolldown/binding-linux-x64-gnu": "private",
     },
-    "@types/estree@1.0.8": {
+    "@types/estree@1.0.10": {
         "@types/estree": "private",
     },
-    "@rollup/rollup-linux-x64-gnu@4.59.0": {
+    "@napi-rs/lzma-linux-x64-gnu@1.5.1": {
+        "@napi-rs/lzma-linux-x64-gnu": "private",
+    },
+    "@rollup/rollup-linux-x64-gnu@4.67.3": {
         "@rollup/rollup-linux-x64-gnu": "private",
     },
     "@jridgewell/gen-mapping@0.3.13": {
@@ -345,7 +344,7 @@ HOISTED = {
     "ts-interface-checker@0.1.13": {
         "ts-interface-checker": "private",
     },
-    "fdir@6.5.0(picomatch@4.0.3)": {
+    "fdir@6.5.0(picomatch@4.0.7)": {
         "fdir": "private",
     },
     "siginfo@2.0.0": {
@@ -354,7 +353,7 @@ HOISTED = {
     "stackback@0.0.2": {
         "stackback": "private",
     },
-    "@babel/helper-validator-identifier@7.28.5": {
+    "@babel/helper-validator-identifier@7.29.7": {
         "@babel/helper-validator-identifier": "private",
     },
     "jsesc@3.1.0": {
@@ -372,13 +371,13 @@ HOISTED = {
     "lru-cache@5.1.1": {
         "lru-cache": "private",
     },
-    "@babel/helper-module-imports@7.28.6": {
+    "@babel/helper-module-imports@7.28.6(supports-color@7.2.0)": {
         "@babel/helper-module-imports": "private",
     },
     "@babel/helper-globals@7.28.0": {
         "@babel/helper-globals": "private",
     },
-    "@babel/helper-string-parser@7.27.1": {
+    "@babel/helper-string-parser@7.29.7": {
         "@babel/helper-string-parser": "private",
     },
     "@types/deep-eql@4.0.2": {
@@ -389,6 +388,9 @@ HOISTED = {
     },
     "balanced-match@4.0.4": {
         "balanced-match": "private",
+    },
+    "ms@2.1.3": {
+        "ms": "private",
     },
     "cross-spawn@7.0.6": {
         "cross-spawn": "private",
@@ -419,9 +421,6 @@ HOISTED = {
     },
     "thenify-all@1.6.0": {
         "thenify-all": "private",
-    },
-    "has-flag@4.0.0": {
-        "has-flag": "private",
     },
     "string-width@5.1.2": {
         "string-width": "private",
@@ -473,6 +472,9 @@ HOISTED = {
     },
     "confbox@0.1.8": {
         "confbox": "private",
+    },
+    "has-flag@4.0.0": {
+        "has-flag": "private",
     },
     "thenify@3.3.1": {
         "thenify": "private",

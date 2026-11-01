@@ -2,7 +2,7 @@
 name = "oxc-bazel"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92.0"
+rust-version = "1.99.1"
 description = "Bazel worker wrapper around the oxc TypeScript/JSX transformer"
 license = "MIT"
 
@@ -12,23 +12,23 @@ path = "src/main.rs"
 
 [dependencies]
 # Argument parsing
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 
 # Error reporting with rich diagnostics
-miette = { version = "7.2", features = ["fancy"] }
+miette = { version = "7.6.0", features = ["fancy"] }
 
 # Parallel file processing
-rayon = "1.10"
+rayon = "1.12.0"
 
 # oxc transformation stack
-oxc_allocator = "0.117.0"
-oxc_parser = "0.117.0"
-oxc_semantic = "0.117.0"
-oxc_transformer = "0.117.0"
-oxc_isolated_declarations = "0.117.0"
-oxc_codegen = "0.117.0"
-oxc_span = "0.117.0"
-oxc_diagnostics = "0.117.0"
+oxc_allocator = "0.156.0"
+oxc_parser = "0.156.0"
+oxc_semantic = "0.156.0"
+oxc_transformer = "0.156.0"
+oxc_isolated_declarations = "0.156.0"
+oxc_codegen = "0.156.0"
+oxc_span = "0.156.0"
+oxc_diagnostics = "0.156.0"
 
 [profile.release]
 opt-level = 3

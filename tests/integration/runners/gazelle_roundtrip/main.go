@@ -933,7 +933,7 @@ console.log('native wrapper module store: `+version+`');
 		}
 	}
 	nativeNpmContext("4.0.2", "shared", false)
-	appManifest := strings.Replace(manifest, `"dependencies":{`, `"dependencies":{"vitest":"4.1.11","@types/node":"22.20.1",`, 1)
+	appManifest := strings.Replace(manifest, `"dependencies":{`, `"dependencies":{"vitest":"4.1.12","@types/node":"24.19.2",`, 1)
 	it.Write(it.Path(base, "app/package.json"), appManifest)
 	it.Write(it.Path(base, "shared/package.json"), strings.Replace(manifest, "4.0.2", "3.3.0", 1))
 	install()
@@ -1013,7 +1013,7 @@ test("borrowed and local imports retain different npm stores", () => {
 		}
 		it.Write(it.Path(base, "shared/BUILD.bazel"), string(sharedBuild.Format())+"\nexports_files([\"placement.ts\"], visibility = [\"//visibility:public\"])\n")
 		// The library's types entry resolves on its own importer, the nearest at or above its package.
-		it.Write(it.Path(owner, "package.json"), `{"private":true,"devDependencies":{"@types/node":"22.20.1"}}`)
+		it.Write(it.Path(owner, "package.json"), `{"private":true,"devDependencies":{"@types/node":"24.19.2"}}`)
 		install()
 		it.Write(it.Path(owner, "tsconfig.json"), `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":["node"]}}`)
 		it.Write(it.Path(owner, "tsconfig.commonjs.json"), `{"compilerOptions":{"module":"commonjs","types":["node"]}}`)
@@ -1646,7 +1646,7 @@ func transitiveEmissionPublishesScopeAtomically(it *harness.IT) {
 	defer it.Write(it.Path("pnpm-lock.yaml"), it.Read(it.Path("pnpm-lock.yaml")))
 	workspace := it.Path("pnpm-workspace.yaml")
 	defer it.Write(workspace, it.Read(workspace))
-	it.Write(it.Path(base, "package.json"), `{"type":"module","imports":{"#value":"./lib/value.js","#fixture":"./lib/fixture.json"},"devDependencies":{"vitest":"4.1.11"}}`)
+	it.Write(it.Path(base, "package.json"), `{"type":"module","imports":{"#value":"./lib/value.js","#fixture":"./lib/fixture.json"},"devDependencies":{"vitest":"4.1.12"}}`)
 	it.Write(it.Path(base, "BUILD.bazel"), `exports_files(["lib/fixture.json", "package.json"], visibility = ["//visibility:public"])
 `)
 	it.Write(it.Path(base, "app/package.json"), `{"type":"module"}`)

@@ -141,7 +141,7 @@ go_test(
     ],
 )
 
-# e2e/basic and e2e/gazelle_latest run these over the Gazelle floor's and 2.0's update loops.
+# e2e/gazelle_latest runs these over Gazelle 2.0's update loop.
 filegroup(
     name = "test_srcs",
     testonly = True,

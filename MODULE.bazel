@@ -3,19 +3,20 @@
 module(
     name = "rules_typescript",
     version = "0.2.0",
-    compatibility_level = 0,
+    bazel_compatibility = [">=9.0.0"],
 )
 
 # ─── Bazel dependencies ─────────────────────────────────────────────────────
 
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "rules_nodejs", version = "6.7.5")
-bazel_dep(name = "rules_rs", version = "0.0.111")
-bazel_dep(name = "llvm", version = "0.8.21")
-bazel_dep(name = "zlib", version = "1.3.2")
+bazel_dep(name = "rules_cc", version = "0.2.27")
+bazel_dep(name = "rules_nodejs", version = "6.7.7")
+bazel_dep(name = "rules_rs", version = "0.2.1")
+bazel_dep(name = "llvm", version = "0.8.26")
+bazel_dep(name = "zlib", version = "1.3.2.bcr.3")
 bazel_dep(name = "rules_shell", version = "0.8.0")
-bazel_dep(name = "protobuf", version = "36.1.bcr.1")
+bazel_dep(name = "protobuf", version = "36.2")
 bazel_dep(name = "toolchain_utils", version = "1.3.0")
 
 bazel_dep(name = "rules_bazel_integration_test", version = "0.37.1", dev_dependency = True)
@@ -44,26 +45,18 @@ gazelle_roundtrip_tarballs(
 
 # Non-dev, so a consumer's build loads //gazelle:BUILD.bazel and gets rules_go,
 # the Go SDK and the Go deps without declaring them.
-# 0.51.3 is the floor: rules_go 0.62, declared below and by llvm, requires it.
-bazel_dep(name = "gazelle", version = "0.51.3")
-
-# Root-only, so consumers keep the floor above. go_deps's hint to raise
-# gazelle/go.mod's v0.51.3 is expected.
-single_version_override(
-    module_name = "gazelle",
-    version = "0.54.0",
-)
+bazel_dep(name = "gazelle", version = "0.54.0")
 
 # Gazelle writes this name into the BUILD files of a repository with no
 # MODULE.bazel of its own; the ts extension's Go module repositories are such.
 bazel_dep(
     name = "rules_go",
-    version = "0.62.0",
+    version = "0.65.0",
     repo_name = "io_bazel_rules_go",
 )
 
 # go_repository's root BUILD file loads both for the module's package_info.
-bazel_dep(name = "package_metadata", version = "0.0.5")
+bazel_dep(name = "package_metadata", version = "0.0.13")
 bazel_dep(name = "rules_license", version = "1.0.0")
 
 # ─── Rust toolchain ─────────────────────────────────────────────────────────
@@ -103,7 +96,7 @@ osx.frameworks(names = [
 # ─── Go toolchain (for Gazelle extension) ────────────────────────────────────
 
 go_sdk = use_extension("@io_bazel_rules_go//go:extensions.bzl", "go_sdk")
-go_sdk.download(version = "1.26.1")
+go_sdk.download(version = "1.27.3")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//gazelle:go.mod")
@@ -270,24 +263,9 @@ crate.annotation(
     version = "0.56.0",
 )
 crate.annotation(
-    additive_build_file_content = """
-load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
-cc_import(
-    name = "v8_unwind_archive",
-    static_library = "@llvm//runtimes/libunwind:libunwind.static",
-    target_compatible_with = ["@platforms//os:linux"],
-)
-cc_library(
-    name = "v8_unwind",
-    deps = select({
-        "@platforms//os:linux": [":v8_unwind_archive"],
-        "//conditions:default": [],
-    }),
-)
-""",
     build_script_env_files = ["//oj:v8_archive_env"],
     crate = "v8",
-    link_deps = [":v8_unwind"],
+    link_deps = ["//oj:v8_unwind"],
     patch_args = ["-p1"],
     patches = ["//oj:v8-output-dir.patch"],
     repositories = ["oj_crates"],
@@ -364,7 +342,7 @@ node.toolchain(
     # A default: rules_nodejs keeps the root module's tag of this name over this
     # one, so a consumer's .nvmrc wins. runtime.bzl's labels expect the name.
     name = "nodejs",
-    node_version = "22.23.1",
+    node_version = "24.22.1",
 )
 use_repo(
     node,
@@ -424,7 +402,7 @@ register_toolchains(
 # @npm is the consumer's to claim (the root module's translate_lock wins the
 # name); non-dev because //vite's typecheck target names it in this module.
 npm = use_extension("//npm:extensions.bzl", "npm")
-npm.pnpm(version = "10.32.1")
+npm.pnpm(version = "10.34.9")
 npm.translate_lock(pnpm_lock = "//tests/npm:pnpm-lock.yaml")
 
 # The esbuild that bundles //vite's plugin. Non-dev because that bundle is
@@ -491,23 +469,10 @@ bazel_binaries = use_extension(
     "bazel_binaries",
     dev_dependency = True,
 )
-bazel_binaries.download(version = "9.2.0")
+bazel_binaries.download(version = "9.3.1")
 use_repo(
     bazel_binaries,
     "bazel_binaries",
     "bazel_binaries_bazelisk",
-    "build_bazel_bazel_9_2_0",
-)
-
-# Temporary until upstream ships the sandbox resource-directory fix:
-# https://github.com/hermeticbuild/hermetic-llvm/blob/v0.8.21/toolchain/merged_resource_directory.bzl
-archive_override(
-    module_name = "llvm",
-    integrity = "sha256-fasiVGwpsGh4ahOXO2ms19Y1Q7GYkLFDcukTLXErSD0=",
-    patch_strip = 1,
-    patches = ["//oj:llvm-resource-directory.patch"],
-    remote_patch_strip = 1,
-    remote_patches = {"https://bcr.bazel.build/modules/llvm/0.8.21/patches/module_dot_bazel_version.patch": "sha256-w2NrJjoyIPeejybJd6EHngAPnTVhwS3Cgk/U3ru64wo="},
-    strip_prefix = "hermetic-llvm-0.8.21",
-    urls = ["https://github.com/hermeticbuild/hermetic-llvm/releases/download/v0.8.21/hermetic-llvm-v0.8.21.tar.gz"],
+    "build_bazel_bazel_9_3_1",
 )

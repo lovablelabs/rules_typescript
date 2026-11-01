@@ -709,7 +709,7 @@ def declare_lazy_npm_repos(module_ctx, hub_name, pnpm_lock, patch_labels, npmrc)
         deps, platform_deps = _split_by_platform(edges)
 
         # Platform-matched optionalDependencies are how npm ships native
-        # sidecars (oxlint -> @oxlint/linux-x64-gnu). A bin script resolves them
+        # sidecars (oxlint -> @oxlint/binding-linux-x64-gnu). A bin script resolves them
         # through node_modules at runtime, and with one repository per package
         # they are no longer siblings on disk, so they have to be named as
         # targets. Not filtered by the cycle breaker: these are leaf binaries,

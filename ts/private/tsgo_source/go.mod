@@ -1,6 +1,6 @@
 module github.com/mikn/rules_typescript/ts/private/tsgo_source
 
-go 1.26.1
+go 1.27.3
 
 tool github.com/microsoft/typescript-go/cmd/tsgo
 

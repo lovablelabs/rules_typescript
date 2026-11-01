@@ -1,7 +1,6 @@
 # Integration test workspace for consumer_crates.
 
 build --incompatible_strict_action_env
-build --nolegacy_external_runfiles
 
 test --test_output=errors
 test --test_summary=terse

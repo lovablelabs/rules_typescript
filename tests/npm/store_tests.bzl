@@ -96,9 +96,9 @@ store_tree_test = analysistest.make(
     },
 )
 
-_ESLINT = "//tests/eslint:node_modules/.pnpm/eslint@10.9.1/node_modules/eslint"
+_ESLINT = "//tests/eslint:node_modules/.pnpm/eslint@10.14.0/node_modules/eslint"
 
-_ESLINT_UTILS = "@eslint-community+eslint-utils@4.10.1_eslint_10_9_1_2fdd10f5"
+_ESLINT_UTILS = "@eslint-community+eslint-utils@4.10.1_eslint_10_14_0_cb57019c"
 
 # eslint -> @eslint-community/eslint-utils closes a cycle the extension cut.
 def _cut_edge_impl(ctx):

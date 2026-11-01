@@ -221,21 +221,13 @@ bcr_test_module:
       - debian11
       - macos_arm64
     bazel:
-      - "8.x"
       - "9.x"
   tasks:
     run_tests:
-      # The Gazelle floor suite tests the ruleset itself; GitHub CI runs it.
       build_targets:
         - "//..."
-        - "-//:gazelle_proto_test"
-        - "-//:gazelle_test"
-        - "-//:gazelle_golden_test"
       test_targets:
         - "//..."
-        - "-//:gazelle_proto_test"
-        - "-//:gazelle_test"
-        - "-//:gazelle_golden_test"
       build_flags:
         - "--keep_going"
       test_flags:
@@ -257,8 +249,8 @@ where `publish-to-bcr.yml` looks for it:
 
 ## Prerequisites
 - Bazel 9+
-- Rust through rules_rs 0.0.111; C/C++ through hermetic LLVM 0.8.21
-- Go 1.26+
+- Rust through rules_rs 0.2.1; C/C++ through hermetic LLVM 0.8.26
+- Go 1.27+
 
 ## Build Instructions
 
