@@ -1,7 +1,7 @@
 ### Changed
 
-- **The default oj dev server moves from 0.2.22 to 0.3.2, built from oj's
-  git tag `v0.3.2`.** `oj/Cargo.lock` pins every oj crate to that tag's
+- **The default oj dev server moves from 0.2.22 to 0.3.3, built from oj's
+  git tag `v0.3.3`.** `oj/Cargo.lock` pins every oj crate to that tag's
   commit, so Bazel fetches one checkout at a fixed sha. Fetching it needs
   `git` on PATH and access to github.com; a crates.io mirror no longer
   covers it, and the pin is the commit id, not a content digest. Elapsed
