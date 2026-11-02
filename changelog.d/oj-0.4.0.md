@@ -1,7 +1,7 @@
 ### Changed
 
-- **The default oj dev server moves from 0.2.22 to 0.3.1, built from oj's
-  git tag `v0.3.1`.** `oj/Cargo.lock` pins every oj crate to that tag's
+- **The default oj dev server moves from 0.2.22 to 0.4.0, built from oj's
+  git tag `v0.4.0`.** `oj/Cargo.lock` pins every oj crate to that tag's
   commit, so Bazel fetches one checkout at a fixed sha. Fetching it needs
   `git` on PATH and access to github.com; a crates.io mirror no longer
   covers it, and the pin is the commit id, not a content digest. Elapsed
@@ -30,8 +30,9 @@
   does and honors `ssr.noExternal`/`ssr.external`, plugins resolve in Vite's
   order (`pre` hooks, then Vite's resolver, then the rest), Start resolves
   an import once with its query, and a symlinked cache dir no longer changes
-  the Start bundle key (0.2.50). `oj typecheck` type-checks an app as
-  `tsc -b --noEmit` does (0.3.0); its checker needs Rust 1.99, so Oxc and oj
+  the Start bundle key (0.2.50). `oj typecheck` is tsc's command line on
+  oj's checker, and `oj dev-typecheck` asks a running `oj dev --typecheck`
+  for its results (0.4.0); the checker needs Rust 1.99, so Oxc and oj
   build with Rust 1.99.1 (see Breaking — native toolchains).
   `GET /@oj/diagnostics` and `OJ_LOG_JSON=1` report structured diagnostics
   (0.2.23). The V8, deno_core, Cranelift and tokio pins are unchanged;
