@@ -19,6 +19,14 @@ The Bazel target graph selects schemas. The rule does not interpret Buf configur
 
 Between protoc and protobuf-es sits `//proto/private/bufrequest`, which re-encodes protoc's `CodeGeneratorRequest` the way `buf generate` v1.73.0 does for a plugin with `types` or `exclude_types`: custom option values decoded against the request's own files and marshalled deterministically, and options messages with no fields dropped. The embedded `fileDesc(...)` bytes are then buf's. Without a type filter buf keeps the empty `MethodOptions` protoc writes for `rpc ... {}`; the rule drops it. The wrapper links whichever protobuf-go the module graph selects, at least v1.36.12, buf v1.73.0's.
 
+## One library for a proto graph
+
+`ts_proto_closure` takes `protos` instead of `proto` and generates every `proto_library` they reach through `deps`, `exports` and aliases, each with its own protoc action as above, into one source-mode `ts_compile`. Generated imports resolve inside that library, so `deps` names only the protobuf runtime. The protobuf module's own schemas are skipped: protobuf-es imports the well-known types from `@bufbuild/protobuf/wkt`, so `bootstrap_wkt=true` is refused. A proto counts as a well-known type when its `proto_library` is in the protobuf module; a non-WKT proto from that module fails the type check. Gazelle neither writes nor indexes `ts_proto_closure`; it is written by hand.
+
+```starlark
+ts_proto_closure(name = "schema", protos = [":api_proto", ":events_proto"], out_dir = "generated", tsconfig = "tsconfig.json", node_modules = ":node_modules", deps = ["@npm//:bufbuild_protobuf"])
+```
+
 ## Generated BUILD targets
 
 [Gazelle protobuf identities](../gazelle/directives.md#protobuf-generation-identities) generate wrappers from native proto rules. A common ancestor package owns each product output root; native schema packages retain their own targets. Different plugin options use different identities, while sibling dependencies remain inside each identity.
@@ -32,3 +40,4 @@ The selected tsconfig's compiler-observed ambient types use the same dependency 
 3. Generated TypeScript uses the existing source-mode compiler and test runner. The JSON source-runtime fixture fails if emit-disabled generated sources cannot compile or execute.
 4. Embedded descriptors are buf's bytes. `//tests/proto:service_buf_descriptor_test` fails if an extension value's wire order or an empty options message differs from buf's output.
 5. Selected-config ambient inputs survive separate owner updates and repeated generation. `TestProtoAmbientSourceDependencySurvivesSeparateOwnerUpdates` fails if either a declared owner or an unowned declaration closure disappears.
+6. A closure generates what its roots reach and none of the runtime's schemas. `//tests/proto:closure_files_test` fails if a proto reached through `deps` or `exports` is missing or `descriptor.proto` is generated.

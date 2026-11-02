@@ -214,7 +214,7 @@ such package fails the snippet above until the list is filled in. That attribute
 - **[Dev Server](https://mikn.github.io/rules_typescript/guides/dev-server/)** — a pluggable dev server with ibazel HMR: oj by default, optional Vite or another `DevServerInfo` rule through `server`
 - **[Monorepo Layout](https://mikn.github.io/rules_typescript/guides/monorepo/)** — one package per `tsconfig.json`, cross-package `.d.ts` caching
 - **[Gazelle Reference](https://mikn.github.io/rules_typescript/gazelle/overview/)** — what a run reads and writes, `# keep`
-- **[Protobuf sources](docs/rules/ts-proto-library.md)** — `ts_proto_library` over `proto_library`, protoc, pinned protobuf-es and source-mode TypeScript
+- **[Protobuf sources](docs/rules/ts-proto-library.md)** — `ts_proto_library` over `proto_library` (`ts_proto_closure` over a proto graph), protoc, pinned protobuf-es and source-mode TypeScript
 - **[Rules Reference](https://mikn.github.io/rules_typescript/rules/ts-compile/)** — all attributes, providers, and outputs
 - **[Migration from rules_ts](https://mikn.github.io/rules_typescript/getting-started/migration/)** — differences from aspect-build/rules_ts
 - **[Troubleshooting](https://mikn.github.io/rules_typescript/guides/troubleshooting/)** — the error messages, by message text
