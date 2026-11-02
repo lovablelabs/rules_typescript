@@ -10,7 +10,7 @@ path = "unused.rs"
 oj = { git = "https://github.com/lovablelabs/oj", tag = "v0.3.1" }
 deno_core = { version = "=0.412.0", default-features = false }
 oj_js = { git = "https://github.com/lovablelabs/oj", tag = "v0.3.1" }
-tokio = { version = "=1.53.1", features = ["full"] }
+tokio = { version = "=1.54.1", features = ["full"] }
 cranelift-assembler-x64 = { version = "=0.117.2", default-features = false }
 cranelift-codegen-meta = { version = "=0.117.2", default-features = false }
 oj_deno_napi = { git = "https://github.com/lovablelabs/oj", tag = "v0.3.1", default-features = false }

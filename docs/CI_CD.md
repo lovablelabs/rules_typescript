@@ -39,9 +39,8 @@ sharing one set of caches (see [Caches](#caches)).
 2. **E2E Tests** (`e2e`)
    - `bazel run //:gazelle -- -mode=diff` in `e2e/basic`, a separate
      workspace, after `bazel run //:pnpm -- install --frozen-lockfile`: its
-     BUILD files are what Gazelle writes; then builds and tests it. It
-     declares the Gazelle floor under `--check_direct_dependencies=error` and
-     runs most of the extension's tests and the golden test on it
+     BUILD files are what Gazelle writes; then builds and tests it under
+     `--check_direct_dependencies=error`
    - Matrix: `ubuntu-latest` and `macos-latest`
 
 3. **Examples Build** (`examples`)

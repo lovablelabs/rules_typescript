@@ -6,7 +6,7 @@ This module downloads the appropriate binary and exposes :pnpm and
 
 Usage in MODULE.bazel:
     npm = use_extension("@rules_typescript//npm:extensions.bzl", "npm")
-    npm.pnpm(version = "10.32.1")  # optional; defaults to DEFAULT_PNPM_VERSION
+    npm.pnpm(version = "10.34.9")  # optional; defaults to DEFAULT_PNPM_VERSION
     npm.translate_lock(pnpm_lock = "//:pnpm-lock.yaml")
     use_repo(npm, "npm", "pnpm")
 
@@ -23,7 +23,7 @@ load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 # Default pnpm version downloaded when the consumer does not call npm.pnpm().
 # Exported as a public constant so the npm module extension can reference it
 # without duplicating the value.
-DEFAULT_PNPM_VERSION = "10.32.1"
+DEFAULT_PNPM_VERSION = "10.34.9"
 
 # Private alias for use within this file.
 _DEFAULT_PNPM_VERSION = DEFAULT_PNPM_VERSION
@@ -64,11 +64,11 @@ _PNPM_PLATFORMS = {
 # Format: { "VERSION": { "platform_key": "sha256" } }
 # To add a new version: download each binary and compute sha256.
 _PNPM_CHECKSUMS = {
-    "10.32.1": {
-        "linux_amd64": "c5607a86bfb948297e96b393a53c90107766fe56329e62967b1f239d861d4363",
-        "linux_arm64": "c0db0b837971fde6f9781af8914e54eb163721193a36d35cbcf1794b3474a407",
-        "darwin_amd64": "8b83277343bbc400fdb90608bd51b4f56e380e6624ac5fd0e11d6c08815e3f04",
-        "darwin_arm64": "b0904b4e0cf36704fcdc24bcdb5f03388799a631510d1fb0d459ea69c7b1e2d9",
+    "10.34.9": {
+        "linux_amd64": "3ec79240658f0ee4e8977f21ee2c598c7a8b8d06b86dc564f2ec6cb099fd8ac2",
+        "linux_arm64": "85abd31b96964e6510cecb3b366ba024287191e0ee5978e5a9e2d3beb4a377d1",
+        "darwin_amd64": "58b35a997d2d5167ef60e24b6ac0d71b76a5e1a4b3346cb1075b1dface50bd32",
+        "darwin_arm64": "984b2f4316de371dc314243649e5f9ea392195d541dedbfdb990dc24d6c6e1a2",
     },
 }
 
@@ -156,7 +156,7 @@ pnpm_repo = repository_rule(
     implementation = _pnpm_repo_impl,
     attrs = {
         "version": attr.string(
-            doc = "pnpm version to download (e.g. '10.32.1').",
+            doc = "pnpm version to download (e.g. '10.34.9').",
             mandatory = True,
         ),
     },

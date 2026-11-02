@@ -13,7 +13,7 @@ import (
 const (
 	store = "node_modules/.pnpm/strip-ansi@7.2.0/node_modules/strip-ansi"
 	link  = "node_modules/.pnpm/strip-ansi@7.2.0/node_modules/ansi-regex"
-	want  = "../../ansi-regex@6.3.0/node_modules/ansi-regex"
+	want  = "../../ansi-regex@6.5.0/node_modules/ansi-regex"
 )
 
 var processes = regexp.MustCompile(`(?m)^INFO: \d+ processes: (.*)\.$`)

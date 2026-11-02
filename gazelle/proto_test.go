@@ -39,7 +39,7 @@ func (nativeProtoResolver) Resolve(*config.Config, *resolve.RuleIndex, *repo.Rem
 
 func protoGazelle(t *testing.T, root string, args ...string) (string, error) {
 	t.Helper()
-	// Gazelle 0.51.3's defaults, which Gazelle 2 changed to -r=auto and -index=lazy.
+	// Gazelle 0.54.0's defaults, which Gazelle 2 changed to -r=auto and -index=lazy.
 	return defaultFlagsGazelle(t, root, append([]string{"-r=true", "-index=true"}, args...)...)
 }
 

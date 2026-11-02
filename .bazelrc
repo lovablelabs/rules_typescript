@@ -2,7 +2,6 @@
 
 # Correctness
 build --incompatible_strict_action_env
-build --nolegacy_external_runfiles
 
 # Type-check on every build (tsgo validation action).
 # This makes type errors fail `bazel build` — the same behaviour as `go build`.

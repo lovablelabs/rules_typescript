@@ -46,18 +46,12 @@ resolves to. The versions the tests exercise, and the places a generated config
 is version-sensitive, are in
 [COMPATIBILITY.md](COMPATIBILITY.md#vite-and-vitest).
 
-## Temporary LLVM sandbox repair
-
-LLVM BCR `0.8.21` can omit Clang builtin headers when a sandbox presents the resource directory as a symlink. Until an LLVM release includes the fix, consumers must copy [the resource-directory patch](oj/llvm-resource-directory.patch) into their workspace root and copy the explicit root `archive_override` from [the React example MODULE](examples/react-app/MODULE.bazel), which applies that patch to the checksum-pinned `0.8.21` archive. Bazel does not inherit dependency overrides from this ruleset. Remove the override when upgrading to the fixed upstream release; no release containing the repair is claimed yet.
-
-The patch preserves the compiler's headers and shared resources while excluding its host runtime libraries. The measured RE builds pass without the patch because their inputs are materialised directories; that alone does not verify sandbox builds. The upstream submission is prepared for the maintainer; see [the affected LLVM rule](https://github.com/hermeticbuild/hermetic-llvm/blob/v0.8.21/toolchain/merged_resource_directory.bzl).
-
 ## Install
 
 **Step 1.** Create `.bazelversion`:
 
 ```
-9.2.0
+9.3.1
 ```
 
 **Step 2.** Add to `MODULE.bazel`. The ruleset is not on the Bazel Central
@@ -75,7 +69,7 @@ git_override(
 )
 register_toolchains("@rules_typescript//ts/toolchain:all")
 
-bazel_dep(name = "gazelle", version = "0.51.3")
+bazel_dep(name = "gazelle", version = "0.54.0")
 ```
 
 Pin a full commit SHA, not a branch. bzlmod still requires `version` on
@@ -87,7 +81,6 @@ Pin a full commit SHA, not a branch. bzlmod still requires `version` on
 
 ```
 build --incompatible_strict_action_env
-build --nolegacy_external_runfiles
 build --output_groups=+_validation
 ```
 

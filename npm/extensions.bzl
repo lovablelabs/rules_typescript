@@ -2,7 +2,7 @@
 
 Usage in MODULE.bazel:
     npm = use_extension("@rules_typescript//npm:extensions.bzl", "npm")
-    npm.pnpm(version = "10.32.1")          # optional; defaults to _DEFAULT_PNPM_VERSION
+    npm.pnpm(version = "10.34.9")          # optional; defaults to _DEFAULT_PNPM_VERSION
     npm.translate_lock(pnpm_lock = "//:pnpm-lock.yaml")
     use_repo(npm, "npm", "pnpm")
 
@@ -163,7 +163,7 @@ _pnpm_tag = tag_class(
         ),
         "version": attr.string(
             default = DEFAULT_PNPM_VERSION,
-            doc = "pnpm version to download (e.g. '10.32.1'). Defaults to the bundled stable version.",
+            doc = "pnpm version to download (e.g. '10.34.9'). Defaults to the bundled stable version.",
         ),
     },
     doc = """\
@@ -178,7 +178,7 @@ override the version.
 
 Example:
     npm = use_extension("@rules_typescript//npm:extensions.bzl", "npm")
-    npm.pnpm(version = "10.32.1")
+    npm.pnpm(version = "10.34.9")
     use_repo(npm, "pnpm")
 """,
 )

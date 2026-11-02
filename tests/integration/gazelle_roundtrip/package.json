@@ -5,11 +5,11 @@
   "dependencies": {
     "culori": "4.0.2",
     "shared": "workspace:*",
-    "vite": "8.2.2",
-    "vitest": "4.1.11"
+    "vite": "8.3.5",
+    "vitest": "4.1.12"
   },
   "devDependencies": {
     "@types/culori": "2.1.1",
-    "@types/node": "22.20.1"
+    "@types/node": "24.19.2"
   }
 }

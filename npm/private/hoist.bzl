@@ -2,6 +2,8 @@
 
 The rule is pnpm's own hoist step (installing/linking/hoist in pnpm 11.5.3,
 identical in 10.32.1): docs/rules/node-modules.md § The Store states it.
+tests/npm/hoisted_dependencies.bzl holds pnpm 12.16.1's answer over the same
+graph.
 """
 
 load("//npm/private:npm_translate_lock.bzl", "npmrc_assignments", "pnpm_workspace_hoist_settings")

@@ -65,7 +65,7 @@ node_modules_test(
     dir = "tests/npm/node_modules",
     hoisted = [
         "minimatch=minimatch@10.2.4",
-        "undici-types=undici-types@6.21.0",
+        "undici-types=undici-types@7.24.6",
     ],
     hoisted_members = [
         "hoisted-member",

@@ -1,6 +1,6 @@
 # Protobuf TypeScript sources
 
-`ts_proto_library` generates the direct sources of one `proto_library` with protobuf-es 2.12.0, then passes those TypeScript files to the existing source-mode `ts_compile` owner.
+`ts_proto_library` generates the direct sources of one `proto_library` with protobuf-es 2.16.0, then passes those TypeScript files to the existing source-mode `ts_compile` owner.
 
 ```starlark
 ts_proto_library(name = "messages", proto = ":messages_proto", out_dir = "generated", tsconfig = "tsconfig.json", node_modules = ":node_modules", deps = ["@npm//:bufbuild_protobuf"], options = ["target=ts", "json_types=true"])

@@ -60,7 +60,7 @@ func TestEachDependentResolvesItsOwnVersion(t *testing.T) {
 		{"scoped_multi_version", [][2][]string{
 			{{"@vitejs/plugin-react", "@rolldown/pluginutils"}, {"5.2.0", "1.0.0-rc.3"}},
 			{{"@vitejs/plugin-react", "vite", "rolldown", "@rolldown/pluginutils"},
-				{"5.2.0", "8.2.2", "1.2.5", "1.0.1"}},
+				{"5.2.0", "8.3.5", "1.2.16", "1.0.1"}},
 		}},
 	} {
 		root := tree.FoundDir("*/" + fixture.importer + "/node_modules").Abs()

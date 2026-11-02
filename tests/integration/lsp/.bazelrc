@@ -2,7 +2,6 @@
 # No @rules_rust flags — those are internal to rules_typescript.
 
 build --incompatible_strict_action_env
-build --nolegacy_external_runfiles
 build --@rules_typescript//ts:declarations=oxc
 
 # Always type-check on build

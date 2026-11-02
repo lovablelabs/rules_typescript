@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "devDependencies": {
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

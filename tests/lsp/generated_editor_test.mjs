@@ -480,7 +480,7 @@ const fixtureFiles = new Map([
 ]);
 try {
   process.stdout.write('editor session: checking runtime and installed plugin\n');
-  assert.equal(JSON.parse(read(join(dirname(tsserverJs), '../package.json'))).version, '5.9.2');
+  assert.equal(JSON.parse(read(join(dirname(tsserverJs), '../package.json'))).version, '6.0.3');
   for (const directory of [
     ...[...collisionNames, 'legacy-collision', 'legacy-upgrade', 'native-inherited'].map((name) =>
       join(workspaceRoot, name)
@@ -658,7 +658,7 @@ try {
       );
     }
     process.stdout.write(
-      `editor phase ${phase}: both TypeScript 5.9 lanes passed with unchanged consumer\n`
+      `editor phase ${phase}: both TypeScript 6.0 lanes passed with unchanged consumer\n`
     );
   }
 } catch (error) {

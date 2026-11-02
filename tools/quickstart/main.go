@@ -23,7 +23,7 @@ var moduleSnapshot embed.FS
 // not the same number: 9.x is the supported range, and only the pin is tested.
 const (
 	minBazelVersion    = "9.0.0"
-	pinnedBazelVersion = "9.2.0"
+	pinnedBazelVersion = "9.3.1"
 )
 
 type file struct {

@@ -71,21 +71,21 @@ pub fn transform_file(input_path: &Path, opts: &CliOptions) -> miette::Result<()
         let mut parse_ret =
             Parser::new(&allocator, &source_text, source_type).parse();
 
-        if parse_ret.panicked {
+        if parse_ret.fatal_error {
             return Err(make_parse_error(
                 input_path,
                 &source_text,
-                &parse_ret.errors,
+                &parse_ret.diagnostics,
                 "Parser panicked on unrecoverable syntax error",
             ));
         }
-        if !parse_ret.errors.is_empty() {
+        if !parse_ret.diagnostics.is_empty() {
             // Treat any parse error as fatal; non-fatal diagnostics would
             // still be surfaced here so the user can fix them.
             return Err(make_parse_error(
                 input_path,
                 &source_text,
-                &parse_ret.errors,
+                &parse_ret.diagnostics,
                 "Syntax error(s)",
             ));
         }
@@ -95,11 +95,11 @@ pub fn transform_file(input_path: &Path, opts: &CliOptions) -> miette::Result<()
             .with_check_syntax_error(true)
             .build(&parse_ret.program);
 
-        if !semantic_ret.errors.is_empty() {
+        if !semantic_ret.diagnostics.is_empty() {
             return Err(make_parse_error(
                 input_path,
                 &source_text,
-                &semantic_ret.errors,
+                &semantic_ret.diagnostics,
                 "Semantic error(s)",
             ));
         }
@@ -123,11 +123,11 @@ pub fn transform_file(input_path: &Path, opts: &CliOptions) -> miette::Result<()
             )
             .build(&parse_ret.program);
 
-            if opts.isolated_declarations && !id_ret.errors.is_empty() {
+            if opts.isolated_declarations && !id_ret.diagnostics.is_empty() {
                 return Err(make_parse_error(
                     input_path,
                     &source_text,
-                    &id_ret.errors,
+                    &id_ret.diagnostics,
                     "Isolated declarations error(s)",
                 ));
             }
@@ -153,11 +153,11 @@ pub fn transform_file(input_path: &Path, opts: &CliOptions) -> miette::Result<()
         )
         .build_with_scoping(scoping, &mut parse_ret.program);
 
-        if !transformer_ret.errors.is_empty() {
+        if !transformer_ret.diagnostics.is_empty() {
             return Err(make_parse_error(
                 input_path,
                 &source_text,
-                &transformer_ret.errors,
+                &transformer_ret.diagnostics,
                 "Transform error(s)",
             ));
         }
@@ -371,12 +371,8 @@ fn make_parse_error(
 
     // Try to extract a span from the first diagnostic for inline highlighting.
     let span: Option<SourceSpan> = diagnostics.first().and_then(|d| {
-        d.labels.as_deref().and_then(|labels| {
-            labels.first().map(|label| {
-                let offset = label.offset();
-                let len = label.len();
-                SourceSpan::new(offset.into(), len)
-            })
+        d.labels.first().map(|label| {
+            SourceSpan::new((label.offset() as usize).into(), label.len() as usize)
         })
     });
 

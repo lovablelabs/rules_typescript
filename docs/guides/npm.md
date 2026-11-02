@@ -122,7 +122,7 @@ downloaded; without it a default version is used:
 ```python
 # MODULE.bazel
 npm = use_extension("@rules_typescript//npm:extensions.bzl", "npm")
-npm.pnpm(version = "10.32.1")   # optional; a default version is used otherwise
+npm.pnpm(version = "10.34.9")   # optional; a default version is used otherwise
 npm.translate_lock(pnpm_lock = "//:pnpm-lock.yaml")
 use_repo(npm, "npm", "pnpm")
 ```
@@ -416,7 +416,7 @@ A package whose `os`/`cpu` fields exclude the platform
 is nothing to configure.
 
 A bin script that resolves an optional dependency at runtime (`oxlint` →
-`@oxlint/linux-x64-gnu`) gets it in its runfiles, though the two are not sibling
+`@oxlint/binding-linux-x64-gnu`) gets it in its runfiles, though the two are not sibling
 directories inside one repository.
 
 ## Where a Package's Type Declarations Come From

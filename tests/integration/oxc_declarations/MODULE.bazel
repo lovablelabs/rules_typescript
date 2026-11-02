@@ -8,7 +8,6 @@ with the absolute path to the rules_typescript checkout.
 module(
     name = "test_oxc_declarations",
     version = "0.0.0",
-    compatibility_level = 0,
 )
 
 bazel_dep(name = "rules_typescript", version = "0.0.0")
@@ -24,17 +23,4 @@ register_toolchains(
     "@rules_typescript//ts/tools/tsaction:source_toolchain",
     "@rules_typescript//tools/launcher:all",
     "@rules_typescript//ts/toolchain:all",
-)
-
-# Temporary until upstream ships the sandbox resource-directory fix:
-# https://github.com/hermeticbuild/hermetic-llvm/blob/v0.8.21/toolchain/merged_resource_directory.bzl
-archive_override(
-    module_name = "llvm",
-    integrity = "sha256-fasiVGwpsGh4ahOXO2ms19Y1Q7GYkLFDcukTLXErSD0=",
-    patch_strip = 1,
-    patches = ["//:llvm-resource-directory.patch"],
-    remote_patch_strip = 1,
-    remote_patches = {"https://bcr.bazel.build/modules/llvm/0.8.21/patches/module_dot_bazel_version.patch": "sha256-w2NrJjoyIPeejybJd6EHngAPnTVhwS3Cgk/U3ru64wo="},
-    strip_prefix = "hermetic-llvm-0.8.21",
-    urls = ["https://github.com/hermeticbuild/hermetic-llvm/releases/download/v0.8.21/hermetic-llvm-v0.8.21.tar.gz"],
 )

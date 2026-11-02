@@ -24,7 +24,7 @@ bazel_dep(name = "rules_typescript", version = "0.0.0")
 local_path_override(module_name = "rules_typescript", path = "$RULES_TS_ROOT")
 register_toolchains("@rules_typescript//ts/toolchain:all")
 EOF
-printf 'build --incompatible_strict_action_env\nbuild --nolegacy_external_runfiles\nbuild --output_groups=+_validation\n' > "$WS/.bazelrc"
+printf 'build --incompatible_strict_action_env\nbuild --output_groups=+_validation\n' > "$WS/.bazelrc"
 cp "$RULES_TS_ROOT/.bazelversion" "$WS/.bazelversion" 2>/dev/null || true
 echo 'exports_files(["MODULE.bazel"])' > "$WS/BUILD.bazel"
 

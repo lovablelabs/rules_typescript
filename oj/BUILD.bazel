@@ -1,4 +1,6 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//tools:rust_tool.bzl", "rust_tool")
@@ -19,7 +21,6 @@ exports_files([
     "Cargo.toml",
     "Cargo.lock",
     "aws-lc-macos-headers.patch",
-    "llvm-resource-directory.patch",
     "libffi-static-archive.patch",
     "cranelift-assembler-isle.patch",
     "cranelift-codegen-isle.patch",
@@ -93,4 +94,19 @@ v8_archive_env(
 rust_tool(
     name = "oj",
     actual = "@oj_crates//:oj__oj",
+)
+
+# The v8 crate's link_deps: rules_rs resolves the annotation's labels in this module.
+cc_import(
+    name = "v8_unwind_archive",
+    static_library = "@llvm//runtimes/libunwind:libunwind.static",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+cc_library(
+    name = "v8_unwind",
+    deps = select({
+        "@platforms//os:linux": [":v8_unwind_archive"],
+        "//conditions:default": [],
+    }),
 )

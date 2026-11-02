@@ -65,7 +65,7 @@ bazel run //ts/toolchain:tools_resolved
 bazel run //ts/toolchain:launcher_resolved
 ```
 
-The second prints `Version 7.0.2` and the third `v22.23.1`: the `typescript`
+The second prints `Version 7.0.2` and the third `v24.22.1`: the `typescript`
 release `ts/private/tsgo/pnpm-lock.yaml` pins and the Node.js version
 `MODULE.bazel` pins. `oxc_resolved` builds `oxc-bazel` first; `tools_resolved`
 prints tsaction's usage and `launcher_resolved` the launcher's config error,
@@ -284,7 +284,7 @@ bazel test //...
 | Integration | `bazel test //tests/integration/...` | Full user-journey tests, each in a nested Bazel workspace (tagged `nested-bazel`) |
 | LSP | `bazel test //tests/lsp/...` | The tsserver resolution hook against a real tsserver |
 | Gazelle | `bazel test //gazelle/...` | Gazelle extension unit tests |
-| E2E | `cd e2e/basic && bazel test //...` | Real consumer workspace, plus the Gazelle extension's tests on the bazel-gazelle floor |
+| E2E | `cd e2e/basic && bazel test //...` | Real consumer workspace |
 | E2E, Gazelle 2 | `cd e2e/gazelle_latest && bazel test //...` | Most of the Gazelle extension's tests and golden cases on bazel-gazelle 2.0.0-beta.2 |
 | Test-source coverage | `tools/ci/check_test_sources.sh` | Every tracked test source is claimed by a target that runs |
 | Retired names | `tools/ci/check_retired_names.sh` | No tracked prose or code outside the changelog names a retired attribute, kind, provider, directive, export or path |

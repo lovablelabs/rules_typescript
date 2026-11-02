@@ -52,6 +52,7 @@ PATTERNS=(
   'integration/npmrc_registry'
   'npmrc_registry_runner'
   ':npmrc_registry_test'
+  'llvm-resource-directory\.patch'
 )
 
 # Files that assert a retired name is absent or inert, with why. Exact in both
