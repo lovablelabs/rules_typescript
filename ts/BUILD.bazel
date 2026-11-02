@@ -5,6 +5,7 @@ load(
     "int_flag",
     "string_flag",
 )
+load("//ts/private/actions:check.bzl", "check_config")
 load("//ts/private/actions:format.bzl", "format_config")
 load("//ts/private/actions:lint.bzl", "lint_config")
 
@@ -56,6 +57,17 @@ bool_flag(
     scope = "target",
 )
 
+# The type checker TsgoCheck runs: ts.check() in the root MODULE.bazel writes
+# the check_config this names; with none, the tsgo toolchain's compiler.
+label_flag(
+    name = "check",
+    build_setting_default = "@check_config//:check",
+)
+
+# `--//ts:check=//ts:tsgo_check`: TsgoCheck on the tsgo toolchain's compiler
+# whatever ts.check() names.
+check_config(name = "tsgo_check")
+
 # The linter every compile runs: ts.lint() in the root MODULE.bazel writes the
 # lint_config this names.
 label_flag(
@@ -102,6 +114,7 @@ bzl_library(
         "//ts/private:toolchain",
         "//ts/private:tools_lock",
         "//ts/private:tsgo_lock",
+        "//ts/private/actions:check",
         "//ts/private/actions:format",
         "//ts/private/actions:lint",
         "@gazelle//:deps",

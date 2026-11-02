@@ -13,6 +13,11 @@ exports_files(
 )
 
 bzl_library(
+    name = "check",
+    srcs = ["check.bzl"],
+)
+
+bzl_library(
     name = "lint",
     srcs = ["lint.bzl"],
     deps = [
