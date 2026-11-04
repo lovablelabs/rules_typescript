@@ -415,11 +415,15 @@ def runtime_scope_destinations(index, source, runtime_path):
         return {}
     depth, scopes = ancestors[0]
     distance = (directory.count("/") + 1 if directory else 0) - depth
-    runtime_dir = runtime_path.split("/")[:-1]
-    return {
-        scope: "/".join(runtime_dir[:len(runtime_dir) - distance] + [scope.basename]) if distance <= len(runtime_dir) else None
-        for scope in scopes
-    }
+    if distance > runtime_path.count("/"):
+        return {scope: None for scope in scopes}
+
+    # The runtime directory less its last `distance` components.
+    base = runtime_path
+    for _ in range(distance + 1):
+        base = base.rpartition("/")[0]
+    prefix = base + "/" if base else ""
+    return {scope: prefix + scope.basename for scope in scopes}
 
 def is_javascript(file):
     return not file.is_directory and file.extension in ["js", "mjs", "cjs"]
