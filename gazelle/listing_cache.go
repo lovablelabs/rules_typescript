@@ -55,6 +55,9 @@ func listingNameSkipped(name string) bool {
 	return name == "node_modules" || isProjection(name)
 }
 
+// installMarkers are what a pnpm install rewrites: the probes a listing keeps skip node_modules.
+var installMarkers = []string{"node_modules/.modules.yaml", "node_modules/.pnpm/lock.yaml"}
+
 var listingHits, listingAbsent, listingStale atomic.Int64
 
 func logListingCache() {
@@ -110,7 +113,7 @@ type listingID struct {
 
 func listingKey(repoRoot, tsgo, subject string, args []string) listingID {
 	h := sha256.New()
-	fmt.Fprintf(h, "v2\n%s\n%s\n", repoRoot, subject)
+	fmt.Fprintf(h, "v3\n%s\n%s\n", repoRoot, subject)
 	if info, err := os.Stat(tsgo); err == nil {
 		fmt.Fprintf(h, "tsgo %s %d %d\n", tsgo, info.Size(), info.ModTime().UnixNano())
 	}
@@ -511,6 +514,9 @@ func saveListing(id listingID, repoRoot, subject string, args []string, p *progr
 			}
 			entry.Reads = append(entry.Reads, abs(file))
 		}
+	}
+	for _, marker := range installMarkers {
+		entry.Reads = append(entry.Reads, abs(marker))
 	}
 	slices.Sort(entry.Reads)
 	entry.Reads = slices.Compact(entry.Reads)

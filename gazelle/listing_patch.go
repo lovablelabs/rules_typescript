@@ -676,6 +676,10 @@ func (t *patcher) patch(subject string) *program {
 	for _, rel := range slices.Sorted(maps.Keys(changedLines)) {
 		now := changedLines[rel][1]
 		if !t.files[rel] {
+			if slices.Contains(installMarkers, rel) {
+				t.fail("an install changed node_modules")
+				return nil
+			}
 			if !probed[rel] {
 				t.fail("a config or scope probe the listing read changed")
 				return nil

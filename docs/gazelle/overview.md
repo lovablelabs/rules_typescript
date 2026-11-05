@@ -105,7 +105,10 @@ tsgo and fails on any difference in what the run reads from the two;
 `-ts_listing_inproc=off` always runs tsgo.
 
 `-ts_listing_cache=<dir>` keeps each listing across runs, reused while every
-file, probe, config and include directory it read is unchanged. A full,
+file, probe, config and include directory it read is unchanged. Its probes skip
+`node_modules`, so each listing also reads the root's
+`node_modules/.modules.yaml` and `.pnpm/lock.yaml`: any install lists every
+program again. A full,
 recursive `fix` or `diff` run of a binary whose only language is TypeScript
 (`gazelle_typescript`) also keeps a run record there. It holds everything the
 last run that changed nothing read (each walked directory's entries, BUILD

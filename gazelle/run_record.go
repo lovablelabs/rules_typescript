@@ -856,9 +856,10 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 		if exe, err := os.Executable(); err == nil {
 			noteRead(exe)
 		}
-		// Beside the listings' own reads: what an install rewrites.
-		noteRead(filepath.Join(c.RepoRoot, "node_modules", ".modules.yaml"))
-		noteRead(filepath.Join(c.RepoRoot, "node_modules", ".pnpm", "lock.yaml"))
+		// Noted even when the run loads no listing.
+		for _, marker := range installMarkers {
+			noteRead(filepath.Join(c.RepoRoot, filepath.FromSlash(marker)))
+		}
 		return nil
 	}
 	if !runRecordApplies(fs, c, fullWalk) {

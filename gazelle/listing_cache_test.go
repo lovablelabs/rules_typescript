@@ -111,6 +111,26 @@ func TestListingCache_AHardLinkToAPackageFileKeepsTheListing(t *testing.T) {
 	}
 }
 
+// The listing's probes skip node_modules, so the install is what says a package appeared.
+func TestListingCache_AnInstallListsAPackageTheListingMissed(t *testing.T) {
+	l := newListingRuns(t, map[string]string{
+		"app/package.json":           `{"name":"app"}`,
+		"app/tsconfig.json":          patchFixtureConfig,
+		"app/src/a.ts":               "import { v } from 'valibot';\nexport const a = v;\n",
+		"node_modules/.modules.yaml": "layoutVersion: 5\nincluded: {}\n",
+	})
+	l.list("app/tsconfig.json")
+	writeWorkspace(t, l.root, map[string]string{
+		"app/node_modules/valibot/package.json": `{"name":"valibot","version":"1.0.0","types":"index.d.ts"}`,
+		"app/node_modules/valibot/index.d.ts":   "export declare const v: number;\n",
+		"node_modules/.modules.yaml":            "layoutVersion: 5\nincluded:\n  dependencies: true\n",
+	})
+	listed := l.list("app/tsconfig.json")
+	if l.runs != 2 || !slices.Contains(listed.Files, "app/node_modules/valibot/index.d.ts") {
+		t.Fatalf("the listing kept the package missing after an install (%d runs): %q", l.runs, listed.Files)
+	}
+}
+
 // listingRuns lists one program through the cache with fresh per-run state,
 // and counts how often tsgo ran.
 type listingRuns struct {
