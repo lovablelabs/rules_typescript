@@ -2,11 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/mikn/rules_typescript/tests/integration/harness"
 )
+
+var rustVersion = regexp.MustCompile(`rust\.toolchain\([^)]*version = "([^"]+)"`)
+
+func rustPin(it *harness.IT, module string) string {
+	m := rustVersion.FindStringSubmatch(it.Read(module))
+	if m == nil {
+		it.Fail("%s pins no rust.toolchain version", module)
+	}
+	return m[1]
+}
 
 func main() {
 	harness.Run(harness.Config{
@@ -14,6 +25,14 @@ func main() {
 		WorkspaceRel: "tests/integration/consumer_crates/workspace",
 		Renames:      map[string]string{"BUILD.bazel.tpl": "BUILD.bazel"},
 	}, func(it *harness.IT) {
+		toolRust := rustPin(it, filepath.Join(it.RulesTSRoot, "MODULE.bazel"))
+		consumerRust := rustPin(it, it.Path("MODULE.bazel"))
+		if toolRust == consumerRust {
+			it.Fail("the consumer pins the tools' Rust %s, so the isolation check proves nothing", toolRust)
+		}
+		toolDir := "_" + strings.ReplaceAll(toolRust, ".", "_") + "_rust_toolchain/"
+		consumerDir := "_" + strings.ReplaceAll(consumerRust, ".", "_") + "_rust_toolchain/"
+
 		it.MustBazel("mod", "tidy")
 		it.MustBazel("build", "//:hello", "//:hello_commonjs", "//:consumer", "@rules_typescript//oj:oj", "--output_groups=+declarations,+_validation")
 		it.Pass("a ts_compile builds beside the workspace's own hub named crates")
@@ -49,12 +68,12 @@ func main() {
 			label := labels[action.TargetID]
 			want := ""
 			if strings.HasSuffix(label, "//:consumer") {
-				want = "_1_91_0_rust_toolchain/"
+				want = consumerDir
 				consumer++
 			}
 			tool := strings.Contains(label, "rules_typescript_crates__") || strings.Contains(label, "oj_crates__") || strings.HasSuffix(label, "//oxc_cli:oxc-bazel_source")
 			if tool {
-				want = "_1_99_1_rust_toolchain/"
+				want = toolDir
 				tools++
 			}
 			if want == "" {
@@ -87,7 +106,7 @@ func main() {
 		}
 		it.MustBazel("run", "@rules_typescript//oxc_cli:oxc-bazel", "--", "--help")
 		it.MustBazel("run", "@rules_typescript//oj:oj", "--", "--help")
-		it.Pass("native tools keep Rust 1.99 across exec dependencies without changing the consumer's Rust 1.91")
+		it.Pass("native tools keep Rust %s across exec dependencies without changing the consumer's Rust %s", toolRust, consumerRust)
 
 		graph := it.BazelStdout("mod", "graph", "--depth=1")
 		if !strings.Contains(graph, "rules_rs@0.2.1") {
