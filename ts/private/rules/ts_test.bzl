@@ -23,6 +23,7 @@ load(
     "runfiles_link_path",
     "runfiles_root_path",
     "runfiles_scope_paths",
+    "runfiles_visible_paths",
     "validate_runfiles_modules",
 )
 load("//ts/private:node_modules.bzl", "own_package_name", "runfiles_dir", "runtime_npm_contexts")
@@ -220,7 +221,7 @@ def _scope_description(scope):
     path, file = scope
     return "'{}' ({})".format(path, file.path if file != None else "empty entry")
 
-def _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules):
+def _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules, visible_paths):
     """Places each unchanged scope where its relocated modules find it first (ts-compile.md, Shared Source Layout)."""
     published = {}
     scopes = {}
@@ -232,7 +233,7 @@ def _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules):
                     published.setdefault(source, {})[runtime] = True
     if not published:
         return {}
-    present = runfiles_scope_paths(ctx, runfiles)
+    present = runfiles_scope_paths(ctx, runfiles, visible_paths = visible_paths)
     workspace = ctx.workspace_name + "/"
     namespace = workspace + (ctx.label.package + "/" if ctx.label.package else "")
     placed = {}
@@ -454,12 +455,15 @@ def _ts_test_impl(ctx):
     )
     for target in ctx.attr.data + config_importers:
         runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
-    staged_scopes = _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules)
+    visible_paths = runfiles_visible_paths(ctx, runfiles)
+    staged_scopes = _ancestor_scope_links(ctx, runfiles, owners, links, scoped_modules, visible_paths)
     workspace = ctx.workspace_name + "/"
-    runfiles = runfiles.merge(ctx.runfiles(symlinks = {location[len(workspace):]: runtime for location, (_scope, runtime) in staged_scopes.items()}))
+    if staged_scopes:
+        runfiles = runfiles.merge(ctx.runfiles(symlinks = {location[len(workspace):]: runtime for location, (_scope, runtime) in staged_scopes.items()}))
+        visible_paths = None
     staged_scopes = {location: scope for location, (scope, _runtime) in staged_scopes.items()}
 
-    visible = runfiles_scope_paths(ctx, runfiles, [path for path, _file in demanded] + stage.keys() + stage.values())
+    visible = runfiles_scope_paths(ctx, runfiles, [path for path, _file in demanded] + stage.keys() + stage.values(), visible_paths)
     if stage:
         source_demands = [(path, file) for path, file in demanded if path in stage]
         validate_runfiles_modules(ctx, visible, source_demands, "ts_test")

@@ -70,35 +70,72 @@ def complete_native_executable(ctx, basename):
     return providers
 
 def runfiles_link_path(file):
-    return "external/" + file.short_path[3:] if file.short_path.startswith("../") else file.short_path
+    short_path = file.short_path
+    return "external/" + short_path[3:] if short_path.startswith("../") else short_path
 
 def runfiles_root_path(ctx, path):
     return path[len("external/"):] if path.startswith("external/") else ctx.workspace_name + "/" + path
 
 def rlocation_path(ctx, file):
-    return runfiles_root_path(ctx, runfiles_link_path(file))
+    # runfiles_root_path(ctx, runfiles_link_path(file)), without building the link path.
+    short_path = file.short_path
+    if short_path.startswith("../"):
+        return short_path[3:]
+    if short_path.startswith("external/"):
+        return short_path[len("external/"):]
+    return ctx.workspace_name + "/" + short_path
+
+def _path_components(path):
+    return path.split("/")
+
+def _beneath_another(paths):
+    """The paths with a proper ancestor among paths.
+
+    Sorted by components, a path's subtree directly follows it, so one pass
+    against the last path not beneath another finds them.
+    """
+    beneath = {}
+    current = None
+    for path in sorted(paths, key = _path_components):
+        if current != None and path.startswith(current):
+            beneath[path] = True
+        else:
+            current = path + "/"
+    return beneath
 
 def _runfiles_paths(ctx, runfiles):
     # Bazel's precedence is defined by Runfiles.getRunfilesInputs: https://github.com/bazelbuild/bazel/blob/9.2.0/src/main/java/com/google/devtools/build/lib/analysis/Runfiles.java
     paths = {link.path: link.target_file for link in runfiles.symlinks.to_list()}
     paths.update({runfiles_link_path(file): file for file in runfiles.files.to_list()})
+    beneath = _beneath_another(paths)
     visible = {}
     for path, file in paths.items():
-        parts = path.split("/")
-        if not any(["/".join(parts[:depth]) in paths for depth in range(1, len(parts))]):
+        if path not in beneath:
             visible[runfiles_root_path(ctx, path)] = file
     visible.update({runfiles_root_path(ctx, path): None for path in runfiles.empty_filenames.to_list()})
     visible.update({link.path: link.target_file for link in runfiles.root_symlinks.to_list()})
     return visible
 
-def runfiles_scope_paths(ctx, runfiles, module_paths = []):
+def runfiles_visible_paths(ctx, runfiles):
+    """Each runfiles path no other entry hides, keyed by its runfiles-root path."""
+    return _runfiles_paths(ctx, runfiles)
+
+def runfiles_scope_paths(ctx, runfiles, module_paths = [], visible_paths = None):
+    """The scope-relevant runfiles entries; visible_paths reuses a runfiles_visible_paths of the same runfiles."""
     demanded = {}
     for path in module_paths:
-        parts = path.split("/")
-        demanded.update({"/".join(parts[:depth]): True for depth in range(1, len(parts) + 1)})
+        # A recorded path already holds every ancestor, so the walk up stops there.
+        prefix = path
+        for _ in range(path.count("/") + 1):
+            if not prefix or prefix in demanded:
+                break
+            demanded[prefix] = True
+            prefix = prefix.rpartition("/")[0]
+    if visible_paths == None:
+        visible_paths = _runfiles_paths(ctx, runfiles)
     return {
         path: file
-        for path, file in _runfiles_paths(ctx, runfiles).items()
+        for path, file in visible_paths.items()
         if path in demanded or path.endswith("/package.json") or (file != None and (file.basename == "package.json" or file.is_directory or file.is_symlink))
     }
 
@@ -165,9 +202,9 @@ def _declare_native_view(ctx, base, config, runfiles, canonical_links, runtime_f
     root = spec.path[:-len(".json")] + "/view"
     visible = {}
     refs = {}
+    beneath = _beneath_another(paths)
     for path, file in paths.items():
-        parts = path.split("/")
-        if not any(["/".join(parts[:depth]) in paths for depth in range(1, len(parts))]):
+        if path not in beneath:
             visible[path] = file
         if file != None:
             refs[file.path] = refs.get(file.path, 0) + 1
