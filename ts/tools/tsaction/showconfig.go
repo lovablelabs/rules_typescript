@@ -103,6 +103,7 @@ type actionConfig struct {
 	typesDeps                             stringList
 	typeInputs                            stringList
 	generatedDirectories, generatedFiles  stringList
+	generatedMembers                      stringList
 	srcs                                  []string
 	isolatedDeclarations                  bool
 	libCheck                              bool

@@ -29,6 +29,7 @@ TsconfigSourcesInfo = provider(
         "option_groups": "depset of struct(package, label, options_json, extends, include): the program one target checks under, which the root block cannot carry -- the tsconfig it names, and allowJs for its JavaScript srcs. A target whose tsconfig turns `strict` off or names a `lib` is checked correctly by the build and wrongly by the editor unless the editor gets its own program for those files.",
         "generated_sources": "depset of File: original generated compiler inputs in the dependency closure, excluding compiler-emitted declarations and manifests.",
         "unsupported_editor": "depset of string: workspace-member boundaries whose original generated inputs cannot retain checkout identity in an installed editor project.",
+        "member_refusals": "depset of string: refusals for workspace-member links whose generated inputs are the member's own; a direct importer projects them, so they are unsupported_editor only above it.",
     },
 )
 
@@ -205,22 +206,46 @@ def _tsconfig_aspect_impl(target, ctx):
         order = "postorder",
     )
     unsupported_editor = []
+    member_refusals = []
     if NpmLinkInfo in target:
+        # ts_compile projects a direct importer's imports of the member's own
+        # generated sources onto its store copy. The member's sources are its
+        # program's direct srcs, a short list beside generated_sources' closure.
         witnesses = generated_sources.to_list()
         if witnesses:
-            witness = witnesses[0]
-            unsupported_editor = ["'{}' ({}) reaches {} (producer {})".format(
+            member_sources = {file: True for file in target[TsInfo].sources.to_list()}
+            foreign = [file for file in witnesses if file not in member_sources]
+            witness = (foreign or witnesses)[0]
+            refusal = "'{}' ({}) reaches {} (producer {})".format(
                 target[NpmPackageInfo].package_name,
                 label_text(target.label),
                 witness.short_path,
                 label_text(witness.owner),
-            )]
+            )
+            if foreign:
+                unsupported_editor = [refusal]
+            else:
+                member_refusals = [refusal]
+    unsupported_editor = depset(
+        unsupported_editor,
+        transitive = [s.unsupported_editor for s in inherited] + [
+            dep[TsconfigSourcesInfo].member_refusals
+            for dep in reached
+            if TsconfigSourcesInfo in dep and NpmLinkInfo not in dep
+        ],
+        order = "postorder",
+    )
+    if NpmLinkInfo not in target:
+        member_refusals = depset(transitive = [s.member_refusals for s in inherited], order = "postorder")
+    else:
+        member_refusals = depset(member_refusals, order = "postorder")
 
     sources = TsconfigSourcesInfo(
         packages = depset(packages, transitive = [s.packages for s in inherited], order = "postorder"),
         option_groups = depset(option_groups, transitive = [s.option_groups for s in inherited], order = "postorder"),
         generated_sources = generated_sources,
-        unsupported_editor = depset(unsupported_editor, transitive = [s.unsupported_editor for s in inherited], order = "postorder"),
+        unsupported_editor = unsupported_editor,
+        member_refusals = member_refusals,
     )
 
     fragments = [dep[TsconfigFragmentInfo].fragments for dep in reached if TsconfigFragmentInfo in dep]
