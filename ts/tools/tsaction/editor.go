@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -269,6 +270,7 @@ func editorRun(root string, command []string, action actionConfig, output string
 			}
 		}
 	}
+	suffixes, _ := compiled.CompilerOptions["moduleSuffixes"].([]any)
 	if project != "" && options["paths"] != nil {
 		paths := options["paths"].(*tsconfig.Paths)
 		if err := a.projectGeneratedAliases(paths, chain, path.Dir(destination), listing.Edges); err != nil {
@@ -286,7 +288,6 @@ func editorRun(root string, command []string, action actionConfig, output string
 				return err
 			}
 		}
-		suffixes, _ := compiled.CompilerOptions["moduleSuffixes"].([]any)
 		implicit := a.editorImplicitSelections(listing.Resolutions, chain, listedPath)
 		if err := a.projectEditorEdges(paths, chain, path.Dir(destination), listing.Edges, implicit, a.moduleResolution(), suffixes); err != nil {
 			return fmt.Errorf("generated editor project %s: %w", destination, err)
@@ -296,6 +297,9 @@ func editorRun(root string, command []string, action actionConfig, output string
 				return err
 			}
 		}
+	}
+	if err := a.projectMemberEdges(options, chain, path.Dir(destination), listing, suffixes, listedPath); err != nil {
+		return fmt.Errorf("generated editor project %s: %w", destination, err)
 	}
 	containment := []string{}
 	for _, listed := range listing.Files {
@@ -683,6 +687,93 @@ func (a *editorProjection) projectEditorEdges(paths *tsconfig.Paths, chain *tsco
 			return fmt.Errorf("first-party alias %q cannot be projected with compilerOptions.moduleResolution=%q: exact paths can hide failed imports in another importer's resolution mode. Use an authored editor project or ts_refresh_tsconfig without generated_sources; ordinary builds and type checking remain supported", specifier, resolution)
 		}
 		paths.Set(specifier, []string{fileRelative(directory, selected)})
+	}
+	return nil
+}
+
+// projectMemberEdges points each observed import of a workspace member with
+// generated sources at the store copy the build read.
+//
+// The checkout's pnpm link names the member's source directory, which lacks
+// the generated files; the store copy holds the member's as-built manifest and
+// declarations.
+func (a *editorProjection) projectMemberEdges(options map[string]any, chain *tsconfig.Resolved, directory string, listing *explainfiles.Listing, suffixes []any, listedPath func(string) string) error {
+	member := func(specifier string) bool {
+		return slices.ContainsFunc(a.generatedMembers, func(name string) bool {
+			return specifier == name || strings.HasPrefix(specifier, name+"/")
+		})
+	}
+	aliased := func(specifier string) bool {
+		if chain == nil {
+			return false
+		}
+		owner, _ := editorAliasOwner(chain.Paths, specifier)
+		return owner != ""
+	}
+	typeReference := func(from, specifier string) error {
+		return fmt.Errorf("type reference %q from %s names a workspace member with generated sources, which a paths entry cannot project. Import the member instead or use an authored editor project without generated_sources; ordinary builds and type checking remain supported", specifier, from)
+	}
+	for _, entry := range slices.Concat(listing.Types, listing.Implicit) {
+		if member(entry.Entry) {
+			return typeReference("compilerOptions.types", entry.Entry)
+		}
+	}
+	selected := map[string]string{}
+	for _, edge := range listing.Edges {
+		if underNodeModules(edge.From) || !member(edge.Specifier) {
+			continue
+		}
+		if edge.Kind == explainfiles.TypeReference {
+			return typeReference(edge.From, edge.Specifier)
+		}
+		if !edge.Kind.ModuleSpecifier() {
+			continue
+		}
+		file := path.Clean(edge.To)
+		// An authored alias owns the import only when the build resolved it there, not through the member's link.
+		if aliased(edge.Specifier) && !underNodeModules(file) {
+			continue
+		}
+		// A sandbox links the store copy from the exec root it was declared in.
+		if i := strings.LastIndex(file, "/"+a.binDir+"/"); path.IsAbs(file) && i >= 0 {
+			file = file[i+1:]
+		}
+		if !strings.HasPrefix(file, a.binDir+"/") {
+			return fmt.Errorf("workspace member import %q from %s resolves to %s outside the build output, so the editor cannot read the member's store copy. Use an authored editor project without generated_sources; ordinary builds and type checking remain supported", edge.Specifier, edge.From, file)
+		}
+		if previous, ok := selected[edge.Specifier]; ok && previous != file {
+			return fmt.Errorf("workspace member import %q resolves to different files (%s; %s); one paths entry cannot represent these importer or resolution-mode choices. Use separate editor projects or an authored editor project without generated_sources; ordinary builds and type checking remain supported", edge.Specifier, previous, file)
+		}
+		selected[edge.Specifier] = file
+	}
+	for _, missing := range listing.Unresolved {
+		from := listedPath(missing.From)
+		if underNodeModules(from) || !member(missing.Specifier) {
+			continue
+		}
+		if missing.Kind == explainfiles.TypeReference {
+			return typeReference(from, missing.Specifier)
+		}
+		if missing.Kind.ModuleSpecifier() {
+			return fmt.Errorf("workspace member import %q from %s fails to resolve in the build, while the editor could resolve it through the member's checkout link or a paths entry. Fix the import or use an authored editor project without generated_sources; ordinary builds and type checking remain supported", missing.Specifier, from)
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	if resolution := a.moduleResolution(); resolution == "node16" || resolution == "nodenext" {
+		return fmt.Errorf("workspace member imports cannot be projected with compilerOptions.moduleResolution=%q: exact paths can hide failed imports in another importer's resolution mode. Use an authored editor project without generated_sources; ordinary builds and type checking remain supported", resolution)
+	}
+	if slices.ContainsFunc(suffixes, func(suffix any) bool { return suffix != "" }) {
+		return fmt.Errorf("workspace member imports need exact file projection with compilerOptions.moduleSuffixes=%v: the compiler applies suffixes again to the selected filename. Use an authored editor project without generated_sources; ordinary builds and type checking remain supported", suffixes)
+	}
+	paths, _ := options["paths"].(*tsconfig.Paths)
+	if paths == nil {
+		paths = &tsconfig.Paths{}
+		options["paths"] = paths
+	}
+	for _, specifier := range slices.Sorted(maps.Keys(selected)) {
+		paths.Set(specifier, []string{fileRelative(directory, selected[specifier])})
 	}
 	return nil
 }

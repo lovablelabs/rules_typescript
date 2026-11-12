@@ -528,7 +528,7 @@ def compile_program(
             link = dep[NpmLinkInfo] if NpmLinkInfo in dep else None
             if npm_info.package_dir == None and link == None:
                 fail(_bare_view_message(ctx, npm_info.package_name))
-            direct_npm_deps.append(struct(label = dep.label, info = npm_info, link = link))
+            direct_npm_deps.append(struct(label = dep.label, info = npm_info, link = link, sources = info.sources))
             continue
         if package_program and _same_tsconfig(ctx, info):
             joined_source_sets.append(info.sources)
@@ -1206,6 +1206,12 @@ def compile_program(
             ),
             npm_files = npm_files,
             checkers = checkers,
+            # A member link's sources are its own program's direct srcs, not a transitive closure.
+            generated_members = sorted([
+                dep.info.package_name
+                for dep in direct_npm_deps
+                if dep.link and any([not file.is_source for file in dep.sources.to_list()])
+            ]),
         )
     if program_srcs:
         if emit and compile_srcs:
