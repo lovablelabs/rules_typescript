@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,6 +16,8 @@ import (
 type Resolver struct {
 	rf  *runfiles.Runfiles
 	dir string
+	// A manifest lists a directory of root symlinks only by its files; the tree beside it has the directory.
+	tree string
 }
 
 func NewResolver() (*Resolver, error) {
@@ -33,9 +36,13 @@ func resolverForExecutable(argv0 string) (*Resolver, error) {
 			if !isRegular(manifest) {
 				continue
 			}
-			return newResolver(runfiles.ManifestFile(manifest))
+			r, err := newResolver(runfiles.ManifestFile(manifest))
+			if err == nil && isDir(directory) {
+				r.tree = directory
+			}
+			return r, err
 		}
-		if st, err := os.Stat(directory); err == nil && st.IsDir() {
+		if isDir(directory) {
 			return directoryResolver(directory)
 		}
 	}
@@ -161,13 +168,18 @@ func (r *Resolver) Path(rlocation string) (string, error) {
 		return "", fmt.Errorf("ts_launcher: empty runfiles path")
 	}
 	if r.rf == nil {
-		if !fs.ValidPath(rlocation) || !filepath.IsLocal(filepath.FromSlash(rlocation)) {
+		if !localRunfilesPath(rlocation) {
 			return "", fmt.Errorf("ts_launcher: non-normalized runfiles path %q", rlocation)
 		}
 		// Rule-generated config paths already use canonical repository names.
 		return filepath.Join(r.dir, filepath.FromSlash(rlocation)), nil
 	}
 	p, err := r.rf.Rlocation(rlocation)
+	if errors.Is(err, fs.ErrNotExist) && r.tree != "" && localRunfilesPath(rlocation) {
+		if candidate := filepath.Join(r.tree, filepath.FromSlash(rlocation)); isDir(candidate) {
+			return candidate, nil
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("ts_launcher: runfiles lookup failed for %q: %w", rlocation, err)
 	}
@@ -176,4 +188,8 @@ func (r *Resolver) Path(rlocation string) (string, error) {
 		return "", err
 	}
 	return abs, nil
+}
+
+func localRunfilesPath(rlocation string) bool {
+	return fs.ValidPath(rlocation) && filepath.IsLocal(filepath.FromSlash(rlocation))
 }

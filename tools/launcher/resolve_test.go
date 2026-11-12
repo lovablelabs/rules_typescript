@@ -192,3 +192,35 @@ func TestAuxiliaryLauncherUsesOwnRunfilesInsteadOfParents(t *testing.T) {
 		})
 	}
 }
+
+func TestBazelRunResolvesADirectoryTheManifestListsOnlyByItsFiles(t *testing.T) {
+	t.Setenv("RUNFILES_DIR", "")
+	t.Setenv("RUNFILES_MANIFEST_FILE", "")
+	t.Setenv("TEST_SRCDIR", "")
+	base := t.TempDir()
+	program := filepath.Join(base, "dev_launcher")
+	view := "@rules_typescript_dev/part/_main/node_modules"
+	tree := program + ".runfiles"
+	file := filepath.Join(tree, filepath.FromSlash(view), "pkg", "package.json")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(`{"name":"pkg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(program+".runfiles_manifest", []byte(view+"/pkg/package.json "+file+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := resolverForExecutable(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Path(view)
+	if err != nil {
+		t.Fatalf("Path(%q): %v", view, err)
+	}
+	if want := filepath.Join(tree, filepath.FromSlash(view)); got != want {
+		t.Errorf("Path(%q) = %q, want %q", view, got, want)
+	}
+}
