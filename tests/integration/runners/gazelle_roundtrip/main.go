@@ -402,7 +402,7 @@ func warmupChecks(it *harness.IT, _ string) {
 }
 
 func generatedMemberChecks(it *harness.IT, _ string) {
-	it.Check("generatedWorkspaceMemberCannotPublishCheckoutProjection", func() { generatedWorkspaceMemberCannotPublishCheckoutProjection(it) })
+	it.Check("generatedWorkspaceMemberEditorProjection", func() { generatedWorkspaceMemberEditorProjection(it) })
 }
 
 func incrementalChecks(it *harness.IT, _ string) {
@@ -4548,7 +4548,7 @@ func memberByNameIsTheHubView(it *harness.IT) {
 		"through the importer's link")
 }
 
-func generatedWorkspaceMemberCannotPublishCheckoutProjection(it *harness.IT) {
+func generatedWorkspaceMemberEditorProjection(it *harness.IT) {
 	originals := map[string]string{}
 	for _, rel := range []string{"packages/shared/BUILD.bazel", "packages/shared/package.json", "packages/shared/tsconfig.json", "packages/shared/src/index.ts", "member/BUILD.bazel"} {
 		originals[rel] = it.Read(it.Path(rel))
@@ -4625,9 +4625,10 @@ ts_refresh_tsconfig(name = "refresh_indirect", deps = [":indirect"], generated_s
 	}
 	for _, tc := range []struct {
 		name, entry, deps, rules, config, source, consumer, witness, stalePath, stale string
+		projected                                                                     bool
 	}{
 		{
-			name: "scalar", entry: "generated/index.ts", deps: "[]",
+			name: "scalar", entry: "generated/index.ts", deps: "[]", projected: true,
 			rules:   `write_file(name = "generated_entry", out = "generated/index.ts", content = ["export const name: 'generated' = 'generated';"])` + "\n",
 			config:  originals["packages/shared/tsconfig.json"],
 			witness: "packages/shared/generated/index.ts", stalePath: "generated/index.ts",
@@ -4683,6 +4684,17 @@ ts_refresh_tsconfig(name = "refresh_indirect", deps = [":indirect"], generated_s
 				authored[rel] = it.Read(it.Path(rel))
 			}
 			for _, target := range []string{"refresh_member", "refresh_indirect"} {
+				if tc.projected && target == "refresh_member" {
+					it.MustBazel("run", "//member:"+target)
+					for _, want := range []string{"/node_modules/.pnpm/shared@", "/node_modules/shared/generated/index.d.ts"} {
+						it.RequireContains(it.Path("member/.bazel/tsconfig/projection.json"), want, "%s %s editor project does not read the member's store copy", tc.name, checkout)
+					}
+					it.Pass("%s %s direct importer reads the member's own generated sources through its store copy", tc.name, checkout)
+					for rel, before := range installed {
+						it.Write(it.Path(rel), before)
+					}
+					continue
+				}
 				log, err := it.BazelLog("generated_member_"+tc.name+"_"+checkout+"_"+target, "run", "//member:"+target)
 				if err == nil {
 					it.Fail("%s %s %s published a checkout projection for a generated workspace member", tc.name, checkout, target)

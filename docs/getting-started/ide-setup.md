@@ -141,16 +141,32 @@ Use a `compilerOptions.paths` alias into generated output or an
 authored editor project without `generated_sources`. Package imports already
 resolving within canonical output retain native resolution.
 
-Generated refresh also rejects a workspace member reached through an npm link
-when its dependency closure contains original generated compiler inputs, including
-scalar sources, JSON inputs, and generator declaration trees. The build uses the member's store
-copy, while the editor follows pnpm's checkout link; refresh has no mapping between
-those identities. This is a whole-member restriction, even when the current
-compiler listing does not select the generated input. The refusal names the
-member link and a generated producer witness before installation. Authored members
-remain supported when only their emitted declarations or manifests are generated.
-Direct generated inputs outside workspace-member links retain the projection
-support described above; ordinary builds remain supported in either case.
+A workspace member whose own program compiles generated TypeScript sources,
+reached through an npm link, is read from its store copy. The build resolves the
+member there, while pnpm's checkout link names the member's source directory,
+which lacks the generated files. Refresh writes an exact `compilerOptions.paths`
+entry for each member specifier the compiler resolved, pointing at the file the
+build read, so the editor reads the member as built instead of a stale or
+missing checkout file. An import an authored `paths` alias resolves keeps that
+alias. A member import added after refresh resolves through the checkout link
+until the next refresh. Refresh rejects the projection under `node16` or
+`nodenext` module resolution or nonempty `moduleSuffixes`, for a type reference
+naming the member, and when a member specifier resolves to different files
+across importers or resolution modes, fails to resolve in the build, or resolves
+outside the build output. Only a target with a direct dependency on the member
+link gets the projection; a target reaching the member through another target is
+rejected, even when it also links the member directly.
+
+Generated refresh still rejects a member link whose dependency closure contains
+any other original generated compiler input, including the member's own
+generated JSON inputs, scalar sources of another program, and generator
+declaration trees: the member's checkout sources reach them through paths
+refresh cannot map. The refusal names the
+member link and a generated producer witness before installation. Authored
+members remain supported when only their emitted declarations or manifests are
+generated. Direct generated inputs outside workspace-member links retain the
+projection support described above; ordinary builds remain supported in either
+case.
 
 Refresh materializes the producer-owned `package.json` beside generated inputs so
 NodeNext retains their module format on a clean refresh. An effective authored

@@ -34,6 +34,7 @@ func runTsgo(args []string) error {
 	flags.StringVar(&editor.binDir, "editor-bin-dir", "", "compiler output tree")
 	flags.Var(&editor.generatedDirectories, "editor-generated-directory", "workspace-relative generated directory (repeatable)")
 	flags.Var(&editor.generatedFiles, "editor-generated-file", "workspace-relative generated file (repeatable)")
+	flags.Var(&editor.generatedMembers, "editor-generated-member", "package name of a linked workspace member with generated sources (repeatable)")
 	editorOut := flags.String("editor-out", "", "compiler-resolved editor project output")
 	flags.StringVar(&editor.editorPath, "editor-path", "", "editor project workspace destination")
 	flags.Var(&sources, "source",

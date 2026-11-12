@@ -4085,3 +4085,130 @@ func canonicalDir(dir string) string {
 	}
 	return canonical
 }
+
+func TestEditorGeneratedMemberImportsCannotReadTheCheckoutLink(t *testing.T) {
+	compiler := editorTestCompiler(t)
+	for _, test := range []struct {
+		name      string
+		members   []string
+		missing   bool
+		nodenext  bool
+		outside   bool
+		reference bool
+		local     bool
+		paths     string
+		want      string
+		refused   string
+	}{
+		{name: "projected", members: []string{"member"}},
+		{name: "projected_past_an_alias_that_fell_through", members: []string{"member"}, paths: `,"paths":{"*":["./missing/*"]}`},
+		{name: "unprojected_reads_stale_twin", want: "TS2322"},
+		{name: "build_miss_stays_a_miss", members: []string{"member"}, missing: true, refused: "fails to resolve in the build"},
+		{name: "suffixes_reselect_the_exact_file", members: []string{"member"}, paths: `,"moduleSuffixes":[".ios",""]`, refused: "moduleSuffixes"},
+		{name: "type_reference_cannot_be_projected", members: []string{"member"}, reference: true, refused: "type reference"},
+		{name: "types_entry_cannot_be_projected", members: []string{"member"}, paths: `,"types":["member"]`, refused: "type reference"},
+		{name: "authored_alias_keeps_its_import", members: []string{"member"}, local: true, paths: `,"paths":{"member":["./local-member.ts"]}`},
+		{name: "link_outside_the_build_output", members: []string{"member"}, outside: true, refused: "outside the build output"},
+		{name: "nodenext_could_hide_another_modes_miss", members: []string{"member"}, nodenext: true, refused: "moduleResolution"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			editorTestChdir(t)
+			cwd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, "baseline.json", `{}`)
+			resolution := `"module":"preserve","moduleResolution":"bundler"`
+			if test.nodenext {
+				resolution = `"module":"nodenext","moduleResolution":"nodenext"`
+				writeFile(t, "app/package.json", `{"type":"module"}`)
+			}
+			writeFile(t, "app/tsconfig.json", `{"compilerOptions":{"strict":true,`+resolution+test.paths+`},"files":["consumer.ts"]}`)
+			consumer := "import { value } from 'member';\nimport { extra } from 'member/extra';\nexport const result: string = value;\nexport const other: string = extra;\n"
+			if test.missing {
+				consumer += "// @ts-ignore\nimport { gone } from 'member/gone';\nexport const missing = gone;\n"
+			}
+			if test.reference {
+				consumer = "/// <reference types=\"member\" />\n" + consumer
+			}
+			writeFile(t, "app/consumer.ts", consumer)
+			inputs := []string{"app/consumer.ts"}
+			if test.local {
+				writeFile(t, "app/local-member.ts", "export const value: string = '';\n")
+				inputs = append(inputs, "app/local-member.ts")
+			}
+			manifest := `{"name":"member","type":"module","exports":{".":"./schema.ts","./extra":"./extra.ts"}}`
+			// The checkout: the member's sources, whose generated schema is a stale twin.
+			writeFile(t, "packages/member/package.json", manifest)
+			writeFile(t, "packages/member/extra.ts", "export const extra: string = '';\n")
+			writeFile(t, "packages/member/schema.ts", "export const value: number = 0;\n")
+			// The build: the member's store copy, with its as-built manifest and declarations.
+			store := binDir + "/node_modules/.pnpm/member@0.0.0/node_modules/member"
+			writeFile(t, store+"/package.json", `{"name":"member","type":"module","exports":{".":"./schema.js","./extra":"./extra.js"}}`)
+			writeFile(t, store+"/schema.d.ts", "export declare const value: string;\n")
+			writeFile(t, store+"/extra.d.ts", "export declare const extra: string;\n")
+			link := ".pnpm/member@0.0.0/node_modules/member"
+			if test.outside {
+				writeFile(t, "elsewhere/member/package.json", `{"name":"member","type":"module","exports":{".":"./schema.js","./extra":"./extra.js"}}`)
+				writeFile(t, "elsewhere/member/schema.d.ts", "export declare const value: string;\n")
+				writeFile(t, "elsewhere/member/extra.d.ts", "export declare const extra: string;\n")
+				link = cwd + "/elsewhere/member"
+			}
+			if err := os.Symlink(link, binDir+"/node_modules/member"); err != nil {
+				t.Fatal(err)
+			}
+			build, editor := binDir+"/app/program.tsconfig.json", "app/.bazel/tsconfig/project.json"
+			editorTestMkdir(t, filepath.Dir(build), filepath.Dir(editor))
+			args := editorTestConfigArgs(compiler, "app/tsconfig.json", build)
+			if test.nodenext {
+				args = append(args, "-module=nodenext")
+			}
+			mustWriteTsconfig(t, append(args, inputs...))
+			root := binDir + "/app/editor-program"
+			a := actionConfig{project: "app/tsconfig.json", baseline: "baseline.json", out: build, binDir: binDir, editorPath: editor, generatedMembers: test.members}
+			if err := a.layOutProgramRoot(root, append([]string{"baseline.json", "app/tsconfig.json"}, inputs...), []string{binDir + "/node_modules"}, nil, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			err = editorRun(root, editorTestCommand(compiler, build), a, editor)
+			if test.refused != "" {
+				if err == nil || !strings.Contains(err.Error(), test.refused) {
+					t.Fatalf("editor projection error = %v, want %q", err, test.refused)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// pnpm's checkout link, which the build's sandbox never holds.
+			editorTestMkdir(t, "node_modules")
+			if err := os.Symlink("../packages/member", "node_modules/member"); err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" {
+				editorTestListing(t, compiler, editor, test.want)
+				return
+			}
+			listing := editorTestListing(t, compiler, editor)
+			for _, edge := range listing.Edges {
+				if edge.Kind != explainfiles.Import || !strings.HasPrefix(edge.Specifier, "member") {
+					continue
+				}
+				to := edge.To
+				if filepath.IsAbs(to) {
+					to, _ = below(cwd, to)
+				}
+				if test.local && edge.Specifier == "member" {
+					if to != "app/local-member.ts" {
+						t.Fatalf("editor import %q read %s, want the authored alias's app/local-member.ts", edge.Specifier, edge.To)
+					}
+					continue
+				}
+				if !strings.HasPrefix(to, store+"/") {
+					t.Fatalf("editor import %q read %s, want the member's store copy under %s", edge.Specifier, edge.To, store)
+				}
+			}
+			editorTestRemove(t, "packages/member/schema.ts")
+			editorTestListing(t, compiler, editor)
+		})
+	}
+}

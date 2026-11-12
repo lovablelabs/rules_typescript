@@ -124,7 +124,7 @@ def _run_tsgo(ctx, run_args, inputs, outputs, mnemonic, checkers, tools = []):
         execution_requirements = requirements,
     )
 
-def tsgo_editor(ctx, tsgo, tsconfig, baseline, generated_inputs, importers, overlays, manifests, srcs, chain, dep_dts, npm_files, checkers, generated_srcs = [], inherited_importers = []):
+def tsgo_editor(ctx, tsgo, tsconfig, baseline, generated_inputs, importers, overlays, manifests, srcs, chain, dep_dts, npm_files, checkers, generated_srcs = [], inherited_importers = [], generated_members = []):
     # A test or binary's program target edits under the name its user wrote.
     name = getattr(ctx.attr, "public_name", "") or ctx.label.name
     editor = ctx.actions.declare_file("{}.ide.tsconfig.json".format(name))
@@ -149,6 +149,7 @@ def tsgo_editor(ctx, tsgo, tsconfig, baseline, generated_inputs, importers, over
     args.add(baseline, format = "-editor-baseline=%s")
     args.add(bin_dir, format = "-editor-bin-dir=%s")
     args.add_all(generated_inputs, map_each = generated_input_arg, expand_directories = False, allow_closure = True)
+    args.add_all(generated_members, format_each = "-editor-generated-member=%s")
 
     # Defer config validation to the editor action; ordinary builds accept other roots.
     args.add_all(chain, map_each = validate_output_root, expand_directories = False, allow_closure = True)
