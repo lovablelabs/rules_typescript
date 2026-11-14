@@ -78,6 +78,16 @@ exports_files(
     visibility = ["//gazelle:__pkg__"],
 )
 
+# //tests/lsp:generated_wrapper_test loads the generated-mode wrapper as a checkout before its first refresh.
+exports_files(
+    [
+        "lsp/generated/consumer.ts",
+        "lsp/generated/tsconfig.build.json",
+        "lsp/generated/tsconfig.json",
+    ],
+    visibility = ["//tests/lsp:__pkg__"],
+)
+
 # ── new_project ───────────────────────────────────────────────────────────────
 # Full new-project journey: write sources → gazelle → build.
 # TypeScript files have explicit return types (isolatedDeclarations = true).

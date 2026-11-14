@@ -740,11 +740,16 @@ ts_config(
 `, selected.src),
 			})
 			var before map[string]string
-			for _, wrapper := range []string{
-				`{"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`,
-				fmt.Sprintf(`{"extends":%q,"compilerOptions":{"types":[]},"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`, "./"+selected.src),
+			for _, files := range []map[string]string{
+				{"worker/test/tsconfig.json": `{"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`},
+				{"worker/test/tsconfig.json": fmt.Sprintf(`{"extends":%q,"compilerOptions":{"types":[]},"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`, "./"+selected.src)},
+				{
+					"worker/test/tsconfig.json":        fmt.Sprintf(`{"extends":%q,"files":[],"include":[],"references":[{"path":"./tsconfig.editor.json"}]}`, "./"+selected.src),
+					"worker/test/tsconfig.editor.json": `{"files":[],"include":[],"references":[{"path":"./.bazel/tsconfig/test.json"}]}`,
+				},
 			} {
-				writeWorkspace(t, root, map[string]string{"worker/test/tsconfig.json": wrapper})
+				wrapper := files["worker/test/tsconfig.json"]
+				writeWorkspace(t, root, files)
 				captureLog(t, func() { convergeGazelle(t, root) })
 				r := onlyRuleOfKind(t, root, "worker/test", "ts_test")
 				if deps := r.AttrStrings("deps"); !contains(deps, "//worker:worker_types") {
