@@ -65,6 +65,7 @@ ts_test(
     data = [
         "//tests/integration:lsp/generated/consumer.ts",
         "//tests/integration:lsp/generated/tsconfig.build.json",
+        "//tests/integration:lsp/generated/tsconfig.editor.json",
         "//tests/integration:lsp/generated/tsconfig.json",
     ],
     emit = True,  # keep

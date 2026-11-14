@@ -83,6 +83,7 @@ exports_files(
     [
         "lsp/generated/consumer.ts",
         "lsp/generated/tsconfig.build.json",
+        "lsp/generated/tsconfig.editor.json",
         "lsp/generated/tsconfig.json",
     ],
     visibility = ["//tests/lsp:__pkg__"],

@@ -2,5 +2,5 @@
   "extends": "./tsconfig.build.json",
   "files": [],
   "include": [],
-  "references": [{ "path": "./.bazel/tsconfig/generated_test.json" }]
+  "references": [{ "path": "./tsconfig.editor.json" }]
 }

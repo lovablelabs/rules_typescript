@@ -569,7 +569,8 @@ func programCandidate(name string) bool {
 }
 
 // dataFiles is every regular file under pkg's tree no listing decides; not a
-// deeper package's, a ts_codegen's, a BUILD file or the ts_config's own src.
+// deeper package's, a ts_codegen's, a BUILD file, the ts_config's own src or
+// the package's editor wrapper (tsconfig.json, tsconfig.editor.json).
 func (s *programStore) dataFiles(pkg string, tc *tsConfig) []string {
 	var out []string
 	for _, dir := range s.walkedDirs(pkg) {
@@ -584,7 +585,7 @@ func (s *programStore) dataFiles(pkg string, tc *tsConfig) []string {
 		for _, f := range names {
 			switch {
 			case f == "BUILD.bazel", f == "BUILD", f == "package.json", programCandidate(f):
-			case path.Join(dir, f) == s.configPath(pkg), dir == pkg && f == "tsconfig.json":
+			case path.Join(dir, f) == s.configPath(pkg), dir == pkg && (f == "tsconfig.json" || f == "tsconfig.editor.json"):
 			case codegenWrites(path.Join(dir, f), pkg, tc):
 			default:
 				out = append(out, path.Join(dir, f))
