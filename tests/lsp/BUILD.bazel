@@ -15,6 +15,8 @@
                                 node_modules links.
   :fragments_reach_private_test  that those bytes exist at all, for a target no
                                 rule in this package may name.
+  :generated_wrapper_test       that Vite loads the generated-mode tsconfig.json
+                                on a checkout with no .bazel/ tree.
   :test_resolve_integration     the monkey-patch itself -- ts.resolveModuleName
                                 answers a first-party package out of the map and
                                 falls through for everything else.
@@ -33,7 +35,7 @@ lockfile via :node_modules, so they need nothing from the host.
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//npm:defs.bzl", "node_modules")
-load("//ts:defs.bzl", "ts_compile")
+load("//ts:defs.bzl", "ts_compile", "ts_test")
 load("//ts/private:tsconfig_aspect.bzl", "ide_tsconfig")
 load(":fragment_tests.bzl", "fragment_files", "fragments_reach_private_test")
 load(
@@ -53,6 +55,25 @@ node_modules(
     testonly = True,
     hoist = "//tests/npm:node_modules/.pnpm/node_modules",
     deps = ["@npm//:typescript"],
+)
+
+# Vite, and Vitest through it, loads a package's tsconfig.json whether or not refresh ran.
+ts_test(
+    name = "generated_wrapper_test",
+    size = "small",
+    srcs = ["generated_wrapper.test.ts"],
+    data = [
+        "//tests/integration:lsp/generated/consumer.ts",
+        "//tests/integration:lsp/generated/tsconfig.build.json",
+        "//tests/integration:lsp/generated/tsconfig.json",
+    ],
+    emit = True,  # keep
+    node_modules = "//tests/npm:node_modules",
+    runner = "//ts/runners:node_test",
+    deps = [
+        "@npm//:types_node",
+        "@npm//:vite",
+    ],
 )
 
 filegroup(
