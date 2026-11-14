@@ -188,6 +188,10 @@ function workerBootstrap() {
         }, delay);
       };
       post({ type: command });
+    } else if (command === 'settle-watches') {
+      // Closing a watch returns once libuv has restarted darwin's FSEvents stream with every open watch.
+      watch(workerData.workspaceRoot).close();
+      post({ type: 'watches-settled' });
     } else if (command === 'active-error' || command === 'retired-error') {
       const scheduled = observeScheduling(() =>
         watchers.get(appDirectory)[0].emit('error', new Error(`fixture ${command}`))
@@ -247,11 +251,19 @@ function finish() {
 }
 
 // libuv restarts darwin's one FSEvents stream unflushed whenever a rebuild opens or closes a watch.
+let pendingChange = null;
 function afterWatchesSettle(change) {
-  setTimeout(change, process.platform === 'darwin' ? 1000 : 0);
+  pendingChange = change;
+  worker.postMessage('settle-watches');
 }
 
 worker.on('message', (msg) => {
+  if (msg.type === 'watches-settled') {
+    const change = pendingChange;
+    pendingChange = null;
+    change();
+    return;
+  }
   if (msg.type === 'rebuild-postponed') {
     fail('fragment activity cannot postpone the pending refresh deadline');
     finish();
@@ -294,7 +306,7 @@ worker.on('message', (msg) => {
       pass('retired watch error cannot schedule a rebuild');
     }
     phase = 'publication through the replacement watcher';
-    fs.unlinkSync(appDts);
+    afterWatchesSettle(() => fs.unlinkSync(appDts));
     return;
   }
   if (msg.type !== 'resolution-map') {
@@ -345,7 +357,9 @@ worker.on('message', (msg) => {
       return;
     }
     phase = 'fragment publication after registration replacement';
-    fs.writeFileSync(registrationFragment, fragment('registered/published'));
+    afterWatchesSettle(() =>
+      fs.writeFileSync(registrationFragment, fragment('registered/published'))
+    );
   } else if (phase === 'fragment publication after registration replacement') {
     expectEntry(map, 'registered/published', registrationEntries.published);
     expectAbsent(map, 'registered/initial', 'later fragment replaces the first published package');
