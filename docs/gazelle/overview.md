@@ -337,10 +337,11 @@ file. A file tsgo could have listed -- `.ts`, `.tsx`, `.mts`, `.cts`, `.js`,
 `.jsx`, `.mjs`, `.cjs` -- is a src only when the program lists it: one the
 tsconfig's `exclude` leaves out is neither a src nor data. Every other regular
 file under the package's tree -- not a `BUILD.bazel`, `BUILD` or `package.json`,
-not the package's own `tsconfig.json`, not under a deeper package -- is a data
-src of the package: a `.json`, a `.css`, an image or a fixture. Metadata-only
-package manifests use `package_scopes` for runtime modules or `type_inputs` for
-declarations; an explicit JSON import keeps the manifest in `srcs`.
+not the package's own `tsconfig.json` or `tsconfig.editor.json`, not under a
+deeper package -- is a data src of the package: a `.json`, a `.css`, an image
+or a fixture. Metadata-only package manifests use `package_scopes` for runtime
+modules or `type_inputs` for declarations; an explicit JSON import keeps the
+manifest in `srcs`.
 
 A declared scalar output remains generated even when a local run leaves a copy
 on disk. Gazelle leaves outputs declared by `out` or `outs`, including a

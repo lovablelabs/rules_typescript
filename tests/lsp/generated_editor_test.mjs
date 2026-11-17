@@ -69,6 +69,7 @@ const preserved = new Map(
   [
     '.bazel/tsserver-hook-data.json',
     'generated/tsconfig.json',
+    'generated/tsconfig.editor.json',
     'generated/tsconfig.build.json',
     'generated/package.json',
     'generated/BUILD.bazel',

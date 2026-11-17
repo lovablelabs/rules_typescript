@@ -506,6 +506,7 @@ alias(
 		}
 		buildConfig := it.Read(it.Path("generated/tsconfig.build.json"))
 		solutionConfig := it.Read(it.Path("generated/tsconfig.json"))
+		editorConfig := it.Read(it.Path("generated/tsconfig.editor.json"))
 		it.Write(it.Path("generated/generated/value.ts"), "export const generatedValue: number = 1;\ndeclare global { interface GeneratedGlobals { removed: string; } }\n")
 		stale := it.Read(it.Path("generated/generated/value.ts"))
 		it.Write(it.Path("generated/generated/types/removed.d.ts"), "export declare const removed: string;\n")
@@ -555,7 +556,7 @@ alias(
 		if it.Read(it.Path("generated/generated/value.ts")) != stale {
 			it.Fail("refresh changed existing source generator output")
 		}
-		if it.Read(it.Path("generated/tsconfig.build.json")) != buildConfig || it.Read(it.Path("generated/tsconfig.json")) != solutionConfig {
+		if it.Read(it.Path("generated/tsconfig.build.json")) != buildConfig || it.Read(it.Path("generated/tsconfig.json")) != solutionConfig || it.Read(it.Path("generated/tsconfig.editor.json")) != editorConfig {
 			it.Fail("refresh changed authored configuration")
 		}
 		initialGenerated := it.Read(filepath.Join(it.BazelBin(), "generated/generated/value.ts"))
@@ -665,7 +666,7 @@ alias(
 		it.Pass("refresh preserves sibling and ancestor dependency JSON and both editors read edits from its source path")
 		it.Write(it.Path("generated/consumer.ts"), originalConsumer+"\nexport const broken: number = 'editor repair remains possible';\n")
 		refreshGenerated()
-		if it.Read(it.Path("generated/tsconfig.build.json")) != buildConfig || it.Read(it.Path("generated/tsconfig.json")) != solutionConfig {
+		if it.Read(it.Path("generated/tsconfig.build.json")) != buildConfig || it.Read(it.Path("generated/tsconfig.json")) != solutionConfig || it.Read(it.Path("generated/tsconfig.editor.json")) != editorConfig {
 			it.Fail("refresh with semantic errors changed authored configuration")
 		}
 		it.Write(it.Path("generated/consumer.ts"), originalConsumer)
@@ -677,7 +678,7 @@ alias(
 			originalBuild := it.Read(generatedBuild)
 			defer it.Write(generatedBuild, originalBuild)
 			preserved := map[string]string{}
-			for _, path := range []string{it.Path("generated/tsconfig.json"), it.Path("generated/tsconfig.build.json"), editorPath, emittedEditorPath, ancestorEditorPath, ambientEditorPath, it.Path("generated/.bazel/tsconfig/source_ts.json")} {
+			for _, path := range []string{it.Path("generated/tsconfig.json"), it.Path("generated/tsconfig.editor.json"), it.Path("generated/tsconfig.build.json"), editorPath, emittedEditorPath, ancestorEditorPath, ambientEditorPath, it.Path("generated/.bazel/tsconfig/source_ts.json")} {
 				preserved[path] = it.Read(path)
 			}
 			it.Write(generatedBuild, originalBuild+`

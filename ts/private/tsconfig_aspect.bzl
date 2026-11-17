@@ -784,7 +784,7 @@ def ts_refresh_tsconfig(
                   on once `tsconfig` is checked in.
     """
     if generated_sources and tsconfig != None:
-        fail("generated_sources = True requires tsconfig = None. Did you mean to keep an authored tsconfig.json solution wrapper referencing ./.bazel/tsconfig/<target>.json and select tsconfig.build.json with ts_config? See docs/getting-started/ide-setup.md.")
+        fail("generated_sources = True requires tsconfig = None. Did you mean to keep an authored tsconfig.json solution wrapper whose tsconfig.editor.json references ./.bazel/tsconfig/<target>.json, and select tsconfig.build.json with ts_config? See docs/getting-started/ide-setup.md.")
     if tsconfig == None and (test or nested_tsconfigs):
         fail("tsconfig = None preserves authored configs. Did you mean to omit test and nested_tsconfigs?")
     if tsconfig != None:

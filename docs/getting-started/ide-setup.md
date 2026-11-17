@@ -31,9 +31,27 @@ editor project; ordinary compilation is unchanged.
 
 Keep the authored program in `tsconfig.build.json`, selected by
 `ts_config(name = "tsconfig", src = "tsconfig.build.json")` with `# keep` on
-`src`. Gazelle reads that selected file and ignores derived editor projects.
+`src`. Gazelle reads that selected file and ignores the wrapper files below
+and derived editor projects.
 The tracked `tsconfig.json` extends the build config, sets `files` and `include`
-to empty arrays, and references `./.bazel/tsconfig/<target>.json`.
+to empty arrays, and references the tracked `tsconfig.editor.json`, which sets
+both to empty arrays too and references `./.bazel/tsconfig/<target>.json`:
+
+```jsonc
+// tsconfig.json
+{ "extends": "./tsconfig.build.json", "files": [], "include": [], "references": [{ "path": "./tsconfig.editor.json" }] }
+// tsconfig.editor.json
+{ "files": [], "include": [], "references": [{ "path": "./.bazel/tsconfig/<target>.json" }] }
+```
+
+tsserver follows both references to the installed project. Vite and Vitest
+load one level of references, so they read only tracked files and load
+`tsconfig.json` whether or not refresh ran. No project they load lists the
+package's files, so Vite's transform applies none of the build config's
+options, after refresh too; set the ones it needs, such as `jsx` or
+`useDefineForClassFields`, in the Vite config.
+`tsc -p tsconfig.json` loads every level and reports the missing project until
+refresh; type-check through the Bazel target or `tsc -p tsconfig.build.json`.
 The [generated-input fixture](../../tests/integration/lsp/generated) shows this
 setup. Package-local placement preserves ancestor lookup for ambient type packages.
 
