@@ -438,6 +438,7 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 		}
 	}
 	configImporters := map[string]bool{}
+	configDeps := map[string]bool{}
 	configUsesPool := false
 	reported := edgeReports{}
 	defer reported.print(from)
@@ -492,6 +493,9 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 					importer := ""
 					if npm.Repo == "npm" {
 						importer = label.New(from.Repo, npm.Pkg, nodeModulesTargetName).Rel(from.Repo, from.Pkg).String()
+						if !storeSource {
+							configDeps[dep] = true
+						}
 					} else if tc.lock != nil && tc.lock.members[barePackageName(e.Specifier)] != "" &&
 						sourceLabelIdentity(npm, language.GenerateArgs{Config: c, Rel: from.Pkg}).Repo == from.Repo &&
 						npm.Name == nodeModulesTargetName+"/"+barePackageName(e.Specifier) {
@@ -710,6 +714,11 @@ func resolveEdges(c *config.Config, ix *resolve.RuleIndex, r *rule.Rule,
 	}
 	if len(configImporters) > 0 {
 		r.SetAttr("config_node_modules", slices.Sorted(maps.Keys(configImporters)))
+	}
+	// A kept importer list is the author's closure; config_deps would narrow it to importers it may not name.
+	importersKept := effective != nil && (effective.ShouldKeep() || attrKept(effective, "config_node_modules"))
+	if len(configDeps) > 0 && !importersKept {
+		r.SetAttr("config_deps", slices.Sorted(maps.Keys(configDeps)))
 	}
 	return deps
 }

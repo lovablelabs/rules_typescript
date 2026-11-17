@@ -119,6 +119,7 @@ def _node_test_launch(ctx, test):
             ("config", ctx.attr.config),
             ("config_srcs", ctx.attr.config_srcs),
             ("config_node_modules", ctx.attr.config_node_modules),
+            ("config_deps", ctx.attr.config_deps),
             ("workers_pool", ctx.attr.workers_pool),
             ("coverage_provider", ctx.attr.coverage_provider),
             ("wrangler_config", ctx.attr.wrangler_config),

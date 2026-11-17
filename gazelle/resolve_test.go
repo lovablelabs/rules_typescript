@@ -936,6 +936,7 @@ func TestResolveEdges_TestDepsCarryTheRuntime(t *testing.T) {
 		t.Errorf("deps = %q, want %q", got, want)
 	}
 	wantStrings(t, "config importer runfiles", r.AttrStrings("config_node_modules"), []string{"//:node_modules"})
+	wantStrings(t, "config npm packages", r.AttrStrings("config_deps"), []string{"@npm//:vite"})
 	if n := strings.Count(logged, "\n"); n != 2 {
 		t.Errorf("%d log lines, want the two unowned reports:\n%s", n, logged)
 	}
@@ -2323,6 +2324,9 @@ ts_test(
 				wantStrings(t, "authored data stays absent", r.AttrStrings("data"), nil)
 				if strings.Contains(test.attrs, "config_node_modules") && (r.Attr("config_node_modules") == nil || len(r.AttrStrings("config_node_modules")) != 0) {
 					t.Errorf("kept empty config importers = %v, want an authored empty list", r.AttrStrings("config_node_modules"))
+				}
+				if strings.Contains(test.attrs, "config_node_modules = [], # keep") && r.Attr("config_deps") != nil {
+					t.Errorf("config_deps = %v beside kept config importers, want none: it would name packages no kept importer links", r.AttrStrings("config_deps"))
 				}
 				if test.config != "" {
 					wantStrings(t, "compiler-observed helper remains staged", r.AttrStrings("config_srcs"), []string{"//worker/pool:helper.ts"})

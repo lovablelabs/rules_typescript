@@ -489,8 +489,8 @@ that only resolves through Vite (`test.server.deps.inline`) fails at import
 time. The config is listed by tsgo from its own directory, as vitest loads it,
 and the listing is followed through first-party source modules, stopping at
 declared generated-output owners and workspace-member packages. The declaring importers or member links of its npm packages go in
-`config_node_modules`, whose links and store closures use the same runfiles
-staging as `data`. Gazelle leaves authored `data` unchanged, including importer
+`config_node_modules`, and the packages themselves in `config_deps`, so the test
+stages those packages' links and store closures, not the importer's whole closure. Gazelle leaves authored `data` unchanged, including importer
 targets, and recomputes `config_node_modules` when imports or config selection
 change. Test-program npm deps and the test's importer chain stay their own;
 first-party runtime owners remain in `deps`. A stale generated file's imports
