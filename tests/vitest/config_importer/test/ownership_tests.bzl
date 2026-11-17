@@ -141,6 +141,35 @@ _legacy_pool_action_test = analysistest.make(
     },
 )
 
+def _config_deps_runfiles_impl(ctx):
+    env = analysistest.begin(ctx)
+    runfiles = analysistest.target_under_test(env)[DefaultInfo].default_runfiles.files.to_list()
+    links = ctx.attr.config_importer[NodeModulesInfo].links
+    zod = links["zod"]
+    asserts.true(env, zod.link in runfiles, "the config_deps link is missing from runfiles")
+    for file in zod.store.transitive.to_list():
+        asserts.true(env, file in runfiles, "the config_deps closure is missing from runfiles: " + file.path)
+    asserts.false(env, links["minimatch"].link in runfiles, "an importer link outside config_deps entered runfiles")
+    return analysistest.end(env)
+
+_config_deps_runfiles_test = analysistest.make(
+    _config_deps_runfiles_impl,
+    attrs = {"config_importer": attr.label(mandatory = True, providers = [NodeModulesInfo])},
+)
+
+def _config_deps_two_importers_impl(ctx):
+    env = analysistest.begin(ctx)
+    runfiles = analysistest.target_under_test(env)[DefaultInfo].default_runfiles.files.to_list()
+    for importer in ctx.attr.importers:
+        link = importer[NodeModulesInfo].links["zod"].link
+        asserts.true(env, link in runfiles, "an importer linking the config_deps snapshot is missing its link: " + link.path)
+    return analysistest.end(env)
+
+_config_deps_two_importers_test = analysistest.make(
+    _config_deps_two_importers_impl,
+    attrs = {"importers": attr.label_list(providers = [NodeModulesInfo])},
+)
+
 def _config_rejected_impl(ctx):
     env = analysistest.begin(ctx)
     asserts.expect_failure(env, ctx.attr.message)
@@ -168,6 +197,54 @@ def config_importer_tests():
             config = "//tests/vitest/config_importer/config:vitest_config",
             **(common | {attr: [config_importer]})
         )
+    ts_test(
+        name = "config_deps_test",
+        config = "//tests/vitest/config_importer/config:vitest_config",
+        config_deps = ["@npm//:minimatch_10_2_4", "@npm//:zod"],
+        config_node_modules = [config_importer],
+        **common
+    )
+
+    # Leaves the config's minimatch out of config_deps, so it would fail at run time; analysis only.
+    ts_test(
+        name = "config_deps_subset_test",
+        config = "//tests/vitest/config_importer/config:vitest_config",
+        config_deps = ["@npm//:zod"],
+        config_node_modules = [config_importer],
+        tags = ["manual"],
+        **common
+    )
+    _config_deps_runfiles_test(
+        name = "config_deps_runfiles_test",
+        config_importer = config_importer,
+        target_under_test = ":config_deps_subset_test",
+    )
+    ts_test(
+        name = "config_deps_two_importers_test",
+        config = "//tests/vitest/config_importer/config:vitest_config",
+        config_deps = ["@npm//:zod"],
+        config_node_modules = [config_importer, ":zod_importer"],
+        tags = ["manual"],
+        **common
+    )
+    _config_deps_two_importers_test(
+        name = "config_deps_two_importers_runfiles_test",
+        importers = [config_importer, ":zod_importer"],
+        target_under_test = ":config_deps_two_importers_test",
+    )
+    ts_test(
+        name = "config_deps_unlinked_test",
+        config = "//tests/vitest/config_importer/config:vitest_config",
+        config_deps = ["@npm//:types_node"],
+        config_node_modules = [config_importer],
+        tags = ["manual"],
+        **common
+    )
+    config_rejected_test(
+        name = "config_deps_unlinked_analysis_test",
+        message = "no importer in config_node_modules",
+        target_under_test = ":config_deps_unlinked_test",
+    )
     for name, attr, value in [
         ("config_importers", "config_node_modules", [config_importer]),
         ("workers_pool", "workers_pool", "//tests/vitest/config_importer/config/pool:node_modules"),

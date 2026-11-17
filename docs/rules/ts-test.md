@@ -41,6 +41,7 @@ the compiled files.
 | `config` | `label` | `None` | The vitest config file (`.ts`/`.mts`/`.cts`/`.js`/`.mjs`/`.cjs`), merged over the generated config's Bazel layer. Every vitest setting is the file's. See [A Config File](#a-config-file) |
 | `config_srcs` | `label_list` | `[]` | The modules `config` imports relatively, and theirs, each at its own path in the runfiles; Gazelle writes it from the config's listing. See [A Config File](#a-config-file) |
 | `config_node_modules` | `label_list` | `[]` | `NodeModulesInfo` importers or `NpmLinkInfo` workspace-member links for the config's npm packages. Their links and store closures are runfiles at their owner paths; Gazelle derives this list without changing `data`, `deps` or the test's `node_modules` |
+| `config_deps` | `label_list` | `[]` | The npm packages the config and its relative modules import. When set, each importer in `config_node_modules` adds only these packages' links, store closures and hoist links, not its whole closure; Gazelle writes it with `config_node_modules` |
 | `data` | `label_list` | `[]` | Extra runfiles: fixtures, anything read at run time. `TsInfo` targets retain their declared runtime closure and npm bindings without joining the compiler program or test entry roots |
 | `wrangler_config` | `label` | `None` | The wrangler config a Workers-pool `config` names through `wrangler.configPath`. See [A Workers Pool](#a-workers-pool) |
 | `workers_pool` | `label` | `None` | The `NodeModulesInfo` importer or `NpmLinkInfo` member link declaring the pool imported by the config or its helper. When set, stages the pool for runtime and selects its Wrangler for config preparation. Otherwise preparation uses the first pool on the test's importer chain, including member links in `deps`. Gazelle derives the explicit owner from the resolved import |
@@ -449,6 +450,21 @@ empty one. Gazelle cannot infer missing runfiles from that list: the test's
 importer and dependencies, `data` filegroups or `workers_pool` can supply them.
 The author owns the kept closure; Bazel analysis and runtime loading check the
 actual inputs.
+
+`config_deps` names the npm packages themselves. With it, each importer in
+`config_node_modules` that links one of them adds that link, the package's store
+closure and the hoist links the closure names, so a test that borrows a large
+importer for its config does not carry that importer's whole closure. Gazelle
+writes `config_deps` from the config's static imports, and not when
+`config_node_modules` or the rule is kept. A package the config reaches only
+through `require`, `require.resolve`, `createRequire`, an alias path or a name
+resolved from `root` is not in it; list it by hand with a `# keep`. An undeclared
+import inside a config package resolves through the hidden hoist only when the
+`config_deps` closure names it. Packages vitest itself loads by name, such as a
+test environment or a coverage provider, come from the vitest the test runs,
+through the test's own deps. Member links and a `config_node_modules` list
+without `config_deps` are staged whole. A `config_deps` entry that no listed
+importer links to the same snapshot fails analysis, as does a workspace member.
 
 Member packages load from their store closures; their source files are not copied into `config_srcs`.
 Generated config files retain their declared runtime owner in `deps`. A source

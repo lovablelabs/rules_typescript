@@ -14,6 +14,13 @@ node_modules(
     ],
 )
 
+# keep
+node_modules(
+    name = "zod_importer",
+    hoist = "//tests/npm:node_modules/.pnpm/node_modules",
+    deps = ["@npm//:zod"],
+)
+
 config_importer_tests()
 
 # keep

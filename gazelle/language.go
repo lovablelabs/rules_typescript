@@ -298,6 +298,7 @@ func (l *tsLang) Kinds() map[string]rule.KindInfo {
 				"deps":                true,
 				"config_srcs":         true,
 				"config_node_modules": true,
+				"config_deps":         true,
 				"workers_pool":        true,
 				"wrangler_config":     true,
 				"coverage_provider":   true,

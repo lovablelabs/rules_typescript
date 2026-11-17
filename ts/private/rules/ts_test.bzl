@@ -26,8 +26,8 @@ load(
     "runfiles_visible_paths",
     "validate_runfiles_modules",
 )
-load("//ts/private:node_modules.bzl", "own_package_name", "runfiles_dir", "runtime_npm_contexts")
-load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations", "runtime_scope_index")
+load("//ts/private:node_modules.bzl", "importer_chain", "importer_linking", "npm_closure", "npm_hoist_links", "own_package_name", "runfiles_dir", "runtime_npm_contexts")
+load("//ts/private:providers.bzl", "NodeModulesInfo", "NpmLinkInfo", "NpmPackageInfo", "TsInfo", "TsTestRunnerInfo", "canonical_runtime_file", "is_javascript", "require_emitted_inputs", "require_runtime_scopes", "runtime_links", "runtime_mappings", "runtime_scope_destinations", "runtime_scope_index")
 load(
     "//ts/private:runtime.bzl",
     "JS_RUNTIME_TOOLCHAIN_TYPE",
@@ -191,6 +191,54 @@ def _runtime_demands(ctx, program_inputs, test, owners, links, runtime_data, pro
     ])
     module_paths = {file: (rlocation_path(ctx, file), selected) for file, selected in selected_modules.items()}
     return demanded, runtime_modules, scoped_modules, ordinary, module_paths
+
+def _config_npm_runfiles(ctx):
+    """The config's npm runfiles: the targets merged whole, and the links of `config_deps` with their closures.
+
+    Without `config_deps`, every `config_node_modules` target is merged whole. With it, an importer
+    contributes only the links of those packages, their store closures and the hoist links their
+    closure names; workspace-member links are still merged whole.
+    """
+    if not ctx.attr.config_deps:
+        return ctx.attr.config_node_modules, depset()
+    whole = [target for target in ctx.attr.config_node_modules if NodeModulesInfo not in target]
+    chains = [importer_chain(target[NodeModulesInfo]) for target in ctx.attr.config_node_modules if NodeModulesInfo in target]
+    links = {}
+
+    # Each listed importer that links the snapshot stages its link: a relative config module under
+    # another importer resolves the package from that importer's directory.
+    matched = [[] for _ in chains]
+    unlinked = []
+    for dep in ctx.attr.config_deps:
+        info = dep[NpmPackageInfo]
+        if info.package_dir == None:
+            fail(("ts_test {}: config_deps {} is a workspace member; name its link target, " +
+                  "`//<importer>:node_modules/{}`, in config_node_modules instead.").format(ctx.label, dep.label, info.package_name))
+        found = False
+        for i, chain in enumerate(chains):
+            selected = importer_linking(chain, info.package_name, {})
+            if selected != None and selected.link.store.tree == info.store.tree:
+                links[selected.link.link.path] = selected.link
+                matched[i].append(info)
+                found = True
+        if not found:
+            unlinked.append(str(dep.label))
+    if unlinked:
+        fail(("ts_test {}: no importer in config_node_modules ({}) links config_deps {} to the same " +
+              "snapshot. Name the importer that declares each package in config_node_modules.").format(
+            ctx.label,
+            ", ".join([str(target.label) for target in ctx.attr.config_node_modules]),
+            ", ".join(unlinked),
+        ))
+    for chain, infos in zip(chains, matched):
+        if not infos:
+            continue
+        for link in npm_hoist_links(npm_closure(infos, []), chain[0].hoist):
+            links[link.link.path] = link
+    return whole, depset(
+        [entry.link for entry in links.values()],
+        transitive = [entry.store.transitive for entry in links.values()],
+    )
 
 def _layout_data(ctx, layout, files):
     # Moved modules read relative data from the shared layout, as ts_compile assets do.
@@ -441,15 +489,16 @@ def _ts_test_impl(ctx):
     if runtime_binary:
         config["runtime"] = rlocation_path(ctx, runtime_binary)
 
-    config_importers = ctx.attr.config_node_modules + ([ctx.attr.workers_pool] if ctx.attr.workers_pool else [])
+    whole_config_importers, config_npm_files = _config_npm_runfiles(ctx)
+    config_importers = whole_config_importers + ([ctx.attr.workers_pool] if ctx.attr.workers_pool else [])
     files = (
         [test_files_list] + program_outputs +
-        [file for file in ctx.files.data if file not in data_outputs or (file not in replaced_links and file not in replacements)] + ctx.files.config_node_modules + ctx.files.workers_pool + launched.files + context_inputs
+        [file for file in ctx.files.data if file not in data_outputs or (file not in replaced_links and file not in replacements)] + ctx.files.workers_pool + launched.files + context_inputs
     )
     runfiles = ctx.runfiles(
         files = files,
         transitive_files = depset(
-            transitive = [launched.transitive_files, chain.npm_files] + [info.npm_files for info in data_infos] + package_sources,
+            transitive = [launched.transitive_files, chain.npm_files, config_npm_files] + [target[DefaultInfo].files for target in whole_config_importers] + [info.npm_files for info in data_infos] + package_sources,
         ),
         symlinks = _layout_data(ctx, program.layout, [file for file in ctx.files.data if file not in data_outputs]) | launched.symlinks,
     )
@@ -588,6 +637,15 @@ _TEST_ATTRS = {
               "changing the test program's node_modules or deps. Gazelle " +
               "derives this list separately from authored data.",
         providers = [[NodeModulesInfo], [NpmLinkInfo]],
+    ),
+    "config_deps": attr.label_list(
+        doc = "The npm packages the authored config and its relative modules import. When set, " +
+              "each importer in `config_node_modules` that links one of them adds only that link, " +
+              "its store closure and the hoist links the closure names, not its whole closure. " +
+              "Gazelle writes it from the config's static imports, unless `config_node_modules` " +
+              "is kept; a package reached only through `require` or a path needs a `# keep`. " +
+              "docs/rules/ts-test.md.",
+        providers = [NpmPackageInfo],
     ),
     "data": attr.label_list(
         doc = "Extra runfiles for the test: fixtures, anything read at run " +

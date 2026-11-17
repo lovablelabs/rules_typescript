@@ -12,6 +12,9 @@ keeps `minimatch` 9.0.9. The same runtime assertions exercise
 | Generated config owners and Workers settings retain their contracts. | `TestResolveEdges_GeneratedConfigStagesScalarFiles`, `TestResolveEdges_SiblingConfigKeepsWorkersAttributes` |
 | Config-only npm packages cannot become direct test-program deps. | `config_dep_rejected_test` |
 | node:test rejects the Vitest config importer attribute. | `config_importers_rejected_test` |
+| With `config_deps`, the config loads its packages, and an importer link outside the list stays out of runfiles. | `config_deps_test`, `config_deps_runfiles_test` |
+| Each listed importer linking a `config_deps` snapshot stages its link. | `config_deps_two_importers_runfiles_test` |
+| A `config_deps` entry no listed importer links fails analysis; Gazelle writes none beside kept importers. | `config_deps_unlinked_analysis_test`, `TestGazelle_WorkersPoolOriginAndWithdrawal` |
 | The module importing the pool determines `workers_pool`, including a nested helper while the test declares a different version. | `TestResolveEdges_WorkersPoolOwnerIsTheImportingHelper` |
 | Full and partial generation withdraw a removed pool import and preserve authored data; only Wrangler preparation requires a unique pool owner. | `TestGazelle_WorkersPoolOriginAndWithdrawal` |
 | A workspace wrapper's member store owns its files while compiler-observed source paths retain the Workers owner, Wrangler and Istanbul settings. | `TestGazelle_WorkersPoolOriginAndWithdrawal` |
