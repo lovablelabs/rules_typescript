@@ -383,6 +383,9 @@ def _npm_import_impl(rctx):
 
     rctx.file("BUILD.bazel", "\n".join(lines))
 
+    # Safe only while every input stays pinned: url by integrity, the label attrs by watch.
+    return rctx.repo_metadata(reproducible = True)
+
 npm_import = repository_rule(
     implementation = _npm_import_impl,
     attrs = {

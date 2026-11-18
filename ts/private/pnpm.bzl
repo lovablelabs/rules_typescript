@@ -151,6 +151,9 @@ alias(
     )
 
     repository_ctx.file("BUILD.bazel", "\n".join(build_lines))
+    return repository_ctx.repo_metadata(
+        reproducible = all([checksums.get(platform) for platform in _PNPM_PLATFORMS]),
+    )
 
 pnpm_repo = repository_rule(
     implementation = _pnpm_repo_impl,
