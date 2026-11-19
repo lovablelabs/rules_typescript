@@ -39,6 +39,12 @@ def write_baseline_tsconfig(ctx):
     )
     return out
 
+def _staged_type_input(file):
+    """Whether TsConfig stages a retained type input; a source module's implementation goes by path only."""
+    if not file.is_source or file.extension not in ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]:
+        return True
+    return file.basename.endswith((".d.ts", ".d.mts", ".d.cts"))
+
 def _generated_declaration(file):
     return file.path if not file.is_source and not file.is_directory and file.basename.endswith((".d.ts", ".d.mts", ".d.cts")) else None
 
@@ -101,6 +107,8 @@ def tsconfig_action(
             retained_types.append(file)
     config_args.add_all(dep_dts, map_each = _generated_declaration, format_each = "-type_input=%s", expand_directories = False)
     config_args.add_all(declaration_paths[0], map_each = declaration_paths[1], format_each = "-type_input=%s")
+    unstaged = [file for file in retained_types if not _staged_type_input(file)]
+    config_args.add_all(unstaged, format_each = "-type_input=%s")
 
     # A source-mode dependency's JavaScript is typed from its source only under allowJs (TS7016 otherwise).
     if [file for file in retained_types if file.is_source and file.extension in ["js", "jsx", "mjs", "cjs"]]:
@@ -108,7 +116,7 @@ def tsconfig_action(
     config_args.add_all(check_srcs)
     ctx.actions.run(
         inputs = depset(
-            check_srcs + tsconfig_chain + retained_types,
+            check_srcs + tsconfig_chain + [file for file in retained_types if _staged_type_input(file)],
             transitive = [tsgo.files],
             order = "postorder",
         ),
