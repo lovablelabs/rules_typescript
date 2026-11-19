@@ -357,6 +357,7 @@ def _tools_toolchain_repo_impl(repository_ctx):
     repository_ctx.file("BUILD.bazel", (
         "exports_files({}, visibility = [\"//visibility:public\"])\n"
     ).format(repr(TOOLS_BINARIES)))
+    return repository_ctx.repo_metadata(reproducible = bool(repository_ctx.attr.integrity))
 
 tools_toolchain_repo = repository_rule(
     implementation = _tools_toolchain_repo_impl,
@@ -432,6 +433,7 @@ filegroup(
 
 exports_files(["lib/{binary}", "package.json"])
 """.format(binary = binary))
+    return repository_ctx.repo_metadata(reproducible = bool(integrity))
 
 tsgo_toolchain_repo = repository_rule(
     implementation = _tsgo_toolchain_repo_impl,

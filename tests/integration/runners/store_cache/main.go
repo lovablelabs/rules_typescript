@@ -2,6 +2,7 @@ package main
 
 import (
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +16,8 @@ const (
 	link  = "node_modules/.pnpm/strip-ansi@7.2.0/node_modules/ansi-regex"
 	want  = "../../ansi-regex@6.5.0/node_modules/ansi-regex"
 )
+
+var spokes = []string{"npm__strip-ansi__7_2_0", "npm__ansi-regex__6_5_0"}
 
 var processes = regexp.MustCompile(`(?m)^INFO: \d+ processes: (.*)\.$`)
 
@@ -32,6 +35,9 @@ func main() {
 		}
 		requireStore(it)
 		it.Pass("the store tree is real files, its dependency a relative link")
+		contents := repoContentsCache(it)
+		cached := cachedSpokes(it, contents)
+		it.Pass("both npm spokes are linked from the repo contents cache")
 
 		// The harness's .bazelrc carries --disk_cache; expunging leaves it as
 		// the only place the tree can come back from.
@@ -58,6 +64,10 @@ func main() {
 			"NpmStore: %s", strings.Join(kinds, ", "))
 		requireStore(it)
 		it.Pass("the restored tree holds files only, the link its relative target")
+		if again := cachedSpokes(it, contents); !maps.Equal(again, cached) {
+			it.Fail("the fresh output base refetched the npm spokes: %v, want %v", again, cached)
+		}
+		it.Pass("the fresh output base links the same repo contents cache entries")
 
 		runTest(it, "test_nobuild_runfile_links.log", "--nobuild_runfile_links")
 		runTest(it, "test_noenable_runfiles.log", "--noenable_runfiles")
@@ -75,6 +85,41 @@ func runTest(it *harness.IT, logName, flag string) {
 		it.Fail("bazel test //:strip_ansi_test %s exited non-zero: %v", flag, err)
 	}
 	it.Pass("//:strip_ansi_test passes under %s", flag)
+}
+
+func repoContentsCache(it *harness.IT) string {
+	repositoryCache := strings.TrimSpace(it.BazelStdout("info", "repository_cache"))
+	resolved, err := filepath.EvalSymlinks(filepath.Join(repositoryCache, "contents"))
+	if err != nil {
+		it.Fail("no repo contents cache under %s: %v", repositoryCache, err)
+	}
+	return resolved
+}
+
+// Bazel links a repository from the repo contents cache only when its rule
+// returned repo_metadata(reproducible = True); otherwise it is a directory.
+func cachedSpokes(it *harness.IT, contents string) map[string]string {
+	external := filepath.Join(it.OutputBase, "external")
+	entries := map[string]string{}
+	for _, spoke := range spokes {
+		names := it.Glob(external, "", "+"+spoke)
+		if len(names) != 1 {
+			it.Fail("want one %s repository under %s, got %v", spoke, external, names)
+		}
+		path := filepath.Join(external, names[0])
+		if _, err := os.Readlink(path); err != nil {
+			it.Fail("%s is not a link into the repo contents cache: %v", path, err)
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			it.Fail("resolving %s: %v", path, err)
+		}
+		if !strings.HasPrefix(resolved, contents+string(filepath.Separator)) {
+			it.Fail("%s -> %s, want a path under %s", path, resolved, contents)
+		}
+		entries[spoke] = resolved
+	}
+	return entries
 }
 
 func processKinds(text string) []string {

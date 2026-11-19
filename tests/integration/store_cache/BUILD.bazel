@@ -10,6 +10,10 @@ the process summary and the tree; then it runs the workspace's ts_test under
 layout) and, over another fresh output base, under
 --remote_download_outputs=minimal. docs/rules/node-modules.md § The Store.
 
+Both output bases must link the two npm spokes from the repo contents cache
+under the harness's --repository_cache: npm_import returns
+repo_metadata(reproducible = True), so a second output base never refetches.
+
 The child workspace lives in workspace/ and keeps its root BUILD file as
 BUILD.bazel.tpl, which the runner renames in the scratch copy: a real
 BUILD.bazel there would make workspace/ a subpackage, and glob() does not see
