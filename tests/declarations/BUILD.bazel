@@ -7,6 +7,7 @@ load(
     ":declarations_tests.bzl",
     "check_reads_the_dep_declarations_test",
     "compiler_inputs_remain_type_only_test",
+    "config_skips_source_implementations_test",
     "leaf_declares_on_demand_test",
 )
 
@@ -108,4 +109,24 @@ genrule(
     name = "generated_scope",
     outs = ["generated_scope.json"],
     cmd = "echo '{\"type\":\"module\"}' > $@",
+)
+
+ts_compile(
+    name = "source_lib",
+    srcs = ["source_lib.ts"],
+    emit = False,  # keep
+    type_inputs = ["compiler_scope.json"],
+)
+
+ts_compile(
+    name = "source_app",
+    srcs = ["source_app.ts"],
+    deps = [":source_lib"],
+)
+
+config_skips_source_implementations_test(
+    name = "config_skips_source_implementations_test",
+    scope = "compiler_scope.json",
+    target_under_test = ":source_app",
+    implementation = "source_lib.ts",
 )

@@ -156,3 +156,30 @@ compiler_inputs_remain_type_only_test = analysistest.make(
     attrs = {"compiler_inputs": attr.label_list(allow_files = True)},
     extra_target_under_test_aspects = [runnable_action_aspect],
 )
+
+def _config_skips_source_implementations_impl(ctx):
+    env = analysistest.begin(ctx)
+    for mnemonic, reads_implementation in [("TsConfig", False), ("TsgoCheck", True)]:
+        action = _action(env, mnemonic)
+        asserts.true(env, action != None, "the dependent runs " + mnemonic)
+        if action == None:
+            continue
+        inputs = action.inputs.to_list()
+        asserts.equals(
+            env,
+            reads_implementation,
+            ctx.file.implementation in inputs,
+            "{} input edge to the source dependency's {}".format(mnemonic, ctx.file.implementation.short_path),
+        )
+        asserts.true(env, ctx.file.scope in inputs, mnemonic + " retains the dependency's package scope")
+        if mnemonic == "TsConfig":
+            asserts.true(env, "-type_input=" + ctx.file.implementation.path in action.argv, "TsConfig names the unstaged implementation for its types lookup")
+    return analysistest.end(env)
+
+config_skips_source_implementations_test = analysistest.make(
+    _config_skips_source_implementations_impl,
+    attrs = {
+        "implementation": attr.label(allow_single_file = True, mandatory = True),
+        "scope": attr.label(allow_single_file = True, mandatory = True),
+    },
+)
