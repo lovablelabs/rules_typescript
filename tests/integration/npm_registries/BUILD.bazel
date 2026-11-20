@@ -9,7 +9,11 @@ cover the parsing; this test stands up two throwaway HTTP registries on
 127.0.0.1, maps one scope to each -- one through each file -- and asserts each
 tarball arrives from its registry with its own token on the wire, the
 `.npmrc`'s token expanded from `${ACME_TOKEN}` and the other read from
-`PNPM_CONFIG__AUTH`, which no file names.
+`PNPM_CONFIG__AUTH`, which no file names. Then it fetches under each source
+alone: the spoke that read only `${ACME_TOKEN}` stays out of the repo contents
+cache while tsgo, from a registry no `.npmrc` line covers, is linked from it; a
+set `PNPM_CONFIG__AUTH` keeps both its spoke and tsgo out; and so does a literal
+`.npmrc` `_authToken`.
 
 The child workspace lives in workspace/ and keeps its root BUILD file as
 BUILD.bazel.tpl, which the runner renames in the scratch copy. A real

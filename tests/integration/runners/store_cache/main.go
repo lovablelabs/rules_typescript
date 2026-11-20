@@ -1,11 +1,16 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/base64"
 	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/mikn/rules_typescript/tests/integration/harness"
@@ -17,7 +22,10 @@ const (
 	want  = "../../ansi-regex@6.5.0/node_modules/ansi-regex"
 )
 
-var spokes = []string{"npm__strip-ansi__7_2_0", "npm__ansi-regex__6_5_0"}
+var (
+	tsgo   = "tsgo_" + runtime.GOOS + "_" + runtime.GOARCH
+	cached = []string{"npm__strip-ansi__7_2_0", "npm__ansi-regex__6_5_0", tsgo, "pnpm", "tools_fixture"}
+)
 
 var processes = regexp.MustCompile(`(?m)^INFO: \d+ processes: (.*)\.$`)
 
@@ -27,6 +35,7 @@ func main() {
 		WorkspaceRel: "tests/integration/store_cache/workspace",
 		Renames:      map[string]string{"BUILD.bazel.tpl": "BUILD.bazel"},
 	}, func(it *harness.IT) {
+		writeTools(it)
 		first, err := it.BazelLog("build_1.log", "build", "//:"+store)
 		if err != nil {
 			first.Dump()
@@ -36,8 +45,10 @@ func main() {
 		requireStore(it)
 		it.Pass("the store tree is real files, its dependency a relative link")
 		contents := repoContentsCache(it)
-		cached := cachedSpokes(it, contents)
-		it.Pass("both npm spokes are linked from the repo contents cache")
+		linked := cachedRepos(it, contents)
+		it.Pass("the npm spokes, tsgo, pnpm and tools are linked from the repo contents cache")
+		requireUnpinnedUncached(it)
+		it.Pass("a tools_toolchain_repo with an empty integrity is not in the repo contents cache")
 
 		// The harness's .bazelrc carries --disk_cache; expunging leaves it as
 		// the only place the tree can come back from.
@@ -64,8 +75,8 @@ func main() {
 			"NpmStore: %s", strings.Join(kinds, ", "))
 		requireStore(it)
 		it.Pass("the restored tree holds files only, the link its relative target")
-		if again := cachedSpokes(it, contents); !maps.Equal(again, cached) {
-			it.Fail("the fresh output base refetched the npm spokes: %v, want %v", again, cached)
+		if again := cachedRepos(it, contents); !maps.Equal(again, linked) {
+			it.Fail("the fresh output base refetched: %v, want %v", again, linked)
 		}
 		it.Pass("the fresh output base links the same repo contents cache entries")
 
@@ -96,12 +107,38 @@ func repoContentsCache(it *harness.IT) string {
 	return resolved
 }
 
+// The store build fetches no toolchain, and the pinned tools release is not
+// fetched in tests: tools_fixture.bzl points tools_toolchain_repo at this.
+func writeTools(it *harness.IT) {
+	out, err := os.Create(it.Path("tools.tar.gz"))
+	if err != nil {
+		it.Fail("cannot create tools.tar.gz: %v", err)
+	}
+	gz := gzip.NewWriter(out)
+	archive := tar.NewWriter(gz)
+	for _, binary := range []string{"tsaction", "ts_launcher", "lcov_merger", "copy_to_workspace"} {
+		header := &tar.Header{Name: "tools/" + binary, Mode: 0o755, Typeflag: tar.TypeReg}
+		if err := archive.WriteHeader(header); err != nil {
+			it.Fail("cannot add %s to tools.tar.gz: %v", binary, err)
+		}
+	}
+	for _, closer := range []interface{ Close() error }{archive, gz, out} {
+		if err := closer.Close(); err != nil {
+			it.Fail("cannot finish tools.tar.gz: %v", err)
+		}
+	}
+	sum := sha256.Sum256([]byte(it.Read(it.Path("tools.tar.gz"))))
+	it.Write(it.Path("tools.integrity"), "sha256-"+base64.StdEncoding.EncodeToString(sum[:]))
+}
+
 // Bazel links a repository from the repo contents cache only when its rule
 // returned repo_metadata(reproducible = True); otherwise it is a directory.
-func cachedSpokes(it *harness.IT, contents string) map[string]string {
+func cachedRepos(it *harness.IT, contents string) map[string]string {
+	it.MustBazel("fetch", "--repo=@@rules_typescript++ts+"+tsgo,
+		"--repo=@@rules_typescript++npm+pnpm", "--repo=@tools_fixture")
 	external := filepath.Join(it.OutputBase, "external")
 	entries := map[string]string{}
-	for _, spoke := range spokes {
+	for _, spoke := range cached {
 		names := it.Glob(external, "", "+"+spoke)
 		if len(names) != 1 {
 			it.Fail("want one %s repository under %s, got %v", spoke, external, names)
@@ -120,6 +157,24 @@ func cachedSpokes(it *harness.IT, contents string) map[string]string {
 		entries[spoke] = resolved
 	}
 	return entries
+}
+
+// attr.string(mandatory = True) accepts "", and an unpinned download is not
+// reproducible.
+func requireUnpinnedUncached(it *harness.IT) {
+	it.MustBazel("fetch", "--repo=@tools_unpinned")
+	external := filepath.Join(it.OutputBase, "external")
+	names := it.Glob(external, "", "+tools_unpinned")
+	if len(names) != 1 {
+		it.Fail("want one tools_unpinned repository under %s, got %v", external, names)
+	}
+	info, err := os.Lstat(filepath.Join(external, names[0]))
+	if err != nil {
+		it.Fail("cannot stat %s: %v", names[0], err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		it.Fail("%s has no integrity and is a link into the repo contents cache", names[0])
+	}
 }
 
 func processKinds(text string) []string {

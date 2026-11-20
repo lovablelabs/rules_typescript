@@ -127,6 +127,53 @@ def _longest(tokens, request, scope):
             best = (nerf, entries[scope])
     return best
 
+def credential_getenv(getenv):
+    """getenv, and the list of the variables it found set.
+
+    Bazel records each variable a fetch read, with its value, beside the
+    repository's repo contents cache entry: a repository that read a
+    credential must return repo_metadata(reproducible = False).
+
+    Args:
+        getenv: rctx.getenv.
+
+    Returns:
+        (getenv, found): found lists each variable getenv returned non-empty.
+    """
+    found = []
+
+    def read(name, default = None):
+        value = getenv(name, default)
+        if value:
+            found.append(name)
+        return value
+
+    return read, found
+
+def auth_for_fetch(rctx, url):
+    """The `auth` for rctx.download of url, and whether the fetch may be shared.
+
+    A repository that read a set variable, which Bazel records beside its repo
+    contents cache entry, or that sent any credential, literal .npmrc ones
+    included, holds what the credential guards: it is not reproducible.
+
+    Args:
+        rctx: The repository_ctx of a rule with `npmrc` and `package` attrs.
+        url: The tarball URL about to be fetched.
+
+    Returns:
+        (auth, reproducible): auth for rctx.download's `auth`.
+    """
+    npmrc = ""
+    if rctx.attr.npmrc:
+        # An attr.label is not by itself an input to the fetch: unwatched, a
+        # token rotated in .npmrc would leave the fetched repository in place.
+        rctx.watch(rctx.attr.npmrc)
+        npmrc = rctx.read(rctx.attr.npmrc)
+    getenv, found = credential_getenv(rctx.getenv)
+    auth = fetch_auth(npmrc, url, rctx.attr.package, getenv, str(rctx.attr.npmrc))
+    return auth, not (auth or found)
+
 def fetch_auth(npmrc, url, package, getenv, npmrc_label = ".npmrc"):
     """The `auth` dict rctx.download needs for one tarball URL, or {}.
 
