@@ -802,6 +802,8 @@ func TestBinRelative(t *testing.T) {
 	for _, c := range []struct{ binPath, want, importer string }{
 		{binDir + "/pkg/sub/node_modules", "pkg/sub/node_modules", "pkg/sub"},
 		{binDir + "/node_modules", "node_modules", ""},
+		{binDir + "/pkg/sub/node_modules.types/node_modules", "pkg/sub/node_modules.types/node_modules", "pkg/sub"},
+		{binDir + "/node_modules.types/node_modules", "node_modules.types/node_modules", ""},
 		{binDir + "/pkg", "pkg", ""},
 		{binDir, "", ""},
 	} {

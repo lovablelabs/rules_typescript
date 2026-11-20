@@ -443,6 +443,12 @@ def _resolve_on_chains(ctx, chain, dep, member_links, source_chains):
         npm_hub_label(dep.info, importer.label.package),
     ))
 
+def _types_importer(dir):
+    """An importer's node_modules directory's twin in the type views' layout."""
+    if not dir.endswith("/node_modules"):
+        fail("_types_importer: {} is not a node_modules directory".format(dir))
+    return dir + ".types/node_modules"
+
 def _retain_npm_link(ctx, links, link):
     previous = links.get(link.link.path)
     if previous != None and previous.store.tree != link.store.tree:
@@ -499,6 +505,7 @@ def compile_program(
 
     dep_npm_package_sets = []
     dep_npm_file_sets = []
+    dep_npm_view_sets = []
     transitive_js_sets = []
     runtime_source_sets = []
     transitive_js_map_sets = []
@@ -538,6 +545,9 @@ def compile_program(
         transitive_data_sets.append(info.transitive_data)
         transitive_es_twins_sets.append(info.transitive_es_twins)
         dep_npm_file_sets.append(info.npm_files)
+
+        # A TsInfo built before type views carries none; its program reads the trees.
+        dep_npm_view_sets.append(getattr(info, "npm_view_files", None))
         direct_labels.append(label_text(dep.label))
         owner_sets.append(info.owners)
         if _encloses(dep.label, ctx.label):
@@ -592,6 +602,13 @@ def compile_program(
             [entry.store.transitive for entry in npm_links.values()] + dep_npm_file_sets
         ),
     )
+    npm_view_files = depset(
+        [entry.view_link for entry in npm_links.values()],
+        transitive = (
+            [entry.store.view_transitive for entry in npm_links.values()] +
+            [views for views in dep_npm_view_sets if views != None]
+        ),
+    )
     own_importers = source_importers.keys() + own_importers
     dependency_importers = {}
     dependency_owners = depset(transitive = owner_sets).to_list()
@@ -610,6 +627,12 @@ def compile_program(
             dep_manifests.append(scope_manifest)
     importers = [importer.dir for importer in chain]
     inherited_importers = dependency_importers.keys() + source_importers.keys()
+
+    # Type actions read each package's type view; runtime actions and the editor read the trees.
+    type_views = ctx.attr._type_views[BuildSettingInfo].value and None not in dep_npm_view_sets
+    type_npm_files = npm_view_files if type_views else npm_files
+    type_importers = [_types_importer(dir) for dir in importers] if type_views else importers
+    type_inherited_importers = [_types_importer(dir) for dir in inherited_importers] if type_views else inherited_importers
 
     declared_trees = {selected.link.store.tree: True for selected in selected_npm}
     npm_reachable = [
@@ -1225,14 +1248,14 @@ def compile_program(
                 out_base = out_base,
                 tsconfig = tsconfig,
                 chain = tsconfig_chain,
-                importers = importers,
-                inherited_importers = inherited_importers,
+                importers = type_importers,
+                inherited_importers = type_inherited_importers,
                 overlays = compiler_overlays,
                 manifests = dep_manifests,
                 program_inputs = program_inputs,
                 generated_srcs = generated_srcs,
                 dep_dts = dep_dts_depset,
-                npm_files = npm_files,
+                npm_files = type_npm_files,
                 options_file = options_file,
                 scratch = "{}/{}.emit".format(tsconfig.dirname, ctx.label.name),
                 source_map = source_map,
@@ -1252,14 +1275,14 @@ def compile_program(
                 out_base = "{}/{}".format(out_base, twins_dir),
                 tsconfig = tsconfig,
                 chain = tsconfig_chain,
-                importers = importers,
-                inherited_importers = inherited_importers,
+                importers = type_importers,
+                inherited_importers = type_inherited_importers,
                 overlays = compiler_overlays,
                 manifests = dep_manifests,
                 program_inputs = program_inputs,
                 generated_srcs = generated_srcs,
                 dep_dts = dep_dts_depset,
-                npm_files = npm_files,
+                npm_files = type_npm_files,
                 options_file = options_file,
                 scratch = "{}/{}.emit".format(tsconfig.dirname, twins_dir),
                 source_map = False,
@@ -1273,24 +1296,25 @@ def compile_program(
             direct = direct_labels,
             owners = owners,
             npm_declared = [
-                struct(name = selected.name, tree = selected.link.store.tree)
+                struct(name = selected.name, tree = selected.link.store.view if type_views else selected.link.store.tree)
                 for selected in selected_npm
             ],
             npm_reachable = npm_reachable,
+            views = type_views,
         )
         validation_outputs.append(tsgo_check(
             ctx,
             tsgo = tsgo,
             tsconfig = tsconfig,
-            importers = importers,
-            inherited_importers = inherited_importers,
+            importers = type_importers,
+            inherited_importers = type_inherited_importers,
             overlays = compiler_overlays,
             manifests = dep_manifests,
             srcs = program_inputs,
             generated_srcs = generated_srcs,
             chain = tsconfig_chain,
             dep_dts = dep_dts_depset,
-            npm_files = npm_files,
+            npm_files = type_npm_files,
             ownership = ownership,
             checkers = checkers,
             check = ctx.attr._check[CheckConfigInfo],
@@ -1307,14 +1331,14 @@ def compile_program(
                 out_base = out_base,
                 tsconfig = tsconfig,
                 chain = tsconfig_chain,
-                importers = importers,
-                inherited_importers = inherited_importers,
+                importers = type_importers,
+                inherited_importers = type_inherited_importers,
                 overlays = compiler_overlays,
                 manifests = dep_manifests,
                 program_inputs = program_inputs,
                 generated_srcs = generated_srcs,
                 dep_dts = dep_dts_depset,
-                npm_files = npm_files,
+                npm_files = type_npm_files,
                 options_file = options_file,
                 scratch = "{}/{}.declare".format(tsconfig.dirname, ctx.label.name),
                 source_map = False,
@@ -1343,6 +1367,9 @@ def compile_program(
         validation_outputs.append(stamp)
 
     if lint.binary and check_srcs:
+        # A configuration that loads packages from its data's node_modules runs
+        # under Node, which needs their trees; the linter reads only types otherwise.
+        lint_views = type_views and not lint.importers
         validation_outputs.append(lint_action(
             ctx,
             lint = lint,
@@ -1352,9 +1379,9 @@ def compile_program(
             generated_srcs = generated_srcs,
             chain = tsconfig_chain,
             dep_dts = dep_dts_depset,
-            npm_files = npm_files,
-            importers = importers,
-            inherited_importers = inherited_importers,
+            npm_files = type_npm_files if lint_views else npm_files,
+            importers = type_importers if lint_views else importers,
+            inherited_importers = type_inherited_importers if lint_views else inherited_importers,
             overlays = compiler_overlays,
             manifests = dep_manifests,
         ))
@@ -1412,6 +1439,7 @@ def compile_program(
             order = "postorder",
         ),
         npm_files = npm_files,
+        npm_view_files = npm_view_files,
         owners = owners,
     )
 
@@ -1619,6 +1647,7 @@ for all of them but Node16/NodeNext.""",
     "_source_map": attr.label(default = Label("//ts:source_map")),
     "_declaration_map": attr.label(default = Label("//ts:declaration_map")),
     "_lib_check": attr.label(default = Label("//ts:lib_check")),
+    "_type_views": attr.label(default = Label("//ts:type_views")),
     "_checkers": attr.label(default = Label("//ts:checkers")),
 }
 

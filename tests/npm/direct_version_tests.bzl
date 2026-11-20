@@ -67,7 +67,7 @@ def _mixed_npm_store_identity_impl(ctx):
     checks = [action for action in runnable_actions(env) if action.mnemonic == "TsgoCheck"]
     asserts.equals(env, 1, len(checks))
     if checks:
-        for tree in [selected.store.tree, retained.store.tree]:
+        for tree in [selected.store.view, retained.store.view]:
             asserts.true(env, tree in checks[0].inputs.to_list(), "both exact stores remain compiler inputs")
     writers = [action for action in runnable_actions(env) if any([file.basename.endswith(".ownership") for file in action.outputs.to_list()])]
     asserts.equals(env, 1, len(writers))
@@ -75,9 +75,9 @@ def _mixed_npm_store_identity_impl(ctx):
         rows = [line.split("\t") for line in writers[0].content.split("\n") if line]
         direct = [row[2] for row in rows if row[0] == "npm-direct"]
         reachable = [row[3] for row in rows if row[0] == "npm"]
-        asserts.true(env, selected.store.tree.path in direct, "selected File A is direct")
-        asserts.equals(env, ctx.attr.retained_direct, retained.store.tree.path in direct, "only declaring File B makes it direct")
-        asserts.equals(env, not ctx.attr.retained_direct, retained.store.tree.path in reachable, "same-key File B retains its closure ownership")
+        asserts.true(env, selected.store.view.path in direct, "selected File A is direct")
+        asserts.equals(env, ctx.attr.retained_direct, retained.store.view.path in direct, "only declaring File B makes it direct")
+        asserts.equals(env, not ctx.attr.retained_direct, retained.store.view.path in reachable, "same-key File B retains its closure ownership")
     return analysistest.end(env)
 
 mixed_npm_store_identity_test = analysistest.make(

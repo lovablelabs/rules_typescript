@@ -228,6 +228,51 @@ Every `ts_npm_package` carries its snapshot's store as `NpmPackageInfo.store`
 member's hub view carries the member's. The importer's links above read it,
 and the chain below is where `ts_compile` and `ts_test` find them.
 
+## Type Views
+
+A type checker reads few of a package's files: TypeScript's resolution reads
+`package.json`, other JSON, TypeScript sources and declarations, and
+JavaScript only where it tries no declaration in its place (`.js` and `.jsx`
+without a `.d.ts`, `.mjs` without a `.d.mts`, `.cjs` without a `.d.cts`).
+Source maps, assets and the JavaScript a declaration describes are most of a
+tree's files, so each store target also declares the tree's type view: the
+files that rule keeps, copied by one `NpmTypeView` action
+(`tsaction typeview`). JSON stays whole, since a program that sets
+`resolveJsonModule` may import any of it.
+
+The views mirror the layout one directory down: every `node_modules/` path
+has a twin at the same path under `node_modules.types/`. A view sits at
+`node_modules.types/node_modules/.pnpm/<key>/node_modules/<name>` with the
+twins of its tree's edge links beside it, the hoist's links have twins under
+`node_modules.types/node_modules/.pnpm/node_modules`, and an importer's links
+twins at `<importer>/node_modules.types/node_modules/<name>`. A view's walk up
+meets the twins of its edges, the hoist and the root importer in the order a
+tree's walk meets theirs.
+
+`NpmStoreInfo.view`, `view_links` and `view_transitive`,
+`NpmLinkInfo.view_link`, `NpmHoistInfo.view_members` and
+`TsInfo.npm_view_files` carry the twins. The type actions of `ts_compile` and
+`ts_test` (TsEmit, TsgoCheck, TsgoDeclare, and TsLint unless the lint
+configuration's `data` names a `node_modules`) stage `npm_view_files` in place of
+`npm_files` and name the importers' twins, which tsaction lays at the
+importers' `node_modules`; the ownership manifest names the views. The
+written tsconfig sits in the output tree, and TypeScript resolves its `types`
+entries walking up from there, so a program root on views holds the output
+tree as real directories down to each importer's `node_modules`, linked to
+its twin, and every other entry linked as before. A source outside every
+importer's package walks up past the program root on the full layout, into
+the chain's `node_modules` in the output tree; on views the root importer's
+twin in the program root holds the chain behind its own names. A TsLint
+whose configuration loads packages from its `data`'s `node_modules` under
+Node, runtime actions, tests, bundles, the dev server, codegen and the editor
+project read the trees. Sharing one input root lets a worker reuse a
+target's TsgoCheck tree for its TsLint. A
+program with a first-party dep whose `TsInfo` carries no `npm_view_files`
+reads the trees, as does every program under `--//ts:type_views=false`.
+
+Analysis declares the views, their links and the twin links whatever the flag
+says; only an action that stages them builds them.
+
 ## The Chain
 
 `ts_compile` and `ts_test` build no tree. Each names in `node_modules` the

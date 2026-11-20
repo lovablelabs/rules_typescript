@@ -50,6 +50,14 @@ int_flag(
     scope = "target",
 )
 
+# The type actions (emit, check, declare, lint) read each npm package's type view, the files TypeScript's
+# resolution reads, instead of its tree; false stages the trees, as runtime actions always do.
+bool_flag(
+    name = "type_views",
+    build_setting_default = True,
+    scope = "target",
+)
+
 # Library checking exposes invalid third-party declarations hidden by skipLibCheck.
 bool_flag(
     name = "lib_check",

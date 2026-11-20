@@ -16,6 +16,7 @@ go_library(
         "paths.go",
         "showconfig.go",
         "tsgo.go",
+        "typeview.go",
     ],
     importpath = "github.com/mikn/rules_typescript/ts/tools/tsaction",
     visibility = ["//visibility:private"],
@@ -48,6 +49,7 @@ go_test(
         "paths_test.go",
         "showconfig_test.go",
         "tsgo_test.go",
+        "typeview_test.go",
     ],
     data = glob(["testdata/**"]) + [
         "//tools/copy_to_workspace",

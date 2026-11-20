@@ -65,6 +65,9 @@ store; a workspace member's hub view forwards the member's.
                      "holds with the trees they enter, and its first-party " +
                      "deps' npm_files. An action stages this and nothing " +
                      "else of the store.",
+        "npm_view_files": "depset of File: `npm_files` with each store tree's " +
+                          "type view and the views' links in place of the trees " +
+                          "and links, what a type action stages under --//ts:type_views.",
         "owners": "depset of struct(label, files, declarations, type_inputs, importers) " +
                   "with optional declaration_files, canonical_links, asset_files, runtime_files, runtime_scopes, scope_manifest, replaced_scope and npm_bindings: one " +
                   "record per first-party target in the closure, this one " +
@@ -131,6 +134,7 @@ def ts_info(
         transitive_es_twins = _EMPTY,
         npm_packages = _EMPTY,
         npm_files = _EMPTY,
+        npm_view_files = _EMPTY,
         label = None,
         source_files = None,
         generated_inputs = None):
@@ -170,6 +174,7 @@ def ts_info(
         transitive_es_twins = transitive_es_twins,
         npm_packages = npm_packages,
         npm_files = npm_files,
+        npm_view_files = npm_view_files,
         owners = owners,
     )
 
@@ -329,6 +334,7 @@ on the chain carries it as `NodeModulesInfo.hoist`.""",
                    "the declared symlink alone, with no dependency on the " +
                    "member's tree; a consumer's closure holds the tree " +
                    "through the member's link target.",
+        "view_members": "dict of string -> File: `members`' twins in the type views' layout.",
         "member_names": "dict of string -> string: per workspace member " +
                         "of the lockfile, hoisted or not, its directory " +
                         "from the workspace root -> its package name.",
@@ -342,6 +348,7 @@ a workspace member beside the member's own TsInfo and NpmPackageInfo.""",
     fields = {
         "link": "File: the declared symlink `node_modules/<name>`.",
         "store": "NpmStoreInfo: the store the link enters.",
+        "view_link": "File: the link's twin in the type views' layout, into the store's view.",
     },
 )
 

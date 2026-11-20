@@ -26,6 +26,7 @@ const usage = `usage:
   tsaction stamp -stamp=FILE [-runtime_scope=JSON]... [-- TOOL [ARG...]]
   tsaction stage -out=DIR SRC DEST [SRC DEST...]
   tsaction native-view -spec=FILE
+  tsaction typeview -in=DIR -out=DIR
   tsaction tar -out=FILE -dir=DIR [-prefix=P]
   tsaction tsconfig -tsgo=BIN [-tsconfig=FILE] -baseline=FILE -out=FILE -options=FILE
       -bin_dir=DIR [-jsx=preserve] [-module=KIND] [-types_dep=NAME]...
@@ -57,6 +58,8 @@ func main() {
 		err = nativeView(args)
 	case "stage":
 		err = stage(args)
+	case "typeview":
+		err = typeView(args)
 	case "tar":
 		err = writeTar(args)
 	case "tsconfig":
