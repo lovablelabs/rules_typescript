@@ -110,10 +110,10 @@ def _tsgo_check_impl(ctx):
     expected = list(ctx.attr.lines)
     for dep in ctx.attr.npm_direct:
         info = dep[NpmPackageInfo]
-        expected.append("npm-direct\t{}\t{}".format(info.package_name, info.store.tree.path))
+        expected.append("npm-direct\t{}\t{}".format(info.package_name, info.store.view.path))
     for dep, label in ctx.attr.npm_reachable.items():
         info = dep[NpmPackageInfo]
-        expected.append("npm\t{}\t{}\t{}".format(info.package_name, label, info.store.tree.path))
+        expected.append("npm\t{}\t{}\t{}".format(info.package_name, label, info.store.view.path))
     for line in expected:
         asserts.true(
             env,

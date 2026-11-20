@@ -24,16 +24,16 @@ def _runtime_is_the_chain_impl(ctx):
         importer = ctx.bin_dir.path + "/tests/npm/node_modules"
         asserts.equals(
             env,
-            ["-node_modules=" + importer],
+            ["-node_modules=" + importer + ".types/node_modules"],
             [a for a in tsgo[0].argv if a.startswith("-node_modules=")],
-            "tsgo resolves through the importer's node_modules",
+            "tsgo resolves through the importer's type view links",
         )
         asserts.true(
             env,
             len([
                 f
                 for f in tsgo[0].inputs.to_list()
-                if f.path == importer + "/zod"
+                if f.path == importer + ".types/node_modules/zod"
             ]) == 1,
             "zod, declared by the ts_compile dep alone, is staged through " +
             "the dep's npm_files",

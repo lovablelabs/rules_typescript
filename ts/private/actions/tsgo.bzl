@@ -62,8 +62,14 @@ def _npm_declared_line(link):
 def _npm_reachable_line(npm_info):
     return "npm\t{}\t{}\t{}".format(npm_info.package_name, npm_hub_label(npm_info), npm_info.store.tree.path)
 
-def ownership_manifest(ctx, own, direct, owners, npm_declared, npm_reachable):
-    """`npm_reachable` holds NpmPackageInfo; every closure-sized line is rendered at execution."""
+def _npm_reachable_view_line(npm_info):
+    return "npm\t{}\t{}\t{}".format(npm_info.package_name, npm_hub_label(npm_info), npm_info.store.view.path)
+
+def ownership_manifest(ctx, own, direct, owners, npm_declared, npm_reachable, views = False):
+    """`npm_reachable` holds NpmPackageInfo; every closure-sized line is rendered at execution.
+
+    `views` names each reachable package by its type view in place of its tree.
+    """
     manifest = ctx.actions.declare_file("{}.ownership".format(ctx.label.name))
     lines = ctx.actions.args()
     lines.set_param_file_format("multiline")
@@ -72,7 +78,7 @@ def ownership_manifest(ctx, own, direct, owners, npm_declared, npm_reachable):
     lines.add_all(direct, format_each = "direct\t%s")
     lines.add_all(owners, map_each = _owner_lines)
     lines.add_all(npm_declared, map_each = _npm_declared_line)
-    lines.add_all(npm_reachable, map_each = _npm_reachable_line)
+    lines.add_all(npm_reachable, map_each = _npm_reachable_view_line if views else _npm_reachable_line)
     ctx.actions.write(output = manifest, content = lines)
     return manifest
 
