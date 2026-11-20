@@ -6,11 +6,13 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -196,6 +198,36 @@ func serve(it *harness.IT, served *registry) (address string, port int) {
 	return address, port
 }
 
+func repoName(it *harness.IT, suffix string) string {
+	external := filepath.Join(it.OutputBase, "external")
+	names := it.Glob(external, "", suffix)
+	if len(names) != 1 {
+		it.Fail("want one *%s repository under %s, got %v", suffix, external, names)
+	}
+	return names[0]
+}
+
+func fetch(it *harness.IT, env string, repos ...string) {
+	args := []string{"fetch", env}
+	for _, repo := range repos {
+		args = append(args, "--repo=@@"+repo)
+	}
+	it.MustBazel(args...)
+}
+
+// Bazel records each variable a fetch read, token included, beside a repo
+// contents cache entry, so a repository that read one must stay out of it.
+func requireLinked(it *harness.IT, suffix string, want bool) {
+	name := repoName(it, suffix)
+	info, err := os.Lstat(filepath.Join(it.OutputBase, "external", name))
+	if err != nil {
+		it.Fail("cannot stat %s: %v", name, err)
+	}
+	if linked := info.Mode()&fs.ModeSymlink != 0; linked != want {
+		it.Fail("%s: a link into the repo contents cache is %v, want %v", name, linked, want)
+	}
+}
+
 func authSetting(registry, token string) string {
 	return "--repo_env=PNPM_CONFIG__AUTH=" +
 		fmt.Sprintf(`{"%s":{"@lumen":{"authToken":"%s"}}}`, registry, token)
@@ -341,6 +373,29 @@ func main() {
 		}
 		it.Pass("PNPM_CONFIG__AUTH's authToken arrived as an " +
 			"Authorization: Bearer header")
+
+		tsgo := "+tsgo_" + runtime.GOOS + "_" + runtime.GOARCH
+		tsgoRepo := "rules_typescript++ts" + tsgo
+		acmeSpoke, lumenSpoke := "+npm__acme_greeter__1_0_0", "+npm__lumen_greeter__1_0_0"
+
+		// tsgo comes from registry.npmjs.org, which no .npmrc line covers, so
+		// it reads no ${VAR}: only the spoke that does is kept out.
+		fetch(it, rightAcme, repoName(it, acmeSpoke), tsgoRepo)
+		requireLinked(it, tsgo, true)
+		requireLinked(it, acmeSpoke, false)
+		it.Pass("a fetch that read only the .npmrc's ${ACME_TOKEN} is not in the repo contents cache")
+		fetch(it, rightAuth, repoName(it, lumenSpoke), tsgoRepo)
+		requireLinked(it, lumenSpoke, false)
+		requireLinked(it, tsgo, false)
+		it.Pass("every fetch that read a set PNPM_CONFIG__AUTH is not in the repo contents cache")
+
+		it.Write(it.Path(".npmrc"), fmt.Sprintf(`registry=%s/__default__/
+@acme:registry=%s
+//127.0.0.1:%d/:_authToken=%s
+`, acmeAddress, acmeAddress, acmePort, acmeToken))
+		fetch(it, "--repo_env=ACME_TOKEN=", repoName(it, acmeSpoke))
+		requireLinked(it, acmeSpoke, false)
+		it.Pass("a fetch with a literal .npmrc _authToken is not in the repo contents cache")
 
 		if strings.Contains(lumen.log(), acmeToken) {
 			lumen.dump("lumen")

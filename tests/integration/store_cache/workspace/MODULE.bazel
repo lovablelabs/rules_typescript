@@ -24,3 +24,6 @@ register_toolchains(
 npm = use_extension("@rules_typescript//npm:extensions.bzl", "npm")
 npm.translate_lock(pnpm_lock = "//:pnpm-lock.yaml")
 use_repo(npm, "npm")
+
+tools_fixture = use_extension("//:tools_fixture.bzl", "tools_fixture")
+use_repo(tools_fixture, "tools_fixture", "tools_unpinned")
