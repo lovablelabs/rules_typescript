@@ -365,9 +365,10 @@ func throughNpmInputs(inputs []npmInput, listed string) (string, error) {
 			member = strings.TrimPrefix(filepath.ToSlash(at)[len(packageRoot):], "/")
 		}
 		file := filepath.Join(input.physical, filepath.FromSlash(member))
-		// One stat rules out another file; EvalSymlinks walks every component.
+		// One stat rules out a missing or another file; EvalSymlinks walks every component.
 		if listedErr == nil {
-			if info, err := os.Stat(file); err == nil && !os.SameFile(info, listedFile) {
+			info, err := os.Stat(file)
+			if errors.Is(err, fs.ErrNotExist) || err == nil && !os.SameFile(info, listedFile) {
 				continue
 			}
 		}
