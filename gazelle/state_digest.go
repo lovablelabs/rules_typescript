@@ -825,7 +825,7 @@ func (d *stateHasher) store(s *programStore) {
 
 // emission leaves out its memos and the counters that stamp them: versions,
 // epoch, listEpoch, outputsGeneration, rulesGeneration, outputIndex,
-// registered and the crawl memo.
+// registered and the crawl memo; and stored and storedAt, which list rules again.
 func (d *stateHasher) emission(g *emissionGraph) {
 	if g == nil {
 		d.int(0)

@@ -278,6 +278,19 @@ func TestNpmPackageName(t *testing.T) {
 		{"web/node_modules/@types/culori/index.d.ts", "@types/culori"},
 		{"web/src/app.tsx", ""},
 		{"node_modules/@types", ""},
+		{"node_modules/@types/react", ""},
+		{"node_modules/zod", ""},
+		{"node_modules/", ""},
+		{"node_modules", ""},
+		{"/node_modules/zod/index.d.ts", "zod"},
+		{"web/not_node_modules/zod/index.d.ts", ""},
+		{"not_node_modules/zod/index.d.ts", ""},
+		{"web/node_modules//index.d.ts", ""},
+		{"web/node_modules/@/react/index.d.ts", "@/react"},
+		{"node_modules/a/node_modules/b", ""},
+		{"node_modules/a/node_modules/@b/c/d", "@b/c"},
+		{"web/node_modules/.pnpm/a@1/node_modules/b/index.d.ts", "b"},
+		{"web/node_modules/.pnpm/@a+b@1/node_modules/@a/b/index.d.ts", "@a/b"},
 	} {
 		if got := npmPackageName(c.listed); got != c.want {
 			t.Errorf("npmPackageName(%q) = %q, want %q", c.listed, got, c.want)

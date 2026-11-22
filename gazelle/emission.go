@@ -20,8 +20,12 @@ import (
 type emissionGraph struct {
 	roots   map[string]bool
 	outputs map[string]bool
-	// Write through setRule and deleteRule, which version each package's rules.
-	rules       map[string]*rule.Rule
+	// Write through setRule, setResolvedRule and deleteRule, which version each package's rules.
+	rules map[string]*rule.Rule
+	// Every key rules has had, each at a position it keeps, for the indexes that read every rule.
+	// The same three writers keep stored in step with rules.
+	stored      []storedRule
+	storedAt    map[string]int
 	versions    map[string]int
 	epoch       int
 	files       map[string]*rule.File
@@ -197,7 +201,34 @@ func (g *emissionGraph) storeRule(key string, r *rule.Rule) {
 		g.outputsGeneration++
 	}
 	g.rules[key] = r
+	g.setStored(key, r, true)
 	g.bump(key)
+}
+
+// storedRule is one key of emissionGraph.rules with what rules holds for it.
+type storedRule struct {
+	key string
+	// rules[key]; present is false while rules has no such key.
+	rule    *rule.Rule
+	present bool
+	// parseLabel(key).
+	label label.Label
+	err   error
+}
+
+func (g *emissionGraph) setStored(key string, r *rule.Rule, present bool) {
+	i, known := g.storedAt[key]
+	if !known {
+		if g.storedAt == nil {
+			g.storedAt = map[string]int{}
+		}
+		i = len(g.stored)
+		g.storedAt[key] = i
+		entry := storedRule{key: key}
+		entry.label, entry.err = parseLabel(key)
+		g.stored = append(g.stored, entry)
+	}
+	g.stored[i].rule, g.stored[i].present = r, present
 }
 
 func (g *emissionGraph) deleteRule(key string) {
@@ -206,6 +237,7 @@ func (g *emissionGraph) deleteRule(key string) {
 	}
 	g.rulesGeneration++
 	delete(g.rules, key)
+	g.setStored(key, nil, false)
 	g.bump(key)
 }
 

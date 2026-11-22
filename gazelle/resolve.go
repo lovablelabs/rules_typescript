@@ -982,7 +982,7 @@ func (s *programStore) storedInputFiles(pkg string, owner *rule.Rule) map[resolv
 
 func suppliedProgramInputs(c *config.Config, from label.Label, dependencies []string, sourceOwner func(string) emissionMode, scopeDemands map[resolve.ImportSpec]inputRole, memo *dependencyMemo) (map[resolve.ImportSpec]inputRole, map[string]bool) {
 	s := getConfig(c).programs
-	supplied := map[resolve.ImportSpec]inputRole{}
+	supplied := make(map[resolve.ImportSpec]inputRole, memo.supplied)
 	suppliedDeps := map[string]bool{}
 	requiredScopes := maps.Clone(scopeDemands)
 	self := emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)
@@ -1060,6 +1060,7 @@ func suppliedProgramInputs(c *config.Config, from label.Label, dependencies []st
 			collect(from, dep, false)
 		}
 	}
+	memo.supplied = len(supplied)
 	return supplied, suppliedDeps
 }
 
@@ -1074,6 +1075,9 @@ type dependencyMemo struct {
 	children map[string][]string
 	// Set once the walk from the retained dependencies reaches only walked owners.
 	walkComplete bool
+	// How many inputs the last suppliedProgramInputs found, the size the next one's map starts at:
+	// minimizing asks again per candidate with one dependency fewer.
+	supplied int
 }
 
 // Read once its sourceOwner settled it: its inputs and compiler deps stay fixed.
@@ -1911,30 +1915,83 @@ type holdingIndex struct {
 	all             []resolve.FindResult
 	compilers       map[string][]resolve.FindResult
 	selves          map[label.Label][]resolve.FindResult
+	// keys[i] reads emission.stored[i].key under repo; the next rebuild on the same emission takes them over.
+	keys []holdingKey
+}
+
+// holdingKey is what storedHoldings reads from an emission key and the repository name alone.
+type holdingKey struct {
+	found resolve.FindResult
+	self  label.Label
+	// The key semanticRule reads the owner by, and its package when that key is a label.
+	ownerKey    string
+	ownerPkg    string
+	ownerParsed bool
+}
+
+func readHoldingKey(repo string, entry *storedRule) holdingKey {
+	if entry.err != nil {
+		return holdingKey{}
+	}
+	found := resolve.FindResult{Label: labelIdentity(entry.label, repo, "")}
+	k := holdingKey{found: found, self: selfKey(found.Label), ownerKey: emissionLabel(repo, found.Label.Pkg, ":"+found.Label.Name)}
+	if own, err := parseLabel(k.ownerKey); err == nil {
+		k.ownerPkg, k.ownerParsed = own.Pkg, true
+	}
+	return k
 }
 
 func (s *programStore) storedHoldings(repo string) *holdingIndex {
 	g := s.emission
-	if h := s.holdingIndex; h != nil && h.emission == g && h.rulesGeneration == g.rulesGeneration && h.repo == repo {
-		return h
+	prev := s.holdingIndex
+	if prev != nil && prev.emission == g && prev.rulesGeneration == g.rulesGeneration && prev.repo == repo {
+		return prev
 	}
 	h := &holdingIndex{emission: g, rulesGeneration: g.rulesGeneration, repo: repo,
 		compilers: map[string][]resolve.FindResult{}, selves: map[label.Label][]resolve.FindResult{}}
-	for key := range g.rules {
-		lbl, err := parseLabel(key)
-		if err != nil {
+	if prev != nil && prev.emission == g && prev.repo == repo {
+		h.keys = prev.keys
+	}
+	for i := len(h.keys); i < len(g.stored); i++ {
+		h.keys = append(h.keys, readHoldingKey(repo, &g.stored[i]))
+	}
+	config := s.packageConfigs()
+	for i := range g.stored {
+		entry, k := &g.stored[i], &h.keys[i]
+		if !entry.present || entry.err != nil {
 			continue
 		}
-		found := resolve.FindResult{Label: labelIdentity(lbl, repo, "")}
-		if owner := s.semanticRule(emissionLabel(repo, found.Label.Pkg, ":"+found.Label.Name)); owner != nil && owner.Kind() == "ts_compile" {
-			h.all = append(h.all, found)
-			h.compilers[found.Label.Pkg] = append(h.compilers[found.Label.Pkg], found)
+		// semanticRule(k.ownerKey), with the key's parse read from k.
+		owner := entry.rule
+		if k.ownerKey != entry.key {
+			owner = g.rules[k.ownerKey]
+		}
+		if owner != nil && k.ownerParsed {
+			owner = canonicalRule(config(k.ownerPkg), owner)
+		}
+		if owner != nil && owner.Kind() == "ts_compile" {
+			h.all = append(h.all, k.found)
+			h.compilers[k.found.Label.Pkg] = append(h.compilers[k.found.Label.Pkg], k.found)
 		} else {
-			h.selves[selfKey(found.Label)] = append(h.selves[selfKey(found.Label)], found)
+			h.selves[k.self] = append(h.selves[k.self], k.found)
 		}
 	}
 	s.holdingIndex = h
 	return h
+}
+
+// packageConfigs reads inputs[pkg].config, once for a run of calls naming the same package:
+// emission.stored is in store order, which keeps most of a package's rules together.
+func (s *programStore) packageConfigs() func(pkg string) *config.Config {
+	var last string
+	var c *config.Config
+	read := false
+	return func(pkg string) *config.Config {
+		if !read || pkg != last {
+			last, c, read = pkg, s.inputs[pkg].config, true
+		}
+		return c
+	}
 }
 
 // FindResult.IsSelfImport compares with label.Label.Equal, which ignores Canonical.

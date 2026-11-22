@@ -90,6 +90,13 @@ func TestOwner_FirstParty(t *testing.T) {
 		"/abs/x.ts":                           false,
 		"web/node_modules/@lovable.dev/pulse/x.ts": false,
 		"my_node_modules/x.ts":                     true,
+		"node_modules":                             false,
+		"node_modules/x.ts":                        false,
+		"web/node_modules":                         false,
+		"web/node_modules_/x.ts":                   true,
+		"web/node_module/x.ts":                     true,
+		"web/es_modules/x.ts":                      true,
+		"../node/x.ts":                             false,
 	} {
 		if got := firstParty(f); got != want {
 			t.Errorf("firstParty(%q) = %v, want %v", f, got, want)
@@ -1053,5 +1060,27 @@ func TestWalkMemo_AWarmSelectionRecordsWhatAColdOneDoes(t *testing.T) {
 	if got, want := warm.programs["lib"], cold.programs["lib"]; !slices.Equal(got.Files, want.Files) || !slices.Equal(got.Edges, want.Edges) ||
 		!slices.Equal(got.candidates, want.candidates) {
 		t.Errorf("lib's program = %v %v, want the cold selection's %v %v", got.Files, got.Edges, want.Files, want.Edges)
+	}
+}
+
+// parentDir answers a path with a clean directory part itself; path.Dir is the reference for both ways.
+func TestOwner_ParentDirIsPathDir(t *testing.T) {
+	elements := []string{"/", "/", ".", "..", "a", "b.ts", ".github", "node_modules", "//", "/./", "@scope"}
+	paths := []string{"", ".", "..", "/", "a", "a/b", "/a", "/a/b", "./a", "../a/b", "a/./b", "a//b", "a/../b", "a/b/", "a/.b/c", ".a/b", "//a", "a/b/.c", "web/src/app.tsx"}
+	for i := range len(elements) * len(elements) * len(elements) * len(elements) {
+		p := ""
+		for n := i; n > 0; n /= len(elements) {
+			p += elements[n%len(elements)]
+		}
+		paths = append(paths, p)
+	}
+	for _, p := range paths {
+		want := path.Dir(p)
+		if want == "." {
+			want = ""
+		}
+		if got := parentDir(p); got != want {
+			t.Errorf("parentDir(%q) = %q, path.Dir gives %q", p, got, want)
+		}
 	}
 }
