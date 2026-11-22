@@ -23,6 +23,10 @@ func firstParty(f string) bool {
 		strings.HasPrefix(f, embeddedLibs) {
 		return false
 	}
+	// "_modules", not "node_modules": on a long path strings.Index hunts the needle's first byte, and '_' is rarer than 'n'.
+	if !strings.Contains(f, "_modules") {
+		return true
+	}
 	return f != "node_modules" && !strings.HasPrefix(f, "node_modules/") && !strings.HasSuffix(f, "/node_modules") &&
 		!strings.Contains(f, "/node_modules/")
 }
@@ -474,6 +478,15 @@ func (s *programStore) requireInput(c *config.Config, ix *resolve.RuleIndex, f, 
 }
 
 func parentDir(p string) string {
+	i := strings.LastIndexByte(p, '/')
+	if i < 0 {
+		return ""
+	}
+	// path.Dir cleans what precedes the last slash, and that is clean already
+	// when no element of it is empty or starts with a dot.
+	if dir := p[:i]; i > 0 && dir[0] != '.' && dir[i-1] != '/' && !strings.Contains(dir, "//") && !strings.Contains(dir, "/.") {
+		return dir
+	}
 	if dir := path.Dir(p); dir != "." {
 		return dir
 	}

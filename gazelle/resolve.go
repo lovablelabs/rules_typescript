@@ -982,7 +982,7 @@ func (s *programStore) storedInputFiles(pkg string, owner *rule.Rule) map[resolv
 
 func suppliedProgramInputs(c *config.Config, from label.Label, dependencies []string, sourceOwner func(string) emissionMode, scopeDemands map[resolve.ImportSpec]inputRole, memo *dependencyMemo) (map[resolve.ImportSpec]inputRole, map[string]bool) {
 	s := getConfig(c).programs
-	supplied := map[resolve.ImportSpec]inputRole{}
+	supplied := make(map[resolve.ImportSpec]inputRole, memo.supplied)
 	suppliedDeps := map[string]bool{}
 	requiredScopes := maps.Clone(scopeDemands)
 	self := emissionLabel(c.RepoName, from.Pkg, ":"+from.Name)
@@ -1060,6 +1060,7 @@ func suppliedProgramInputs(c *config.Config, from label.Label, dependencies []st
 			collect(from, dep, false)
 		}
 	}
+	memo.supplied = len(supplied)
 	return supplied, suppliedDeps
 }
 
@@ -1074,6 +1075,9 @@ type dependencyMemo struct {
 	children map[string][]string
 	// Set once the walk from the retained dependencies reaches only walked owners.
 	walkComplete bool
+	// How many inputs the last suppliedProgramInputs found, the size the next one's map starts at:
+	// minimizing asks again per candidate with one dependency fewer.
+	supplied int
 }
 
 // Read once its sourceOwner settled it: its inputs and compiler deps stay fixed.

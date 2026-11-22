@@ -72,22 +72,27 @@ func parseNpmLock(lines []string, manifestAt func(string) *manifest) *npmLock {
 // npmPackageName is the package a listed node_modules path belongs to: the
 // segments after its last node_modules/, two when the first is a scope.
 func npmPackageName(listed string) string {
-	p := "/" + listed
-	i := strings.LastIndex(p, "/node_modules/")
-	if i < 0 {
+	const marker = "/node_modules/"
+	var rest string
+	if i := strings.LastIndex(listed, marker); i >= 0 {
+		rest = listed[i+len(marker):]
+	} else if strings.HasPrefix(listed, marker[1:]) {
+		rest = listed[len(marker)-1:]
+	} else {
 		return ""
 	}
-	parts := strings.SplitN(p[i+len("/node_modules/"):], "/", 3)
-	if strings.HasPrefix(parts[0], "@") {
-		if len(parts) < 3 {
+	end := strings.IndexByte(rest, '/')
+	if end < 0 {
+		return ""
+	}
+	if strings.HasPrefix(rest, "@") {
+		name := strings.IndexByte(rest[end+1:], '/')
+		if name < 0 {
 			return ""
 		}
-		return parts[0] + "/" + parts[1]
+		end += 1 + name
 	}
-	if len(parts) < 2 {
-		return ""
-	}
-	return parts[0]
+	return rest[:end]
 }
 
 // npmPackageToLabelName is the hub's target name for a package, the twin of

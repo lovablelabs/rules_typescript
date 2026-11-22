@@ -11,3 +11,11 @@
   walks the list and keeps what it derives from a key alone: 2.8 seconds. The
   rebuilds happen at the same points and read the same rules. Output is
   unchanged.
+- **Gazelle's hottest path helpers do less per call.** The parent directory of
+  a path whose directory part is already clean is that part, without
+  `path.Dir`'s pass over it; `firstParty` scans once for `_modules` before its
+  four `node_modules` tests; the package name of a `node_modules` path is cut
+  out of the path instead of split and joined; and the map of supplied inputs
+  that dependency minimization rebuilds per candidate starts at the size the
+  last one reached. Each answers as before. With the index change, the same
+  pass took 52 seconds of wall time where it took 64.
