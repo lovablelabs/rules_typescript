@@ -204,6 +204,38 @@ dropping the record, unless it exits and logs as the record does and leaves the
 walked directories as the recorded run did. `-ts_fastpath=off` never replays an
 edit.
 
+`-ts_fastpath=only` asks whether the BUILD files are provably in sync without
+paying for the full pass, as a `-mode=diff` run before a push does. When the
+run record or an edit replays, the run is the one `on` makes: the same output
+and exit status, and a replayed edit carries the record forward as it does
+under `on`. When neither replays, it never runs the full pass: it logs
+`typescript: fast path: declined (<code>): <detail>`, with or without
+`-ts_verbose`, writes no BUILD file, listing or record, does not create the
+cache directory, and exits with status 3. The code is `no-record` when the
+cache holds no record of a run with these arguments, and otherwise the reason
+the edit does not replay, `mode` among them for an edit only `-mode=fix`
+writes. A record stands for one `-mode` and one set of flags, and an `only`
+run never makes one from a full pass, so the first record of a run comes from
+the same run without `-ts_fastpath=only`. A BUILD edit whose write fails declines
+as `write`, after the run puts back the BUILD files it wrote to.
+
+The flag is an error, with exit status 1, on a run that keeps no run record:
+one without `-ts_listing_cache`, of a named directory or with `-r=false`, of a
+`-mode` other than `fix` or `diff`, of a binary that has another language
+registered (`-lang` does not change that), or with `-patch`, `-cpuprofile`,
+`-memprofile`, `-experimental_read_build_files_dir` or
+`-experimental_write_build_files_dir`. It is also an error with
+`-ts_run_record=off`, which leaves nothing to replay, and with
+`-ts_run_record=verify`, which runs a full pass after a replay. Under
+`-ts_verbose` it declines, as `verbose-log`, the edits that flag runs in full.
+
+When the environment variable `RULES_TYPESCRIPT_GAZELLE_TRACE` names a file,
+the process that produces a run's output appends the path it took to it: a
+replay `run record`, `fast path`, `fast path scan`, `fast path edit` or
+`fast path build edit`, a full pass `full pass`, and a declined `only` run
+`declined <code>`. A process that spawns a full pass and waits for it appends
+nothing, so a run that does not replay leaves the one line of its full pass.
+
 ## The Package Model
 
 A directory is a package when its `tsconfig.json` lists a first-party file: a

@@ -61,7 +61,9 @@ func (l *tsLang) RegisterFlags(fs *flag.FlagSet, _ string, c *config.Config) {
 			"verify then runs a full pass without caches in -mode=diff and fails on any difference; off always runs in full")
 	fs.StringVar(&fastPathMode, "ts_fastpath", "on",
 		"with -ts_listing_cache on a full fix or diff run whose run record no longer matches: on replays the record when every change "+
-			"is a source edit whose new imports the rules already resolve; verify then runs the full pass and fails on any difference; off never does")
+			"is a source edit whose new imports the rules already resolve; verify then runs the full pass and fails on any difference; off never does; "+
+			"only replays as on does and otherwise never runs the full pass: it logs \"typescript: fast path: declined (<code>): <detail>\" "+
+			"and exits 3; it is an error on a run that keeps no run record and with -ts_run_record other than on")
 	fs.BoolVar(&listingPatchVerify, "ts_listing_patch_verify", false,
 		"also list with tsgo every stale listing patched and every files list listed through its config's include, and fail on any difference")
 	fs.StringVar(&listingInProcessMode, "ts_listing_inproc", "on",
@@ -139,10 +141,10 @@ func (l *tsLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	if err := checkModeFlag("ts_parallel", parallelMode); err != nil {
 		return err
 	}
-	if err := checkModeFlag("ts_fastpath", fastPathMode); err != nil {
+	s := getConfig(c).programs
+	if err := checkFastPathFlag(fs, c, s.fullWalk); err != nil {
 		return err
 	}
-	s := getConfig(c).programs
 	if exe, err := os.Executable(); err == nil {
 		incremental.NoteTool(exe)
 	}
