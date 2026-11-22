@@ -683,6 +683,10 @@ func (e *packageEdit) write(restore bool) error {
 	content := e.content
 	if restore {
 		content = e.original
+		// A write that failed before it opened the file left the original, which may not be writable.
+		if now, err := os.ReadFile(e.file); err == nil && bytes.Equal(now, content) {
+			return nil
+		}
 	}
 	if err := os.WriteFile(e.file, content, e.mode.Perm()); err != nil {
 		return fmt.Errorf("writing %s: %w", e.file, err)

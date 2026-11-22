@@ -46,8 +46,10 @@ const (
 	runRecordMagic = "rules_typescript gazelle run record v5"
 	// Set by the run that spawns a recording run: where it leaves its candidate.
 	runRecordCandidateEnv = "RULES_TYPESCRIPT_GAZELLE_RUN_RECORD_CANDIDATE"
-	// A test hook: a file each process appends the path it took to.
+	// A file each process appends the path it took to.
 	runTraceEnv = "RULES_TYPESCRIPT_GAZELLE_TRACE"
+	// The exit status of a -ts_fastpath=only run that neither record replays.
+	exitFastPathDeclined = 3
 	// git's racy-clean rule: a stamp this close to the run's start may hide a
 	// same-size rewrite within one timestamp tick.
 	racyWindow = 2 * time.Second
@@ -806,12 +808,39 @@ func recordKey(magic string, fs *flag.FlagSet, c *config.Config, skip ...string)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func checkModeFlag(flag, mode string) error {
-	switch mode {
-	case "on", "verify", "off":
+// checkModeFlag accepts on, verify, off and the values a flag adds to them.
+func checkModeFlag(flag, mode string, more ...string) error {
+	values := append([]string{"on", "verify", "off"}, more...)
+	if slices.Contains(values, mode) {
 		return nil
 	}
-	return fmt.Errorf("-%s=%q: want on, verify or off", flag, mode)
+	last := len(values) - 1
+	return fmt.Errorf("-%s=%q: want %s or %s", flag, mode, strings.Join(values[:last], ", "), values[last])
+}
+
+// checkFastPathFlag checks -ts_fastpath, which also takes only. That value
+// replays or exits without the full pass, so it is an error where no run
+// record stands for the run, where -ts_run_record=verify would run that pass,
+// and in a recording run, which is that pass. A recording run gets the
+// arguments of the run that spawns it, and an only run spawns none, so the
+// last takes a candidate variable set by hand.
+func checkFastPathFlag(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
+	if err := checkModeFlag("ts_fastpath", fastPathMode, "only"); err != nil || fastPathMode != "only" {
+		return err
+	}
+	switch {
+	case runInputs != nil:
+		return fmt.Errorf("-ts_fastpath=only with %s set: the variable marks the full pass another run spawns to record, which -ts_fastpath=only never runs; unset it",
+			runRecordCandidateEnv)
+	case runRecordMode != "on":
+		return fmt.Errorf("-ts_fastpath=only with -ts_run_record=%s: -ts_fastpath=only replays the run record or an edit, or exits %d without the full pass; "+
+			"it needs -ts_run_record=on", runRecordMode, exitFastPathDeclined)
+	case !runRecordApplies(fs, c, fullWalk):
+		return errors.New("-ts_fastpath=only: no run record stands for this run, so nothing can replay; it needs -ts_listing_cache and a recursive " +
+			"-mode=fix or -mode=diff run of the whole repository by a binary whose only language is typescript, without -patch, -cpuprofile, " +
+			"-memprofile, -experimental_read_build_files_dir or -experimental_write_build_files_dir")
+	}
+	return nil
 }
 
 // A profile asks for the work a replay skips.
@@ -847,6 +876,8 @@ func recordableRun(fs *flag.FlagSet, c *config.Config, fullWalk bool) bool {
 // gateOnRunRecord exits when the record replays. Otherwise the full pass runs
 // as a child, which gathers a candidate record, and this process exits with
 // the child's status; it returns only in the process that does the work.
+// Under -ts_fastpath=only no child runs: the process says why nothing
+// replayed and exits exitFastPathDeclined.
 func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if in := runInputs; in != nil {
 		cache, _ := filepath.Abs(listingCacheDir)
@@ -869,8 +900,11 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(cache, 0o755); err != nil {
-		return err
+	// An only run writes nothing unless it replays, and a cache that is not there holds no record.
+	if fastPathMode != "only" {
+		if err := os.MkdirAll(cache, 0o755); err != nil {
+			return err
+		}
 	}
 	key := recordKey(runRecordMagic, fs, c, "ts_run_record", "ts_fastpath")
 	file := filepath.Join(cache, runRecordName+"-"+key[:16])
@@ -895,10 +929,26 @@ func gateOnRunRecord(fs *flag.FlagSet, c *config.Config, fullWalk bool) error {
 		}
 		os.Exit(rec.exit)
 	}
-	if lines != nil {
-		tryFastPath(fs, c, file, rec, *lines, stamps)
-		releaseDeclinedFastPath()
+	var why *decline
+	switch {
+	case rec == nil:
+		why = declined(declineNoRecord, "%s is missing or does not load as a run record", file)
+	case rec.key != key:
+		why = declined(declineNoRecord, "%s is the record of another run", file)
+	case lines == nil:
+		why = declined(declineInputs, "a directory the recorded run walked cannot be read")
+	default:
+		why = tryFastPath(fs, c, file, rec, *lines, stamps)
 	}
+	if fastPathMode == "only" {
+		if why == nil {
+			why = declined(declineNoReason, "nothing replayed and the fast path gave no reason")
+		}
+		traceRun("declined " + why.code)
+		log.Printf("typescript: fast path: declined (%s): %s", why.code, why.detail)
+		os.Exit(exitFastPathDeclined)
+	}
+	releaseDeclinedFastPath()
 	candidate := fmt.Sprintf("%s.candidate.%d", file, os.Getpid())
 	code, stdout, stderr := runSelf(os.Args[1:], runRecordCandidateEnv+"="+candidate)
 	if code == 0 {

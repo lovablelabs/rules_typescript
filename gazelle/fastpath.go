@@ -28,7 +28,7 @@ import (
 	"github.com/mikn/rules_typescript/ts/tools/explainfiles"
 )
 
-// fastPathMode is -ts_fastpath: on, verify or off.
+// fastPathMode is -ts_fastpath: on, verify, off or only.
 var fastPathMode = "on"
 
 // importFactsVersion names the shape of importFacts; a record of another shape is never used.
@@ -792,8 +792,10 @@ func readByGazelle(name string) bool {
 
 // ---- the decision -------------------------------------------------------------
 
-// Reason codes for a decline, logged under -ts_verbose.
+// Reason codes for a decline, logged under -ts_verbose or -ts_fastpath=only.
 const (
+	// The cache holds no record of this run, so the fast path is not tried.
+	declineNoRecord         = "no-record"
 	declineNoFacts          = "no-facts"
 	declineFactsIncomplete  = "facts-incomplete"
 	declineInputs           = "inputs"
@@ -817,6 +819,8 @@ const (
 	declineWalkOrder        = "walk-order"
 	declineWalkConditional  = "walk-conditional"
 	declineVerboseLog       = "verbose-log"
+	declineWrite            = "write"
+	declineNoReason         = "no-reason"
 	// A gained, renamed or deleted source's own reasons.
 	declineMode      = "mode"
 	declineOverride  = "override"
@@ -2086,21 +2090,23 @@ func walkOutcome(w walkFacts, key, target string, to int32, toKnown bool, toMate
 
 // tryFastPath replays rec for a tree it no longer matches when decideFastPath
 // proves the full pass would write and log what rec holds, after writing the
-// BUILD edits a gained or lost source makes; it returns only when the full
-// pass has to run.
-func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord, lines inputLines, stamps *newest) {
+// BUILD edits a gained or lost source makes. It returns only when it does not
+// replay, with the reason (nil when -ts_fastpath is off): the caller then runs
+// the full pass, or under -ts_fastpath=only exits.
+func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord, lines inputLines, stamps *newest) *decline {
 	if fastPathMode == "off" {
-		return
+		return nil
 	}
 	decision, why := decideFastPath(rec, c.RepoRoot, c.RepoName, c.ValidBuildFileNames, lines, stamps, flagValue(fs, "exclude"), buildSnapshotFile(file))
 	if mode := flagValue(fs, "mode"); why == nil && len(decision.edits) > 0 && mode != "fix" {
 		why = declined(declineMode, "-mode=%s; only fix writes the BUILD edit", mode)
 	}
 	if why != nil {
-		if listingVerbose {
+		// Under only the caller logs it, verbose or not.
+		if listingVerbose && fastPathMode != "only" {
 			log.Printf("typescript: fast path: declined (%s): %s", why.code, why.detail)
 		}
-		return
+		return why
 	}
 	decision.buildNames, decision.skipDir = c.ValidBuildFileNames, filepath.Dir(file)
 	if fastPathMode == "verify" {
@@ -2110,8 +2116,12 @@ func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord
 		os.Exit(verifyFastPath(fs, file, rec, decision))
 	}
 	if err := decision.writeEdits(); err != nil {
-		log.Printf("typescript: fast path: %v; running the full pass", err)
-		return
+		// A failed restore joins the failed write on a line of its own.
+		why := declined(declineWrite, "%s", strings.ReplaceAll(err.Error(), "\n", "; "))
+		if fastPathMode != "only" {
+			log.Printf("typescript: fast path: %s; running the full pass", why.detail)
+		}
+		return why
 	}
 	decision.carryForward(file, rec, true)
 	switch {
@@ -2138,6 +2148,7 @@ func tryFastPath(fs *flag.FlagSet, c *config.Config, file string, rec *runRecord
 		}
 	}
 	os.Exit(rec.exit)
+	return nil
 }
 
 // withDirs are the walked directories and their lines with more added, in the record's order.
@@ -2154,11 +2165,12 @@ func withDirs(dirs, lines []string, more map[string]string) ([]string, []string)
 	return keys, values
 }
 
-// writeEdits writes every BUILD edit, or none: a failed write puts back the ones before it.
+// writeEdits writes every BUILD edit, or none: a failed write puts back its
+// own file, which it may have truncated, and the ones before it.
 func (d *fastPathDecision) writeEdits() error {
 	for i, e := range d.edits {
 		if err := e.write(false); err != nil {
-			return errors.Join(err, d.restoreEdits(i))
+			return errors.Join(err, d.restoreEdits(i+1))
 		}
 	}
 	return nil

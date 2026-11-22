@@ -417,23 +417,314 @@ func TestFastPath_ARunThatReplaysResolveKeepsItsFacts(t *testing.T) {
 // processes took, from the trace hook.
 func tracedGazelle(t *testing.T, root string, args ...string) (string, []string) {
 	t.Helper()
+	out, paths, exit := tracedRun(t, root, args...)
+	if exit != 0 {
+		t.Fatalf("gazelle %q: exit status %d\n%s", args, exit, out)
+	}
+	return out, paths
+}
+
+// tracedRun is tracedGazelle for a run that may fail: its exit status comes back too.
+func tracedRun(t *testing.T, root string, args ...string) (string, []string, int) {
+	t.Helper()
+	return tracedRunUnder(t, nil, root, args...)
+}
+
+// tracedRunUnder is tracedRun with the binary's command line appended to wrapper's.
+func tracedRunUnder(t *testing.T, wrapper []string, root string, args ...string) (string, []string, int) {
+	t.Helper()
 	trace := filepath.Join(t.TempDir(), "trace")
 	binary, err := runfiles.Rlocation(os.Getenv("TS_GAZELLE"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(binary, append([]string{"-repo_root=" + root}, args...)...)
+	line := slices.Concat(wrapper, []string{binary, "-repo_root=" + root}, args)
+	command := exec.Command(line[0], line[1:]...)
 	command.Dir = root
 	command.Env = append(os.Environ(), "BUILD_WORKSPACE_DIRECTORY="+root, runTraceEnv+"="+trace)
 	out, err := command.CombinedOutput()
-	if err != nil {
+	if exited := (*exec.ExitError)(nil); err != nil && !errors.As(err, &exited) {
 		t.Fatalf("gazelle %q: %v\n%s", args, err, out)
 	}
 	data, err := os.ReadFile(trace)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
-	return string(out), strings.Split(strings.TrimSpace(string(data)), "\n")
+	return string(out), strings.Split(strings.TrimSpace(string(data)), "\n"), command.ProcessState.ExitCode()
+}
+
+// primeDiffRecord generates the tree, then records a -mode=diff run of it: a
+// record stands only for runs of its own -mode.
+func primeDiffRecord(t *testing.T, root, cache string, args ...string) {
+	t.Helper()
+	if out, err := tsGazelle(t, root); err != nil {
+		t.Fatalf("gazelle: %v\n%s", err, out)
+	}
+	primeFastPath(t, root, cache, append([]string{"-mode=diff"}, args...)...)
+}
+
+// cacheFiles are every file under the cache directory, with what it holds; a
+// directory that is not there holds none.
+func cacheFiles(t *testing.T, cache string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	entries, err := os.ReadDir(cache)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(cache, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[e.Name()] = string(data)
+	}
+	return files
+}
+
+// Under -ts_fastpath=only a run nothing replays for stops there: it names the
+// reason, exits exitFastPathDeclined, and leaves the tree and the cache as
+// they were, so the record still replays once the edit is undone.
+func TestFastPathOnly_ADeclinedRunExitsWithoutTheFullPass(t *testing.T) {
+	requireTsgo(t)
+	inTree := func(edit func(t *testing.T, root string)) func(*testing.T, string, string) {
+		return func(t *testing.T, root, _ string) { edit(t, root) }
+	}
+	// t.TempDir's cleanup cannot remove a directory left unreadable.
+	chmod := func(rel string, mode fs.FileMode) func(t *testing.T, root string) {
+		return func(t *testing.T, root string) {
+			if err := os.Chmod(filepath.Join(root, rel), mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(filepath.Join(root, rel), 0o755) })
+		}
+	}
+	for _, tc := range []struct {
+		name, code string
+		args       []string
+		// do edits a primed tree or cache; without one the cache directory is not there.
+		do func(t *testing.T, root, cache string)
+		// undo puts the tree back, and after is the path the run then takes.
+		undo  func(t *testing.T, root string)
+		after string
+		// needsModes skips a case that file modes do not bind, as root's.
+		needsModes bool
+	}{
+		{name: "no record", code: declineNoRecord},
+		{name: "a record that does not load", code: declineNoRecord, do: func(t *testing.T, _, cache string) {
+			file, _ := onlyRunRecord(t, cache)
+			writeFile(t, file, "not a run record\n")
+		}},
+		{name: "a record of another run", code: declineNoRecord, do: func(t *testing.T, _, cache string) {
+			file, rec := onlyRunRecord(t, cache)
+			rec.key = strings.Repeat("0", len(rec.key))
+			writeRunRecord(t, file, rec)
+		}},
+		{name: "a walked directory that cannot be read", code: declineInputs, needsModes: true,
+			do: inTree(chmod("extra", 0)), undo: chmod("extra", 0o755), after: "run record"},
+		{name: "an edit the fast path does not model", code: declineNotSource,
+			do: inTree(editFile("app/f.test.ts", "export const f = 6;\n")), undo: removeFile("app/f.test.ts"), after: "run record"},
+		{name: "a BUILD edit only -mode=fix writes", code: declineMode,
+			do: inTree(editFile("app/f.ts", "export const f = 6;\n")), undo: removeFile("app/f.ts"), after: "run record"},
+		{name: "an edit that changes the -ts_verbose log", code: declineVerboseLog, args: []string{"-ts_verbose"},
+			do:   inTree(editFile("app/d.ts", "import { b } from './b';\nexport const d = b;\n")),
+			undo: editFile("app/d.ts", fastPathTree()["app/d.ts"]), after: "fast path scan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.needsModes && os.Geteuid() == 0 {
+				t.Skip("file modes do not bind root")
+			}
+			root := writeTree(t, fastPathTree())
+			cache := filepath.Join(t.TempDir(), "cache")
+			if tc.do == nil {
+				if out, err := tsGazelle(t, root); err != nil {
+					t.Fatalf("gazelle: %v\n%s", err, out)
+				}
+			} else {
+				primeDiffRecord(t, root, cache, tc.args...)
+			}
+			builds := buildFileBytes(t, root)
+			if tc.do != nil {
+				tc.do(t, root, cache)
+			}
+			cached := cacheFiles(t, cache)
+			args := append([]string{"-ts_listing_cache=" + cache, "-mode=diff", "-ts_fastpath=only"}, tc.args...)
+			out, paths, exit := tracedRun(t, root, args...)
+			if exit != exitFastPathDeclined {
+				t.Errorf("exit status %d, want %d:\n%s", exit, exitFastPathDeclined, out)
+			}
+			if want := []string{"declined " + tc.code}; !slices.Equal(paths, want) {
+				t.Errorf("the run took %q, want %q:\n%s", paths, want, out)
+			}
+			reason := "typescript: fast path: declined (" + tc.code + "): "
+			if strings.Count(out, "fast path: declined") != 1 || !strings.Contains(out, reason) {
+				t.Errorf("want one %q line in the log:\n%s", reason, out)
+			}
+			if tc.args == nil && strings.Count(out, "\n") != 1 {
+				t.Errorf("want the reason and nothing else:\n%s", out)
+			}
+			if diff := snapshotDiff(cached, cacheFiles(t, cache)); diff != "" {
+				t.Errorf("the declined run wrote to the cache: %s", diff)
+			}
+			if _, err := os.Stat(cache); tc.do == nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the declined run made the cache directory: %v", err)
+			}
+			if tc.undo != nil {
+				tc.undo(t, root)
+			}
+			if diff := snapshotDiff(builds, buildFileBytes(t, root)); diff != "" {
+				t.Errorf("the declined run wrote a BUILD file: %s", diff)
+			}
+			if tc.undo == nil {
+				return
+			}
+			out, paths, exit = tracedRun(t, root, args...)
+			if exit != 0 || !slices.Equal(paths, []string{tc.after}) {
+				t.Errorf("with the edit undone the run exits %d by %q, want 0 by %q:\n%s", exit, paths, tc.after, out)
+			}
+		})
+	}
+}
+
+// A BUILD edit that fails part way has truncated its file. Under
+// -ts_fastpath=only no full pass rewrites it, so the run puts the original
+// back before it declines, and says so on one line even when that fails too.
+func TestFastPathOnly_AFailedBuildWriteLeavesTheBuildFileAsItWas(t *testing.T) {
+	requireTsgo(t)
+	const shell = "/bin/sh"
+	if _, err := os.Stat(shell); err != nil {
+		t.Skipf("no %s to limit the file size with: %v", shell, err)
+	}
+	for _, tc := range []struct {
+		name string
+		// blocks is the largest file the run may write, in the shell's blocks of
+		// 512 or 1024 bytes: the BUILD file holds less than one and its edit more than two.
+		blocks   string
+		restored bool
+	}{
+		{"the original fits the limit", "1", true},
+		{"nothing fits the limit", "0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeTree(t, fastPathTree())
+			cache := t.TempDir()
+			primeFastPath(t, root, cache)
+			for i := range 5 {
+				writeFile(t, filepath.Join(root, "lib", fmt.Sprintf("%s%d.ts", strings.Repeat("w", 240), i)), "export const w = 1;\n")
+			}
+			builds := buildFileBytes(t, root)
+			limited := []string{shell, "-c", "ulimit -f " + tc.blocks + ` && exec "$@"`, shell}
+			out, paths, exit := tracedRunUnder(t, limited, root, "-ts_listing_cache="+cache, "-ts_fastpath=only")
+			if exit != exitFastPathDeclined || strings.Count(out, "\n") != 1 || !strings.Contains(out, "fast path: declined ("+declineWrite+"): ") {
+				t.Errorf("exit status %d, want %d and the one line of a %s decline:\n%s", exit, exitFastPathDeclined, declineWrite, out)
+			}
+			if !tc.restored {
+				return
+			}
+			if want := []string{"declined " + declineWrite}; !slices.Equal(paths, want) {
+				t.Errorf("the run took %q, want %q:\n%s", paths, want, out)
+			}
+			if diff := snapshotDiff(builds, buildFileBytes(t, root)); diff != "" {
+				t.Errorf("the failed write left a BUILD file changed: %s", diff)
+			}
+		})
+	}
+}
+
+// When the run record or the fast path replays, -ts_fastpath=only is on: the
+// same path, exit status, output and BUILD edit, and the record carried forward.
+func TestFastPathOnly_AReplayIsThatOfOn(t *testing.T) {
+	requireTsgo(t)
+	type step struct {
+		path, out, builds string
+		exit              int
+	}
+	for _, mode := range []string{"diff", "fix"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			runs := map[string][]step{}
+			for _, fastPath := range []string{"on", "only"} {
+				root := writeTree(t, fastPathTree())
+				cache := t.TempDir()
+				if mode == "diff" {
+					primeDiffRecord(t, root, cache)
+				} else {
+					primeFastPath(t, root, cache)
+				}
+				run := func() {
+					t.Helper()
+					out, paths, exit := tracedRun(t, root, "-ts_listing_cache="+cache, "-mode="+mode, "-ts_fastpath="+fastPath)
+					runs[fastPath] = append(runs[fastPath], step{strings.Join(paths, ", "), out, fmt.Sprint(buildFileBytes(t, root)), exit})
+				}
+				run()
+				writeFile(t, filepath.Join(root, "app/d.ts"), "import { b } from './b';\nexport const d = b;\n")
+				time.Sleep(pastRacyWindow)
+				run()
+				run()
+				if mode == "fix" {
+					writeFile(t, filepath.Join(root, "app/f.ts"), "export const f = 6;\n")
+					same := requireAsCacheless(t, root, "a new source under -ts_fastpath="+fastPath)
+					run()
+					same()
+				}
+			}
+			want := []string{"run record", "fast path", "run record", "fast path edit"}[:len(runs["on"])]
+			for i, on := range runs["on"] {
+				if on.path != want[i] || on.exit != 0 {
+					t.Errorf("run %d under -ts_fastpath=on exits %d by %q, want 0 by %q:\n%s", i, on.exit, on.path, want[i], on.out)
+				}
+				if only := runs["only"][i]; only != on {
+					t.Errorf("run %d under -ts_fastpath=only differs from on:\n--- on\n%+v\n--- only\n%+v", i, on, only)
+				}
+			}
+		})
+	}
+}
+
+// -ts_fastpath=only promises a replay or an exit without the full pass: a run
+// no run record stands for, or one -ts_run_record keeps from replaying, fails
+// as a usage error before it reads the tree.
+func TestFastPathOnly_ARunNoRecordStandsForIsAUsageError(t *testing.T) {
+	root := writeTree(t, fastPathTree())
+	cache := "-ts_listing_cache=" + t.TempDir()
+	for _, tc := range []struct {
+		name, want string
+		args       []string
+	}{
+		{"no listing cache", "no run record stands for this run", []string{"-mode=diff"}},
+		{"a named directory", "no run record stands for this run", []string{cache, "-mode=diff", "app"}},
+		{"a walk that does not recurse", "no run record stands for this run", []string{cache, "-mode=diff", "-r=false"}},
+		{"-mode=print", "no run record stands for this run", []string{cache, "-mode=print"}},
+		{"a profile", "no run record stands for this run", []string{cache, "-mode=diff", "-cpuprofile=" + filepath.Join(t.TempDir(), "cpu")}},
+		{"-ts_run_record=off", "it needs -ts_run_record=on", []string{cache, "-mode=diff", "-ts_run_record=off"}},
+		{"-ts_run_record=verify", "it needs -ts_run_record=on", []string{cache, "-mode=diff", "-ts_run_record=verify"}},
+	} {
+		out, paths, exit := tracedRun(t, root, append([]string{"-ts_fastpath=only"}, tc.args...)...)
+		if exit == 0 || exit == exitFastPathDeclined || !strings.Contains(out, "-ts_fastpath=only") || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: exit status %d, want a usage error naming -ts_fastpath=only and %q:\n%s", tc.name, exit, tc.want, out)
+		}
+		if !slices.Equal(paths, []string{""}) || len(buildFileBytes(t, root)) > 0 {
+			t.Errorf("%s: the run took %q and left BUILD files %v, want neither", tc.name, paths, slices.Sorted(maps.Keys(buildFileBytes(t, root))))
+		}
+	}
+	if out, err := tsGazelle(t, root, "-ts_fastpath=never"); err == nil || !strings.Contains(out, "want on, verify, off or only") {
+		t.Errorf("-ts_fastpath=never: want an error listing the values: %v\n%s", err, out)
+	}
+	// A recording run is the full pass: only a run that is not only spawns one, with its own arguments.
+	candidate := filepath.Join(t.TempDir(), "candidate")
+	t.Setenv(runRecordCandidateEnv, candidate)
+	for _, mode := range []string{"fix", "diff"} {
+		out, paths, exit := tracedRun(t, root, "-ts_fastpath=only", cache, "-mode="+mode)
+		if exit == 0 || exit == exitFastPathDeclined || !strings.Contains(out, "-ts_fastpath=only with "+runRecordCandidateEnv+" set") {
+			t.Errorf("-mode=%s in a recording run: exit status %d, want a usage error naming %s:\n%s", mode, exit, runRecordCandidateEnv, out)
+		}
+		left, _ := os.ReadDir(filepath.Dir(candidate))
+		if !slices.Equal(paths, []string{""}) || len(buildFileBytes(t, root)) > 0 || len(left) > 0 {
+			t.Errorf("-mode=%s in a recording run: the run took %q and left BUILD files %v and %v, want none", mode, paths, slices.Sorted(maps.Keys(buildFileBytes(t, root))), left)
+		}
+	}
 }
 
 // A source gained, renamed or deleted inside a package changes only that
