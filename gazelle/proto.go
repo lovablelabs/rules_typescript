@@ -448,15 +448,14 @@ func (s *programStore) protoProviderIndex() *protoIndex {
 	}
 	index := &protoIndex{emission: g, rulesGeneration: g.rulesGeneration,
 		natives: map[resolve.ImportSpec][]label.Label{}, wrappers: map[resolve.ImportSpec][]label.Label{}}
-	for key, r := range g.rules {
-		if r == nil {
+	config := s.packageConfigs()
+	for i := range g.stored {
+		entry := &g.stored[i]
+		if !entry.present || entry.rule == nil || entry.err != nil {
 			continue
 		}
-		owner, err := parseLabel(key)
-		if err != nil {
-			continue
-		}
-		ownerConfig := s.inputs[owner.Pkg].config
+		r, owner := entry.rule, entry.label
+		ownerConfig := config(owner.Pkg)
 		effective := canonicalRule(ownerConfig, r)
 		f := &rule.File{Pkg: owner.Pkg}
 		if effective.Kind() == "proto_library" {

@@ -5,10 +5,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
+	"github.com/bazelbuild/bazel-gazelle/label"
+	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	"github.com/bazelbuild/bazel-gazelle/walk"
 )
@@ -1313,5 +1317,204 @@ func TestEmission_CrawlRecordsTheDepChainOfALoadAfterAMidCrawlInvalidation(t *te
 	snap := &buildSnapshot{Edges: s.buildFacts.crawlEdges, Loads: s.buildFacts.crawlLoads}
 	if s.emission.rules["//z"] == nil || snap.cutLoad([]crawlEdge{{"//p", "//n"}}) == nil {
 		t.Fatalf("dropping //p's dep on //n leaves z unloaded, but the facts keep the load: %+v %v", snap.Loads, snap.Edges)
+	}
+}
+
+// ruleIndexes is both rule indexes' content with every list sorted.
+type ruleIndexes struct {
+	All               []string
+	Compilers, Selves map[string][]string
+	Natives, Wrappers map[resolve.ImportSpec][]string
+}
+
+func (x *ruleIndexes) sort() *ruleIndexes {
+	slices.Sort(x.All)
+	for _, lists := range []map[string][]string{x.Compilers, x.Selves} {
+		for _, list := range lists {
+			slices.Sort(list)
+		}
+	}
+	for _, lists := range []map[resolve.ImportSpec][]string{x.Natives, x.Wrappers} {
+		for _, list := range lists {
+			slices.Sort(list)
+		}
+	}
+	return x
+}
+
+func newRuleIndexes() *ruleIndexes {
+	return &ruleIndexes{Compilers: map[string][]string{}, Selves: map[string][]string{},
+		Natives: map[resolve.ImportSpec][]string{}, Wrappers: map[resolve.ImportSpec][]string{}}
+}
+
+// The rule indexes read emission.stored; the reference reads emission.rules key by key.
+func TestEmission_RuleIndexesReadWhatRulesHolds(t *testing.T) {
+	c := config.New()
+	c.RepoName = "repo"
+	tc := defaultTsConfig()
+	c.Exts[languageName] = tc
+	mapped := c.Clone()
+	mapped.KindMap = map[string]config.MappedKind{"ts_compile": {FromKind: "ts_compile", KindName: "custom_compile", KindLoad: "//:defs.bzl"}}
+	s := tc.programs
+	s.repoConfig = c
+	s.emission = &emissionGraph{roots: map[string]bool{}, outputs: map[string]bool{}, rules: map[string]*rule.Rule{}, files: map[string]*rule.File{}}
+	for _, pkg := range []string{"", "a", "b", "protos"} {
+		s.inputs[pkg] = programInput{config: c}
+	}
+	s.inputs["mapped"] = programInput{config: mapped}
+	g := s.emission
+	text := func(l label.Label) string { return fmt.Sprintf("%s canonical=%t", l, l.Canonical) }
+	key := func(pkg, name string) string { return emissionLabel(c.RepoName, pkg, ":"+name) }
+	reference := func() *ruleIndexes {
+		x := newRuleIndexes()
+		for key, r := range g.rules {
+			lbl, err := parseLabel(key)
+			if err != nil {
+				continue
+			}
+			found := labelIdentity(lbl, c.RepoName, "")
+			if owner := s.semanticRule(emissionLabel(c.RepoName, found.Pkg, ":"+found.Name)); owner != nil && owner.Kind() == "ts_compile" {
+				x.All = append(x.All, text(found))
+				x.Compilers[found.Pkg] = append(x.Compilers[found.Pkg], text(found))
+			} else {
+				x.Selves[text(selfKey(found))] = append(x.Selves[text(selfKey(found))], text(found))
+			}
+			if r == nil {
+				continue
+			}
+			ownerConfig := s.inputs[lbl.Pkg].config
+			effective := canonicalRule(ownerConfig, r)
+			if effective.Kind() == "proto_library" {
+				for _, spec := range nativeProtoImports(effective, lbl.Pkg) {
+					x.Natives[spec] = append(x.Natives[spec], text(absoluteProtoLabel(ownerConfig, lbl, "")))
+				}
+			}
+			for _, spec := range protoImportsForRule(ownerConfig, effective, &rule.File{Pkg: lbl.Pkg}) {
+				x.Wrappers[spec] = append(x.Wrappers[spec], text(absoluteProtoLabel(ownerConfig, lbl, "")))
+			}
+		}
+		return x.sort()
+	}
+	indexes := func() *ruleIndexes {
+		x := newRuleIndexes()
+		h := s.storedHoldings(c.RepoName)
+		for _, found := range h.all {
+			x.All = append(x.All, text(found.Label))
+		}
+		for pkg, list := range h.compilers {
+			for _, found := range list {
+				x.Compilers[pkg] = append(x.Compilers[pkg], text(found.Label))
+			}
+		}
+		for self, list := range h.selves {
+			for _, found := range list {
+				x.Selves[text(self)] = append(x.Selves[text(self)], text(found.Label))
+			}
+		}
+		index := s.protoProviderIndex()
+		for spec, owners := range index.natives {
+			for _, owner := range owners {
+				x.Natives[spec] = append(x.Natives[spec], text(owner))
+			}
+		}
+		for spec, owners := range index.wrappers {
+			for _, owner := range owners {
+				x.Wrappers[spec] = append(x.Wrappers[spec], text(owner))
+			}
+		}
+		return x.sort()
+	}
+	newRule := func(kind, name string, attrs map[string]any) *rule.Rule {
+		r := rule.NewRule(kind, name)
+		for attr, value := range attrs {
+			r.SetAttr(attr, value)
+		}
+		return r
+	}
+	proto := newRule("proto_library", "p", map[string]any{"srcs": []string{"p.proto"}})
+	compile := newRule("ts_compile", "a", nil)
+	for _, step := range []struct {
+		name string
+		do   func()
+	}{
+		{"the first stores", func() {
+			g.setRule(key("a", "a"), compile)
+			g.setRule(key("a", "a_test"), newRule("ts_test", "a_test", nil))
+			g.setRule(key("b", "b"), newRule("ts_compile", "b", nil))
+			g.setRule(key("mapped", "m"), newRule("custom_compile", "m", nil))
+			g.setRule(key("protos", "p"), proto)
+			g.setRule(key("protos", "p_ts"), newRule("ts_proto_library", "p_ts", map[string]any{"out_dir": "gen", "proto": ":p"}))
+		}},
+		{"keys that are no label, a key in another spelling and a key of another repository", func() {
+			g.setRule("", newRule("exports_files", "", nil))
+			g.setRule("//a:b:c", newRule("ts_compile", "odd", nil))
+			g.setRule("//b:b", newRule("filegroup", "b", nil))
+			g.setRule("@other//a:a", newRule("filegroup", "a", nil))
+		}},
+		{"a resolved rule of another kind stored over a compiler", func() {
+			g.setResolvedRule(key("a", "a"), newRule("ts_test", "a", nil))
+		}},
+		{"the same rule stored again", func() { g.setResolvedRule(key("a", "a"), g.rules[key("a", "a")]) }},
+		{"a deleted compiler", func() { g.deleteRule(key("b", "b")) }},
+		{"a deleted key stored again", func() { g.setRule(key("b", "b"), newRule("ts_compile", "b", nil)) }},
+		{"a compiler stored after a delete", func() { g.setRule(key("b", "late"), newRule("ts_compile", "late", nil)) }},
+		{"a proto_library's sources edited before its next store", func() {
+			proto.SetAttr("srcs", []string{"p.proto", "q.proto"})
+			g.setRule(key("protos", "p"), proto)
+		}},
+		{"a deleted wrapper", func() { g.deleteRule(key("protos", "p_ts")) }},
+		{"a wrapper stored after its delete", func() {
+			g.setRule(key("protos", "p_ts"), newRule("ts_proto_library", "p_ts", map[string]any{"out_dir": "out", "proto": ":p"}))
+		}},
+	} {
+		step.do()
+		present := map[string]*rule.Rule{}
+		for i, entry := range g.stored {
+			if g.storedAt[entry.key] != i {
+				t.Fatalf("%s: stored[%d] is %q, which storedAt places at %d", step.name, i, entry.key, g.storedAt[entry.key])
+			}
+			if entry.present {
+				present[entry.key] = entry.rule
+			}
+		}
+		if !reflect.DeepEqual(present, g.rules) {
+			t.Fatalf("%s: stored lists %v, rules holds %v", step.name, present, g.rules)
+		}
+		if got, want := indexes(), reference(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: the indexes hold\n%+v\nrules gives\n%+v", step.name, got, want)
+		}
+	}
+	if x := indexes(); len(x.All) == 0 || len(x.Compilers) == 0 || len(x.Selves) == 0 || len(x.Natives) == 0 || len(x.Wrappers) == 0 {
+		t.Fatalf("the steps leave an index empty: %+v", x)
+	}
+}
+
+// A view's emission is a copy of the store's, so its holdings read every key
+// themselves: keys taken over from the store's index would be appended to by
+// every view at once.
+func TestEmission_AViewsHoldingsShareNoKeysWithTheStores(t *testing.T) {
+	c := config.New()
+	c.RepoName = "repo"
+	tc := defaultTsConfig()
+	c.Exts[languageName] = tc
+	s := tc.programs
+	s.repoConfig = c
+	s.emission = &emissionGraph{roots: map[string]bool{}, outputs: map[string]bool{}, rules: map[string]*rule.Rule{}, files: map[string]*rule.File{}}
+	s.inputs["a"] = programInput{config: c}
+	s.emission.setRule(emissionLabel(c.RepoName, "a", ":a"), rule.NewRule("ts_compile", "a"))
+	s.emission.setRule(emissionLabel(c.RepoName, "a", ":a_test"), rule.NewRule("ts_test", "a_test"))
+	own := s.storedHoldings(c.RepoName)
+	view := s.freeze().storedHoldings(c.RepoName)
+	if view == own || len(view.keys) != len(own.keys) || len(own.keys) != 2 {
+		t.Fatalf("the view's index is the store's, or reads other keys: %d and %d keys", len(view.keys), len(own.keys))
+	}
+	if &view.keys[0] == &own.keys[0] {
+		t.Fatal("the view's index took over the keys of the store's index")
+	}
+	if !reflect.DeepEqual(view.all, own.all) || !reflect.DeepEqual(view.selves, own.selves) || len(view.all) != 1 {
+		t.Fatalf("the view lists %v and %v, the store %v and %v", view.all, view.selves, own.all, own.selves)
+	}
+	if s.holdingIndex != own {
+		t.Fatal("the view's rebuild replaced the store's index")
 	}
 }
