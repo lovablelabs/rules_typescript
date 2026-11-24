@@ -601,7 +601,7 @@ func (a *actionConfig) layOutProgramRoot(
 	if err := os.RemoveAll(root); err != nil {
 		return err
 	}
-	if err := linkAt(root, execroot, outputTree); err != nil {
+	if err := linkOutputTree(root, execroot, typeViewHoles(append(append([]string{}, importers...), inherited...))); err != nil {
 		return err
 	}
 	sourceFiles := map[string]string{}
@@ -675,6 +675,16 @@ func (a *actionConfig) layOutProgramRoot(
 		link := filepath.Join(root, at)
 		if err := os.RemoveAll(link); err != nil {
 			return err
+		}
+		// On the full layout a source outside every importer's package walks up
+		// past the program root, which sits in the output tree under the
+		// target's package, into the chain's node_modules there; on views the
+		// root importer's twin holds the chain behind its own names.
+		if i == len(importers)-1 && i > 0 && len(typeViewHoles(importers)) > 0 {
+			if err := mergeImporters(link, execroot, append([]string{binDir}, importers[:i]...)); err != nil {
+				return err
+			}
+			continue
 		}
 		if i == 0 && len(importers) > 2 && skipsAncestors(importers) {
 			if err := mergeImporters(link, execroot, importers[:len(importers)-1]); err != nil {
@@ -794,14 +804,25 @@ func mergeEntries(at, from string, scopes bool) error {
 }
 
 // importerDir is the importer's directory in the exec root, read off its
-// node_modules' bin-dir path bazel-out/<cfg>/bin/<dir>/node_modules.
+// node_modules' bin-dir path bazel-out/<cfg>/bin/<dir>/node_modules, or its
+// type views' twin bazel-out/<cfg>/bin/<dir>/node_modules.types/node_modules.
 func importerDir(binDir string) string {
-	dir := filepath.Dir(filepath.FromSlash(binRelative(binDir)))
+	rel := filepath.ToSlash(binRelative(binDir))
+	if rel == typeViewImporter {
+		return ""
+	}
+	if at, ok := strings.CutSuffix(rel, "/"+typeViewImporter); ok {
+		return filepath.FromSlash(at)
+	}
+	dir := filepath.Dir(filepath.FromSlash(rel))
 	if dir == "." {
 		return ""
 	}
 	return dir
 }
+
+// typeViewImporter is an importer's twin node_modules in the type views' layout.
+const typeViewImporter = "node_modules.types/node_modules"
 
 // An explicit compiler root must keep the File named by its ownership record.
 func overlayPath(root, rootAbs, from, rel string, st os.FileInfo, sourceFiles map[string]string, replaceManifest bool, editor *editorProjection) error {
@@ -873,6 +894,73 @@ func overlayPath(root, rootAbs, from, rel string, st os.FileInfo, sourceFiles ma
 }
 
 // linkAt links the exec root's rel into root at rel, its directories real.
+// typeViewHoles maps the node_modules path of each importer named by its type
+// views' twin to that twin.
+func typeViewHoles(importers []string) map[string]string {
+	holes := map[string]string{}
+	for _, binDir := range importers {
+		if full, ok := strings.CutSuffix(filepath.ToSlash(binDir), ".types/node_modules"); ok && strings.HasSuffix(full, "/node_modules") {
+			holes[full] = binDir
+		}
+	}
+	return holes
+}
+
+// linkOutputTree links the output tree into the program root whole, or, with
+// holes, as real directories down to each hole, every other entry linked, and
+// each hole linked to its twin. The written tsconfig sits in the output tree:
+// TypeScript resolves its types entries walking up from there, and so meets
+// the importers' type views where it meets their trees on the full layout.
+func linkOutputTree(root, execroot string, holes map[string]string) error {
+	if len(holes) == 0 {
+		return linkAt(root, execroot, outputTree)
+	}
+	return splitLink(root, execroot, outputTree, holes)
+}
+
+func splitLink(root, execroot, rel string, holes map[string]string) error {
+	if twin, ok := holes[rel]; ok {
+		return linkTo(filepath.Join(root, rel), filepath.Join(execroot, twin))
+	}
+	var below []string
+	for hole := range holes {
+		if strings.HasPrefix(hole, rel+"/") {
+			below = append(below, hole)
+		}
+	}
+	if len(below) == 0 {
+		return linkAt(root, execroot, rel)
+	}
+	if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+		return err
+	}
+	children := map[string]bool{}
+	entries, err := os.ReadDir(filepath.Join(execroot, rel))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, entry := range entries {
+		children[entry.Name()] = true
+	}
+	for _, hole := range below {
+		next, _, _ := strings.Cut(hole[len(rel)+1:], "/")
+		children[next] = true
+	}
+	for child := range children {
+		if err := splitLink(root, execroot, rel+"/"+child, holes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func linkTo(at, target string) error {
+	if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+		return err
+	}
+	return os.Symlink(target, at)
+}
+
 func linkAt(root, execroot, rel string) error {
 	at := filepath.Join(root, rel)
 	if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {

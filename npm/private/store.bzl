@@ -30,6 +30,12 @@ NpmStoreInfo = provider(
         "transitive": "depset of File: the tree, its links and every " +
                       "dependency store's transitive set, a cut edge's " +
                       "excepted.",
+        "view": "File: the tree's type view, what a type checker reads of " +
+                "it, at `node_modules.types/node_modules/.pnpm/<key>/node_modules/<name>`.",
+        "view_links": "dict of string -> File: the links beside the view, " +
+                      "into the dependencies' views.",
+        "view_transitive": "depset of File: `transitive` with views and " +
+                           "view links in place of trees and links.",
     },
 )
 
@@ -89,6 +95,27 @@ def store_link(ctx, dir, name, store):
     )
     return link
 
+TYPES_DIR = "node_modules.types"
+
+def types_path(path):
+    """The package-relative path of a `node_modules/` path's twin in the type
+    views' layout, the same path under `node_modules.types/`: a view's walk
+    up then meets the twins of the hoist and the importer's links where a
+    tree's meets theirs."""
+    if not path.startswith("node_modules/"):
+        fail("types_path: {} is not under node_modules".format(path))
+    return TYPES_DIR + "/" + path
+
+def store_view_link(ctx, dir, name, store):
+    """The twin of `store_link(ctx, dir, name, store)` in the views' layout,
+    into `store`'s view."""
+    link = ctx.actions.declare_symlink(types_path("{}/{}".format(dir, name)))
+    ctx.actions.symlink(
+        output = link,
+        target_path = _relative(link.dirname, store.view.path),
+    )
+    return link
+
 def _claim(ctx, name, linked, owner):
     if name in linked:
         fail("{}: '{}' linked twice, to {} and {}".format(
@@ -137,6 +164,29 @@ def _dep_links(ctx, parts, cut = {}):
         links[name] = _link_by_name(ctx, parts.links_dir, name, tree)
     return links
 
+def _dep_view_links(ctx, parts, cut = {}):
+    """The links beside the view: `_dep_links`' twins, into the views."""
+    links = {}
+    for dep, names in ctx.attr.deps.items():
+        for name in names.split(" "):
+            links[name] = store_view_link(ctx, parts.links_dir, name, dep[NpmStoreInfo])
+    for name, tree in cut.items():
+        links[name] = _link_by_name(ctx, types_path(parts.links_dir), name, types_path(tree))
+    return links
+
+def _type_view(ctx, tree, view):
+    args = ctx.actions.args()
+    args.add("-in=" + tree.path)
+    args.add("-out=" + view.path)
+    ctx.actions.run(
+        executable = get_tools_toolchain(ctx).tsaction,
+        arguments = ["typeview", args],
+        inputs = [tree],
+        outputs = [view],
+        mnemonic = "NpmTypeView",
+        progress_message = "Writing the type view of %{label}",
+    )
+
 def _stage(ctx, tree, files, dest):
     args = ctx.actions.args()
     args.use_param_file("@%s", use_always = True)
@@ -156,7 +206,10 @@ def _stage(ctx, tree, files, dest):
         progress_message = "Staging %{label}",
     )
 
-def _store_info(ctx, parts, tree, links):
+def _store_info(ctx, parts, tree, links, cut = {}):
+    view = ctx.actions.declare_directory(types_path(ctx.label.name))
+    _type_view(ctx, tree, view)
+    view_links = _dep_view_links(ctx, parts, cut)
     return NpmStoreInfo(
         key = parts.key,
         tree = tree,
@@ -164,6 +217,12 @@ def _store_info(ctx, parts, tree, links):
         transitive = depset(
             [tree] + links.values(),
             transitive = [d[NpmStoreInfo].transitive for d in ctx.attr.deps],
+        ),
+        view = view,
+        view_links = view_links,
+        view_transitive = depset(
+            [view] + view_links.values(),
+            transitive = [d[NpmStoreInfo].view_transitive for d in ctx.attr.deps],
         ),
     )
 
@@ -186,7 +245,7 @@ def _npm_store_impl(ctx):
 
     _stage(ctx, tree, ctx.files.files, dest)
     links = _dep_links(ctx, parts, ctx.attr.cut)
-    info = _store_info(ctx, parts, tree, links)
+    info = _store_info(ctx, parts, tree, links, ctx.attr.cut)
     return [DefaultInfo(files = info.transitive), info]
 
 _DEPS = attr.label_keyed_string_dict(
@@ -349,6 +408,7 @@ def _npm_store_hoist_impl(ctx):
     linked = {}
     links = {}
     members = {}
+    view_members = {}
     for dir, entries, names in (
         (ctx.label.name, ctx.attr.private, ctx.attr.private_members),
         ("node_modules", ctx.attr.public, ctx.attr.public_members),
@@ -358,17 +418,19 @@ def _npm_store_hoist_impl(ctx):
                 links[name] = NpmLinkInfo(
                     link = _link(ctx, dir, name, dep, linked),
                     store = dep[NpmStoreInfo],
+                    view_link = store_view_link(ctx, dir, name, dep[NpmStoreInfo]),
                 )
         for name in names:
             tree = store_target(store_key(name, MEMBER_VERSION, ""), name)
             _claim(ctx, name, linked, ctx.label.same_package_label(tree))
             members[name] = _link_by_name(ctx, dir, name, tree)
+            view_members[name] = _link_by_name(ctx, types_path(dir), name, types_path(tree))
     return [
         DefaultInfo(files = depset(
             [entry.link for entry in links.values()] + members.values(),
             transitive = [entry.store.transitive for entry in links.values()],
         )),
-        NpmHoistInfo(links = links, members = members, member_names = ctx.attr.member_names),
+        NpmHoistInfo(links = links, members = members, view_members = view_members, member_names = ctx.attr.member_names),
     ]
 
 _HOISTED = attr.label_keyed_string_dict(

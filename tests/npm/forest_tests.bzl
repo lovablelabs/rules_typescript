@@ -17,6 +17,13 @@ def _action(env, mnemonic):
             return action
     return None
 
+def _view(rel):
+    """The twin a tsgo action stages of `rel`, the same path under
+    `node_modules.types/`; a bare `node_modules/...` suffix matches both."""
+    if rel.startswith("node_modules/") or "/node_modules/" not in rel:
+        return rel
+    return rel.replace("/node_modules/", "/node_modules.types/node_modules/", 1)
+
 def _chain_impl(ctx):
     env = analysistest.begin(ctx)
     tsgo = _action(env, "TsgoCheck")
@@ -25,7 +32,7 @@ def _chain_impl(ctx):
         return analysistest.end(env)
     asserts.equals(
         env,
-        [ctx.bin_dir.path + "/" + d for d in ctx.attr.chain],
+        [ctx.bin_dir.path + "/" + d + ".types/node_modules" for d in ctx.attr.chain],
         [
             arg[len("-node_modules="):]
             for arg in tsgo.argv
@@ -57,9 +64,9 @@ def _chain_impl(ctx):
         [
             f.path
             for f in inputs
-            if f.is_directory and "/node_modules/.pnpm/" not in f.path
+            if f.is_directory and "/node_modules.types/node_modules/.pnpm/" not in f.path
         ],
-        "every tree input is a store tree",
+        "every tree input is a store tree's type view",
     )
     asserts.equals(
         env,
@@ -68,7 +75,7 @@ def _chain_impl(ctx):
         "no npm file is staged from a source repository",
     )
     staged = [f.short_path for f in inputs]
-    for rel in ctx.attr.linked:
+    for rel in [_view(rel) for rel in ctx.attr.linked]:
         asserts.true(
             env,
             len([p for p in staged if p == rel or p.endswith("/" + rel)]) > 0,

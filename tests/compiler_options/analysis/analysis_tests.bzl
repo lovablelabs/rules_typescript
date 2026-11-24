@@ -49,6 +49,8 @@ def _borrowed_importer_inputs_impl(ctx):
     consumer_companion = source.parent.links["@types/culori"]
     admitted = [source.links["culori"].link, companion.link, consumer_companion.link]
     unrelated = source.links["vitest"].link
+    admitted_views = [source.links["culori"].view_link, companion.view_link, consumer_companion.view_link]
+    unrelated_view = source.links["vitest"].view_link
     asserts.true(env, companion.store.tree != consumer_companion.store.tree, "the fixture must distinguish companion store Files")
     asserts.true(env, all([file in info.npm_files.to_list() for file in admitted]), "each origin retains its package and companion link Files")
     asserts.false(env, unrelated in info.npm_files.to_list(), "another package in the importer does not become an input")
@@ -59,14 +61,14 @@ def _borrowed_importer_inputs_impl(ctx):
         generated = [file for file in info.sources.to_list() if not file.is_source]
         asserts.equals(env, 1, len(generated))
         asserts.true(env, all([file in checks[0].inputs.to_list() for file in generated]), "generated scalar inputs retain the same importer projection")
-        asserts.true(env, all([file in checks[0].inputs.to_list() for file in admitted]), "both companion identities remain compiler action inputs")
-        asserts.false(env, unrelated in checks[0].inputs.to_list(), "unrelated importer links stay outside the action")
-        asserts.true(env, "-inherit_node_modules=" + source.dir in checks[0].argv, "the action mounts the original importer directory")
+        asserts.true(env, all([file in checks[0].inputs.to_list() for file in admitted_views]), "both companion identities remain compiler action inputs")
+        asserts.false(env, unrelated_view in checks[0].inputs.to_list(), "unrelated importer links stay outside the action")
+        asserts.true(env, "-inherit_node_modules=" + source.dir + ".types/node_modules" in checks[0].argv, "the action mounts the original importer directory")
     ownership = _written_file_action(env, ".ownership")
     asserts.true(env, ownership != None, "the compiler retains its direct-store ownership manifest")
     if ownership:
         for selected in [companion, consumer_companion]:
-            asserts.true(env, "npm-direct\t@types/culori\t" + selected.store.tree.path in ownership.content, "companion admission must not overwrite another origin's declaration")
+            asserts.true(env, "npm-direct\t@types/culori\t" + selected.store.view.path in ownership.content, "companion admission must not overwrite another origin's declaration")
     return analysistest.end(env)
 
 borrowed_importer_inputs_test = analysistest.make(
