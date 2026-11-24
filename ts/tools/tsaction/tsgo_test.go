@@ -1271,6 +1271,24 @@ func TestResolveEdges_RepeatedSandboxedStoreFilesEachKeepTheirOwnInput(t *testin
 	}
 }
 
+func TestResolveEdges_AStoreFileOtherInputsLackKeepsItsInput(t *testing.T) {
+	p := newSandboxedProgram(t, 3, 6, 4, 18, 4)
+	tree := binDir + "/node_modules/.pnpm/pkg1@1.0.0/node_modules/pkg1"
+	listed := filepath.Join(filepath.Dir(p.execroot), "real", tree, "lib/only.d.ts")
+	writeFile(t, listed, "export {};\n")
+	at := filepath.Join(p.execroot, tree, "lib/only.d.ts")
+	if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(listed, at); err != nil {
+		t.Fatal(err)
+	}
+	p.edges = []explainfiles.Edge{{From: "app/f0.ts", To: listed}}
+	if got, want := p.resolve(t)[0].To, tree+"/lib/only.d.ts"; got != want {
+		t.Errorf("a file only pkg1 holds resolved to %s, want %s", got, want)
+	}
+}
+
 // The edge counts of a large app's program listing: 27,013 own files, 30,237
 // edges onto 274 npm files of 412 declared stores, 110,080 between own files.
 func BenchmarkResolveEdgesLocalSandbox(b *testing.B) {
