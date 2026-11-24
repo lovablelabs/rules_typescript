@@ -5,7 +5,7 @@ merger, the workspace copier) and the launcher every executable runs through,
 with the repository rules that fetch a compiler binary and a tools release.
 """
 
-load("//npm/private:fetch_auth.bzl", "fetch_auth")
+load("//npm/private:fetch_auth.bzl", "auth_for_fetch")
 load("//platforms:platforms.bzl", "constraints")
 
 # Label(), not a string: these resolve in this file's repository mapping, so
@@ -357,6 +357,8 @@ def _tools_toolchain_repo_impl(repository_ctx):
     repository_ctx.file("BUILD.bazel", (
         "exports_files({}, visibility = [\"//visibility:public\"])\n"
     ).format(repr(TOOLS_BINARIES)))
+
+    # mandatory = True still accepts integrity = "".
     return repository_ctx.repo_metadata(reproducible = bool(repository_ctx.attr.integrity))
 
 tools_toolchain_repo = repository_rule(
@@ -382,29 +384,16 @@ One repository per platform, so that a build fetches only the tools it runs.
 """,
 )
 
-def _auth_for_fetch(repository_ctx, url):
-    npmrc = repository_ctx.attr.npmrc
-    content = ""
-    if npmrc:
-        repository_ctx.watch(npmrc)
-        content = repository_ctx.read(npmrc)
-    return fetch_auth(
-        content,
-        url,
-        repository_ctx.attr.package,
-        repository_ctx.getenv,
-        str(npmrc),
-    )
-
 def _tsgo_toolchain_repo_impl(repository_ctx):
     url = repository_ctx.attr.url
     integrity = repository_ctx.attr.integrity
     binary = repository_ctx.attr.binary
 
+    auth, reproducible = auth_for_fetch(repository_ctx, url)
     download_kwargs = {
         "url": url,
         "stripPrefix": "package",
-        "auth": _auth_for_fetch(repository_ctx, url),
+        "auth": auth,
     }
     if integrity:
         download_kwargs["integrity"] = integrity
@@ -433,7 +422,7 @@ filegroup(
 
 exports_files(["lib/{binary}", "package.json"])
 """.format(binary = binary))
-    return repository_ctx.repo_metadata(reproducible = bool(integrity))
+    return repository_ctx.repo_metadata(reproducible = bool(integrity) and reproducible)
 
 tsgo_toolchain_repo = repository_rule(
     implementation = _tsgo_toolchain_repo_impl,

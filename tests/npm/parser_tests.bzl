@@ -17,7 +17,7 @@ that happens.
 load("@bazel_skylib//lib:partial.bzl", "partial")
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts", "unittest")
 load("//npm:lazy.bzl", "break_cycles", "patch_file_name")
-load("//npm/private:fetch_auth.bzl", "fetch_auth")
+load("//npm/private:fetch_auth.bzl", "auth_for_fetch", "credential_getenv", "fetch_auth")
 load(
     "//npm/private:npm_translate_lock.bzl",
     "npm_tarball_url",
@@ -799,6 +799,86 @@ def _fetch_auth_test(ctx):
 
 fetch_auth_test = unittest.make(_fetch_auth_test)
 
+_NPMJS_ZOD = "https://registry.npmjs.org/zod/-/zod-3.24.2.tgz"
+_ACME_SETTING = json.encode({"https://npm.acme.test": {"@acme": {"authToken": "t"}}})
+
+def _read_credentials(npmrc, url, package, variables):
+    getenv, found = credential_getenv(lambda name, default: variables.get(name, default))
+    fetch_auth(npmrc, url, package, getenv)
+    return found
+
+def _credential_getenv_test(ctx):
+    env = unittest.begin(ctx)
+    npmrc = "//npm.acme.test/:_authToken=${ACME_TOKEN}\n"
+
+    # Bazel records each variable a fetch read, with its value, beside the
+    # repo contents cache entry: every set one read must be reported.
+    asserts.equals(env, ["ACME_TOKEN"], _read_credentials(
+        npmrc,
+        _ACME_WIDGET,
+        "@acme/widget",
+        {"ACME_TOKEN": "secret"},
+    ))
+    asserts.equals(env, ["pnpm_config__auth"], _read_credentials(
+        "",
+        _NPMJS_ZOD,
+        "zod",
+        {"pnpm_config__auth": _ACME_SETTING},
+    ))
+    asserts.equals(env, ["PNPM_CONFIG__AUTH"], _read_credentials(
+        "",
+        _NPMJS_ZOD,
+        "zod",
+        {"PNPM_CONFIG__AUTH": _ACME_SETTING},
+    ))
+    asserts.equals(env, [], _read_credentials(npmrc, _ACME_WIDGET, "@acme/widget", {}))
+    asserts.equals(env, [], _read_credentials(npmrc, _ACME_WIDGET, "@acme/widget", {
+        "ACME_TOKEN": "",
+        "PNPM_CONFIG__AUTH": "",
+        "pnpm_config__auth": "",
+    }))
+
+    return unittest.end(env)
+
+credential_getenv_test = unittest.make(_credential_getenv_test)
+
+def _fake_rctx(npmrc, variables):
+    return struct(
+        attr = struct(npmrc = "//:.npmrc" if npmrc else None, package = "@acme/widget"),
+        watch = lambda path: None,
+        read = lambda path: npmrc,
+        getenv = lambda name, default: variables.get(name, default),
+    )
+
+def _auth_for_fetch_test(ctx):
+    env = unittest.begin(ctx)
+
+    # A literal token reads no variable, but the tarball it fetched is still
+    # private: a shared repo contents cache would hand it to anyone.
+    auth, reproducible = auth_for_fetch(
+        _fake_rctx("//npm.acme.test/:_authToken=literal\n", {}),
+        _ACME_WIDGET,
+    )
+    asserts.equals(env, {_ACME_WIDGET: _bearer("literal")}, auth)
+    asserts.false(env, reproducible)
+    _, reproducible = auth_for_fetch(_fake_rctx(_NPMRC, {}), _ACME_WIDGET)
+    asserts.false(env, reproducible)
+
+    # The setting is read on every fetch, so a set one is recorded even where
+    # it grants nothing.
+    for name in ("pnpm_config__auth", "PNPM_CONFIG__AUTH"):
+        auth, reproducible = auth_for_fetch(_fake_rctx("", {name: _ACME_SETTING}), _NPMJS_ZOD)
+        asserts.equals(env, {}, auth)
+        asserts.false(env, reproducible)
+
+    auth, reproducible = auth_for_fetch(_fake_rctx(_NPMRC, {}), _NPMJS_ZOD)
+    asserts.equals(env, {}, auth)
+    asserts.true(env, reproducible)
+
+    return unittest.end(env)
+
+auth_for_fetch_test = unittest.make(_auth_for_fetch_test)
+
 def _patched_dependencies_test(ctx):
     env = unittest.begin(ctx)
 
@@ -1063,6 +1143,8 @@ def parser_test_suite(name):
         pnpm_workspace_registries_test,
         workspace_registries_test,
         fetch_auth_test,
+        credential_getenv_test,
+        auth_for_fetch_test,
         cycles_acyclic_graph_untouched_test,
         cycles_self_edge_broken_test,
         cycles_two_node_cycle_broken_test,
