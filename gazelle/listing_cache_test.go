@@ -247,6 +247,23 @@ func TestListingCache_PatchedListingEqualsAFreshListing(t *testing.T) {
 		{name: "a deleted import target and its import", drop: []string{"app/src/b.ts"}, edit: map[string]string{
 			"app/src/a.ts": "export const a = 1;\n",
 		}},
+		{name: "deleted files, one importing the other and a file that stays", start: map[string]string{
+			"app/src/gen/x.ts": "import { y } from './y';\nimport { b } from '../b';\nexport const x = [y, b];\n",
+			"app/src/gen/y.ts": "export const y = 1;\n",
+		}, drop: []string{"app/src/gen/x.ts", "app/src/gen/y.ts"}},
+		{name: "deleted files and an import another source lost", start: map[string]string{
+			"app/src/gen/x.ts": "import { y } from './y';\nimport { b } from '../b';\nexport const x = [y, b];\n",
+			"app/src/gen/y.ts": "export const y = 1;\n",
+		}, drop: []string{"app/src/gen/x.ts", "app/src/gen/y.ts"}, edit: map[string]string{
+			"app/src/a.ts": "export const a = 1;\n",
+		}},
+		{name: "a removed import whose target reached another file", start: map[string]string{
+			"app/src/b.ts": "import { p } from '../far/p';\nexport const b = p;\n",
+			"app/far/p.ts": "import { q } from './q';\nexport const p = q;\n",
+			"app/far/q.ts": "export const q = 1;\n",
+		}, edit: map[string]string{
+			"app/src/b.ts": "export const b = 1;\n",
+		}},
 		{name: "an added file an import now finds before the index", edit: map[string]string{
 			"app/src/b.ts":   "import { d } from './lib';\nexport const b = d;\n",
 			"app/src/lib.ts": "export const d = 3;\n",

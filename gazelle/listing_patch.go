@@ -569,6 +569,8 @@ type patcher struct {
 	specOwners  map[string][]string
 	implicit    map[string]map[string]int
 	entering    []string
+	// The indexes in p.Edges of the edges the patch removed, until compactEdges takes them out.
+	removedEdges map[int]bool
 	// The files list a files-list projection now names.
 	filesList []string
 	// Reads the patch adds to the listing's, and files it drops from it.
@@ -747,18 +749,16 @@ func (t *patcher) patch(subject string) *program {
 		t.fail("nothing changed")
 		return nil
 	}
-	roots := setOf(p.Roots)
+	roots, removed := setOf(p.Roots), setOf(removedRoots)
 	for f := range deleted {
-		if roots[f] && !slices.Contains(removedRoots, f) {
+		if roots[f] && !removed[f] {
 			t.fail("a deleted root is not one the include globs or files list dropped")
 			return nil
 		}
 	}
 
-	for _, f := range slices.Sorted(maps.Keys(deleted)) {
-		t.dropFile(f)
-	}
-	p.Roots = slices.DeleteFunc(p.Roots, func(r string) bool { return slices.Contains(removedRoots, r) })
+	t.dropFiles(deleted)
+	p.Roots = slices.DeleteFunc(p.Roots, func(r string) bool { return removed[r] })
 	for _, rel := range slices.Sorted(maps.Keys(edited)) {
 		if !t.editSource(rel, edited[rel]) {
 			return nil
@@ -784,6 +784,7 @@ func (t *patcher) patch(subject string) *program {
 		return nil
 	}
 
+	t.compactEdges()
 	reached := reachable(p)
 	for f := range reached {
 		if !t.files[f] {
@@ -791,11 +792,14 @@ func (t *patcher) patch(subject string) *program {
 			return nil
 		}
 	}
+	orphaned := map[string]bool{}
 	for f := range t.files {
 		if !reached[f] {
-			t.dropFile(f)
+			orphaned[f] = true
 		}
 	}
+	t.dropFiles(orphaned)
+	t.compactEdges()
 	p.Files = slices.DeleteFunc(p.Files, func(f string) bool { return !t.files[f] })
 	p.candidates = p.candidates[:0]
 	for _, id := range slices.Sorted(maps.Keys(t.blocks)) {
@@ -817,6 +821,7 @@ func (t *patcher) index() {
 		t.blocks[c.block] = append(t.blocks[c.block], c)
 		t.nextBlock = max(t.nextBlock, c.block+1)
 	}
+	t.removedEdges = map[int]bool{}
 	t.reindexEdges()
 }
 
@@ -830,24 +835,44 @@ func (t *patcher) reindexEdges() {
 	}
 }
 
-func (t *patcher) removeEdges(drop func(i int, e explainfiles.Edge) bool) {
+// removeEdge takes one edge out of the program. p.Edges holds it until compactEdges,
+// so that the other edges keep their indexes.
+func (t *patcher) removeEdge(i int) {
+	t.removedEdges[i] = true
+	if e := t.p.Edges[i]; e.Kind.ModuleSpecifier() {
+		k := importKey{e.From, e.Specifier}
+		t.edgesOf[k] = slices.DeleteFunc(t.edgesOf[k], func(j int) bool { return j == i })
+	}
+}
+
+// compactEdges takes the removed edges out of p.Edges, which moves the edges after them.
+func (t *patcher) compactEdges() {
+	if len(t.removedEdges) == 0 {
+		return
+	}
 	kept := t.p.Edges[:0]
 	for i, e := range t.p.Edges {
-		if !drop(i, e) {
+		if !t.removedEdges[i] {
 			kept = append(kept, e)
 		}
 	}
 	t.p.Edges = kept
+	clear(t.removedEdges)
 	t.reindexEdges()
 }
 
-// dropFile takes a file out of the program with every resolution and edge from it.
-func (t *patcher) dropFile(f string) {
-	t.dropped = append(t.dropped, t.abs(f))
-	delete(t.files, f)
-	delete(t.sources, f)
+// dropFiles takes files out of the program with every resolution and edge from them.
+func (t *patcher) dropFiles(drop map[string]bool) {
+	if len(drop) == 0 {
+		return
+	}
+	for f := range drop {
+		t.dropped = append(t.dropped, t.abs(f))
+		delete(t.files, f)
+		delete(t.sources, f)
+	}
 	for k, ids := range t.blocksOf {
-		if k.from == f {
+		if drop[k.from] {
 			for _, id := range ids {
 				delete(t.blocks, id)
 				delete(t.dirty, id)
@@ -855,7 +880,12 @@ func (t *patcher) dropFile(f string) {
 			delete(t.blocksOf, k)
 		}
 	}
-	t.removeEdges(func(_ int, e explainfiles.Edge) bool { return e.From == f })
+	for i, e := range t.p.Edges {
+		if drop[e.From] {
+			t.removedEdges[i] = true
+		}
+	}
+	maps.DeleteFunc(t.edgesOf, func(k importKey, _ []int) bool { return drop[k.from] })
 }
 
 func specCounts(specs []string) map[string]int {
@@ -895,8 +925,7 @@ func (t *patcher) editSource(rel string, now cachedSource) bool {
 				delete(t.dirty, id)
 			}
 			if edges := t.edgesOf[k]; len(edges) > 0 {
-				last := edges[len(edges)-1]
-				t.removeEdges(func(i int, _ explainfiles.Edge) bool { return i == last })
+				t.removeEdge(edges[len(edges)-1])
 			}
 		}
 	}
@@ -1078,7 +1107,7 @@ func (t *patcher) reresolve(id int) bool {
 	if old := cands[len(cands)-1].resolved; old != "" {
 		for _, i := range t.edgesOf[k] {
 			if t.p.Edges[i].To == old {
-				t.removeEdges(func(j int, _ explainfiles.Edge) bool { return j == i })
+				t.removeEdge(i)
 				break
 			}
 		}
