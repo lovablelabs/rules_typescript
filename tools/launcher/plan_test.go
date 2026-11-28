@@ -418,6 +418,7 @@ func TestPlanNodeKeepsOptionalPackageAliasesAndAdjacentAddon(t *testing.T) {
 
 func vitestFixture(t *testing.T) (*Resolver, map[string]string) {
 	t.Helper()
+	t.Setenv("TESTBRIDGE_TEST_ONLY", "")
 	return fakeRunfiles(t, map[string]string{
 		"_main/tests/app/_app.vitest/config.mjs": "export default {}",
 		"_main/tests/app/app_test_files.txt": strings.Join([]string{
@@ -546,6 +547,33 @@ func TestPlanVitestPreservesExplicitFiltersAndPositionalChanged(t *testing.T) {
 				t.Fatalf("argv = %q, want unchanged filter suffix %q", plan.Argv, args)
 			}
 		})
+	}
+}
+
+func TestPlanVitestForwardsTestFilterAsANamePattern(t *testing.T) {
+	r, _ := vitestFixture(t)
+	t.Setenv("TESTBRIDGE_TEST_ONLY", "keeps an animation")
+	args := []string{"--", "a.test.ts"}
+	plan, err := MakePlan(vitestConfig(), r, args, Shard{Total: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.Cleanup()
+	i := slices.Index(plan.Argv, "--testNamePattern")
+	if i < 0 || plan.Argv[i+1] != "keeps an animation" || i > slices.Index(plan.Argv, "--") {
+		t.Errorf("argv = %q, want --testNamePattern 'keeps an animation' before the args' --", plan.Argv)
+	}
+}
+
+func TestPlanVitestOmitsTheNamePatternWithoutAFilter(t *testing.T) {
+	r, _ := vitestFixture(t)
+	plan, err := MakePlan(vitestConfig(), r, nil, Shard{Total: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.Cleanup()
+	if slices.Contains(plan.Argv, "--testNamePattern") {
+		t.Errorf("argv = %q, want no --testNamePattern", plan.Argv)
 	}
 }
 

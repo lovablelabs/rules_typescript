@@ -71,8 +71,9 @@ Bazel runfiles have no Git source history, so Vitest can otherwise report
 success without running tests. Let Bazel reuse unchanged test targets, or select
 source paths with `--test_arg=path/to/example.test.ts`, including when
 `emit = True`; name filters such as
-`--test_arg=-t --test_arg='case name'` also work. This guard covers CLI flags,
-not `test.changed` in a Vitest config.
+`--test_arg=-t --test_arg='case name'` also work, and `--test_filter` reaches
+vitest as `--testNamePattern` (a regular expression over test names). This
+guard covers CLI flags, not `test.changed` in a Vitest config.
 
 ## Files at Run Time
 

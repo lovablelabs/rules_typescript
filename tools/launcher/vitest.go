@@ -104,6 +104,12 @@ func planVitest(
 
 	flags := []string{"run", "--config", configFile}
 	flags = append(flags, coverageFlags()...)
+	// --test_filter reaches a test runner as TESTBRIDGE_TEST_ONLY; vitest
+	// takes it as a regular expression over test names. Before args, so a
+	// `--` there keeps it a flag.
+	if only := os.Getenv("TESTBRIDGE_TEST_ONLY"); only != "" {
+		flags = append(flags, "--testNamePattern", only)
+	}
 	flags = append(flags, args...)
 
 	vitestBin, err := resolveVitest(v, nodeModules)
